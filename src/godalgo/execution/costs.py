@@ -131,6 +131,29 @@ def round_trip_cost_bps(
     )
 
 
+def one_way_cost_bps(
+    *,
+    fees: FeeSchedule,
+    spread_bps: Decimal | float | str,
+    style: Style = "taker",
+) -> Decimal:
+    """Cost of a *single* crossing in basis points.
+
+    Exists so that the paper broker can charge a realistic fill without
+    reimplementing the arithmetic. A simulated book that fills at the mid shows
+    an edge that does not exist and will not survive contact with the venue --
+    but a second copy of this calculation is exactly the failure this module was
+    written to prevent, so there is one function and both callers use it.
+    """
+    spread = Decimal(str(spread_bps))
+    if spread < 0:
+        spread = Decimal("0")
+    half = spread / 2
+    if style == "taker":
+        return fees.taker_bps + half
+    return fees.maker_bps + half * ADVERSE_SELECTION_FRACTION
+
+
 @dataclass(frozen=True)
 class GateResult:
     """Whether a symbol's expected edge survives its costs."""
