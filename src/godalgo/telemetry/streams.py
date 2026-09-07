@@ -87,6 +87,11 @@ class TelemetryHub:
         self._event_seq = itertools.count(1)
         self._pulse_seq = itertools.count(1)
         self._lock = threading.Lock()
+        #: Lifetime count per pulse kind. Distinct from the ring, which is a
+        #: bounded window: "how many bars have been evaluated since start" is a
+        #: different question from "what happened recently", and answering the
+        #: first from the ring would silently under-report once it wraps.
+        self._kind_counts: dict[str, int] = {k: 0 for k in sorted(PULSE_KINDS)}
 
     # -- writing ---------------------------------------------------------
 
@@ -113,6 +118,7 @@ class TelemetryHub:
                   float(max(0.0, min(1.0, intensity))))
         with self._lock:
             self._pulses.append(p)
+            self._kind_counts[kind] = self._kind_counts.get(kind, 0) + 1
         return p
 
     # -- reading ---------------------------------------------------------
@@ -133,6 +139,12 @@ class TelemetryHub:
         return [p.as_dict() for p in items]
 
     @property
+    def kind_counts(self) -> dict[str, int]:
+        """Lifetime totals per pulse kind, unaffected by ring eviction."""
+        with self._lock:
+            return dict(self._kind_counts)
+
+    @property
     def latest_pulse_seq(self) -> int:
         with self._lock:
             return self._pulses[-1].seq if self._pulses else 0
@@ -146,3 +158,4 @@ class TelemetryHub:
         with self._lock:
             self._events.clear()
             self._pulses.clear()
+            self._kind_counts = {k: 0 for k in sorted(PULSE_KINDS)}

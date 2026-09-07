@@ -27,7 +27,8 @@ from godalgo.execution.engine import Decision, SymbolEngine
 from godalgo.execution.portfolio import PortfolioAllocator, Verdict
 from godalgo.execution.risk import RiskLimits
 from godalgo.security.credentials import Credential, CredentialStore
-from godalgo.strategy.regime import CalibrationMissing, load_calibration
+from godalgo.execution.costs import ADVERSE_SELECTION_FRACTION
+from godalgo.strategy.regime import CalibrationMissing, Regime, load_calibration
 from godalgo.strategy.signals import StrategyParams
 from godalgo.telemetry.streams import Level, TelemetryHub
 from godalgo.venues import registry
@@ -472,6 +473,14 @@ class TradingSession:
         return {
             "ts": time.time(),
             "running": self.running,
+            "uptime": (time.time() - self.started_at) if self.started_at else 0.0,
+            "limits": self._limits_block(),
+            "regime_census": self._regime_census(),
+            "costs": self._cost_summary(),
+            "venue_budget": self._venue_budget(),
+            "counters": self.telemetry.kind_counts,
+            "execution": self._execution_quality(),
+            "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),
             "venue": self.spec.display_name,
@@ -505,6 +514,142 @@ class TradingSession:
                 "last_error": self.feed.last_error,
             },
             "equity_curve": self._equity_curve[-240:],
+        }
+
+    def _limits_block(self) -> dict[str, Any]:
+        """Every hard bound, and how much of each is currently spent.
+
+        Published in full because an autonomous book that is not trading is
+        usually being held by one specific limit, and guessing which one from a
+        single "gross exposure" figure is exactly the diagnosis this panel is
+        meant to remove.
+        """
+        lim = self.limits
+        admitted = len(self.allocator.admitted_symbols)
+        return {
+            "max_gross_exposure": lim.max_gross_exposure,
+            "max_position_weight": lim.max_position_weight,
+            "max_concurrent_positions": lim.max_concurrent_positions,
+            "buying_power_reserve": lim.buying_power_reserve,
+            "daily_loss_halt": lim.daily_loss_halt,
+            "risk_per_trade": lim.risk_per_trade,
+            "target_volatility": lim.target_volatility,
+            "atr_stop_multiple": lim.atr_stop_multiple,
+            "slots_used": admitted,
+            "slots_max": lim.max_concurrent_positions,
+            "buying_power": self.allocator.buying_power(),
+            "reserved": float(self.broker.cash) * lim.buying_power_reserve,
+        }
+
+    def _drawdown(self) -> dict[str, Any]:
+        """Loss against the day's opening equity, and how close that is to the halt."""
+        start = self.day_start_equity
+        equity = self.equity()
+        if start <= 0:
+            return {"pct": 0.0, "limit": self.limits.daily_loss_halt,
+                    "used": 0.0, "day_start_equity": start}
+        pct = max(0.0, (start - equity) / start)
+        limit = self.limits.daily_loss_halt
+        return {
+            "pct": pct,
+            "limit": limit,
+            # Fraction of the halt budget consumed. This is the number that
+            # matters: 3% of a 4% limit is 75% spent, not "only 3%".
+            "used": min(1.0, pct / limit) if limit > 0 else 0.0,
+            "day_start_equity": start,
+        }
+
+    def _regime_census(self) -> dict[str, int]:
+        """What the book is currently seeing, counted by regime.
+
+        A fleet-level answer to "why is nothing trading". Fifteen symbols all
+        reading indeterminate is a different situation from fifteen still
+        warming up, and both look like "no positions" without this.
+        """
+        census: dict[str, int] = {}
+        for symbol in self.universe:
+            engine = self.engines.get(symbol)
+            regime = engine.decision.regime if engine else Regime.WARMING_UP.value
+            census[regime] = census.get(regime, 0) + 1
+        return census
+
+    def _cost_summary(self) -> dict[str, Any]:
+        """What the book is being priced at, and how much of that is assumed.
+
+        The fee tier and the spread are the two inputs that decide whether
+        anything trades at all, and an assumed value for either is reported as
+        an assumption rather than shown as a measurement.
+        """
+        fees = self.spec.fees
+        decisions = [e.decision for e in self.engines.values()
+                     if e.decision.round_trip_cost_bps > 0]
+        costs_bps = sorted(d.round_trip_cost_bps for d in decisions)
+        measured = sum(1 for d in decisions if not d.spread_assumed)
+        cheapest = min(decisions, key=lambda d: d.round_trip_cost_bps, default=None)
+        dearest = max(decisions, key=lambda d: d.round_trip_cost_bps, default=None)
+        return {
+            "maker_bps": float(fees.maker_bps),
+            "taker_bps": float(fees.taker_bps),
+            "fees_assumed": fees.assumed,
+            "fee_source": fees.source,
+            "safety_multiple": self.params.safety_multiple,
+            "adverse_selection_fraction": float(ADVERSE_SELECTION_FRACTION),
+            "median_round_trip_bps": (costs_bps[len(costs_bps) // 2]
+                                      if costs_bps else 0.0),
+            "cheapest": ({"symbol": cheapest.symbol,
+                          "bps": cheapest.round_trip_cost_bps} if cheapest else None),
+            "dearest": ({"symbol": dearest.symbol,
+                         "bps": dearest.round_trip_cost_bps} if dearest else None),
+            "spreads_measured": measured,
+            "spreads_total": len(decisions),
+        }
+
+    def _execution_quality(self) -> dict[str, Any]:
+        """Did execution cost what the cost gate assumed?
+
+        The gate admits a symbol on a *modelled* crossing cost. Measuring what
+        crossing actually cost is the only way to find out the model is wrong
+        before the P&L does.
+        """
+        fills = self.broker.fills
+        if not fills:
+            return {"count": 0, "notional": 0.0, "buys": 0, "sells": 0,
+                    "avg_slippage_bps": 0.0, "worst_slippage_bps": 0.0,
+                    "modelled_bps": 0.0, "simulated": 0}
+        slips = [f.slippage_bps for f in fills]
+        modelled = [d.round_trip_cost_bps / 2 for d in
+                    (e.decision for e in self.engines.values())
+                    if d.round_trip_cost_bps > 0]
+        return {
+            "count": len(fills),
+            "notional": float(sum(f.notional for f in fills)),
+            "buys": sum(1 for f in fills if f.side == "BUY"),
+            "sells": sum(1 for f in fills if f.side == "SELL"),
+            "avg_slippage_bps": sum(slips) / len(slips),
+            "worst_slippage_bps": max(slips),
+            # One-way modelled cost, which is what a single fill should pay.
+            "modelled_bps": (sum(modelled) / len(modelled)) if modelled else 0.0,
+            "simulated": sum(1 for f in fills if f.simulated),
+        }
+
+    def _venue_budget(self) -> dict[str, Any]:
+        """The venue's own view of request weight, plus measured clock drift.
+
+        A repeated rate-limit ban lengthens each time, so utilisation is worth
+        watching before it becomes a ban rather than after.
+        """
+        client = self.client
+        if client is None:
+            return {"used_weight": 0, "limit": 0, "utilisation": 0.0,
+                    "clock_offset_ms": 0, "clock_measured": False,
+                    "order_count_10s": 0}
+        return {
+            "used_weight": client.budget.used_weight,
+            "limit": client.budget.limit,
+            "utilisation": client.budget.utilisation,
+            "order_count_10s": client.budget.order_count_10s,
+            "clock_offset_ms": client.time_offset_ms,
+            "clock_measured": client.time_offset_measured,
         }
 
     def _health_score(self) -> dict[str, Any]:

@@ -232,6 +232,8 @@
 
   function renderPositions(s) {
     var body = $('pos-body');
+    $('pos-note').textContent = s.positions.length
+      ? s.positions.length + ' open' : 'flat';
     if (!s.positions.length) {
       body.innerHTML = '<tr><td colspan="4" class="dimmer">no open positions</td></tr>';
       return;
@@ -252,13 +254,43 @@
       return;
     }
     body.innerHTML = s.fills.map(function (f) {
+      var slip = f.slippage_bps || 0;
+      var slipTone = slip > 5 ? 'down' : slip <= 0 ? 'up' : 'muted';
       return '<tr><td class="dimmer">' + fmtTime(f.ts) + '</td>' +
         '<td>' + esc(f.symbol) + '</td>' +
         '<td class="' + (f.side === 'BUY' ? 'up' : 'down') + '">' + esc(f.side) +
         (f.simulated ? ' <span class="dimmer">sim</span>' : '') + '</td>' +
         '<td class="num">' + esc(f.quantity) + '</td>' +
-        '<td class="num">' + esc(f.price) + '</td></tr>';
+        '<td class="num">' + esc(f.price) + '</td>' +
+        '<td class="num ' + slipTone + '">' + slip.toFixed(1) + '</td></tr>';
     }).join('');
+  }
+
+  /* Did crossing cost what the cost gate assumed? The gate admits a symbol on a
+   * modelled crossing cost; measuring the realised one is the only way to catch
+   * a mis-calibrated model before the P&L does. */
+  function renderExecution(s) {
+    var x = s.execution || {count: 0};
+    if (!x.count) {
+      $('exec-grid').innerHTML =
+        '<div style="grid-column:1/-1"><span class="k">execution quality</span>' +
+        '<span class="v dimmer" style="font-size:10px">no fills yet — measured ' +
+        'against the modelled crossing cost once there are</span></div>';
+      $('exec-note').textContent = 'fills';
+      return;
+    }
+    var drift = x.avg_slippage_bps - x.modelled_bps;
+    var tone = Math.abs(drift) > 3 ? 'bad' : Math.abs(drift) > 1 ? 'warn' : 'good';
+    $('exec-grid').innerHTML =
+      cell('fills', String(x.count), '', x.simulated ? x.simulated + ' sim' : 'live') +
+      cell('notional', fmtMoney(x.notional)) +
+      cell('buy / sell', x.buys + ' / ' + x.sells) +
+      cell('avg slip', x.avg_slippage_bps.toFixed(1) + 'bp', tone) +
+      cell('modelled', x.modelled_bps.toFixed(1) + 'bp') +
+      cell('worst slip', x.worst_slippage_bps.toFixed(1) + 'bp',
+           x.worst_slippage_bps > 10 ? 'bad' : '');
+    $('exec-note').textContent = 'realised ' + x.avg_slippage_bps.toFixed(1) +
+      'bp vs modelled ' + x.modelled_bps.toFixed(1) + 'bp';
   }
 
   function renderLog(s) {
@@ -275,7 +307,8 @@
 
   function renderHealth(s) {
     var h = s.health;
-    $('health-note').textContent = 'score ' + (h.score * 100).toFixed(0) + '%';
+    $('health-note').textContent = 'score ' + (h.score * 100).toFixed(0) + '%' +
+      (state.ecg.length < 240 ? ' · ' + state.ecg.length + 's history' : '');
     $('hz-age').textContent = h.data_age === null ? 'no data' : h.data_age + 's';
     $('hz-reconnects').textContent = h.reconnects;
     $('hz-errors').textContent = h.errors;
@@ -299,8 +332,13 @@
     ctx.shadowBlur = 7; ctx.shadowColor = col;
     ctx.beginPath();
     var n = state.ecg.length;
+    // While history is short, spread the samples across the full width rather
+    // than anchoring them to the right edge -- five samples pinned to the right
+    // paint a sliver on an otherwise blank panel, which reads as a broken
+    // instrument rather than as one that has just started.
+    var step = n < 240 ? (n > 1 ? w / (n - 1) : w) : (w / 240);
     for (var i = 0; i < n; i++) {
-      var x = w - (n - 1 - i) * (w / 240);
+      var x = w - (n - 1 - i) * step;
       // A beat shape rather than a plain line, so a flatline reads as a
       // flatline at a glance.
       var beat = Math.sin(i * 1.3) * (0.10 + state.ecg[i] * 0.34);
@@ -343,6 +381,194 @@
     ctx.fillText(fmtMoney(last), 6, 12);
   }
 
+  /* ---------- risk, limits and the halt control ---------- */
+
+  /* A gauge shows a spent fraction against its own ceiling, with the ceiling
+   * marked. "60% of equity deployed" means nothing without the 80% ceiling
+   * beside it. */
+  function gauge(label, value, ceiling, text, tone) {
+    var pct = ceiling > 0 ? Math.min(100, (value / ceiling) * 100) : 0;
+    return '<div class="gauge ' + (tone || '') + '">' +
+      '<span class="g-label">' + esc(label) + '</span>' +
+      '<span class="g-value">' + esc(text) + '</span>' +
+      '<span class="g-track"><i class="g-fill" style="width:' + pct.toFixed(1) + '%"></i>' +
+      '<i class="g-mark" style="right:0"></i></span>' +
+      '</div>';
+  }
+
+  function cell(k, v, tone, sub) {
+    return '<div><span class="k">' + esc(k) + '</span><span class="v ' +
+      (tone || '') + '">' + esc(v) +
+      (sub ? ' <small>' + esc(sub) + '</small>' : '') + '</span></div>';
+  }
+
+  function renderRisk(s) {
+    var L = s.limits, dd = s.drawdown;
+
+    var grossTone = s.gross_exposure >= L.max_gross_exposure * 0.95 ? 'bad'
+      : s.gross_exposure >= L.max_gross_exposure * 0.75 ? 'warn' : '';
+    var slotTone = L.slots_used >= L.slots_max ? 'warn' : '';
+    var ddTone = dd.used >= 0.75 ? 'bad' : dd.used >= 0.4 ? 'warn' : 'good';
+
+    $('gauges').innerHTML =
+      gauge('gross exposure', s.gross_exposure, L.max_gross_exposure,
+            (s.gross_exposure * 100).toFixed(1) + '% of ' +
+            (L.max_gross_exposure * 100).toFixed(0) + '%', grossTone) +
+      gauge('concurrency slots', L.slots_used, L.slots_max,
+            L.slots_used + ' of ' + L.slots_max, slotTone) +
+      gauge('daily loss budget', dd.used, 1,
+            (dd.pct * 100).toFixed(2) + '% of ' + (dd.limit * 100).toFixed(0) + '%',
+            ddTone);
+
+    $('limit-grid').innerHTML =
+      cell('budget / sym', (s.per_symbol_budget * 100).toFixed(1) + '%') +
+      cell('position cap', (L.max_position_weight * 100).toFixed(0) + '%') +
+      cell('buying power', fmtMoney(L.buying_power),
+           '', (L.buying_power_reserve * 100).toFixed(0) + '% held') +
+      cell('risk / trade', (L.risk_per_trade * 100).toFixed(2) + '%') +
+      cell('target vol', (L.target_volatility * 100).toFixed(0) + '%') +
+      cell('ATR stop', L.atr_stop_multiple + 'x');
+
+    $('risk-note').textContent = s.halted ? 'HALTED' : 'live bounds';
+    var btn = $('btn-halt');
+    btn.textContent = s.halted ? 'Release book' : 'Halt book';
+    btn.className = s.halted ? 'armed' : 'danger';
+    $('halt-state').textContent = s.halted
+      ? s.halt_reason
+      : 'a halt blocks new exposure; exits always pass';
+  }
+
+  /* ---------- regime census ---------- */
+
+  var REGIME_LABEL = {
+    trending: 'trending', mean_reverting: 'mean reverting',
+    indeterminate: 'indeterminate', contradicted: 'contradicted',
+    warming_up: 'warming up'
+  };
+  var REGIME_COLOR = {
+    trending: '#35d69b', mean_reverting: '#c678f0', indeterminate: '#46536a',
+    contradicted: '#e8b444', warming_up: '#35a7ff'
+  };
+
+  function renderCensus(s) {
+    var census = s.regime_census || {};
+    var total = Object.keys(census).reduce(function (a, k) { return a + census[k]; }, 0);
+    var order = ['trending', 'mean_reverting', 'indeterminate', 'contradicted',
+                 'warming_up'];
+    $('census').innerHTML = order.map(function (k) {
+      var n = census[k] || 0;
+      var pct = total ? (100 * n / total) : 0;
+      return '<div class="census-row">' +
+        '<span class="c-name">' + REGIME_LABEL[k] + '</span>' +
+        '<span class="c-track"><i class="c-fill" style="width:' + pct.toFixed(1) +
+        '%;background:' + REGIME_COLOR[k] + '"></i></span>' +
+        '<span class="c-count">' + n + '</span></div>';
+    }).join('');
+    // "Warming up" resolves itself; the rest are decisions. Say which is which.
+    var warming = census.warming_up || 0;
+    $('census-note').textContent = warming
+      ? warming + ' still warming up'
+      : total + ' evaluated';
+  }
+
+  /* ---------- execution and costs ---------- */
+
+  function renderCosts(s) {
+    var c = s.costs;
+    var feeTone = c.fees_assumed ? 'warn' : 'good';
+    $('cost-grid').innerHTML =
+      cell('taker fee', c.taker_bps.toFixed(1) + 'bp', feeTone,
+           c.fees_assumed ? 'assumed' : 'confirmed') +
+      cell('maker fee', c.maker_bps.toFixed(1) + 'bp', feeTone) +
+      cell('median RT', c.median_round_trip_bps.toFixed(1) + 'bp') +
+      cell('safety multiple', c.safety_multiple + 'x') +
+      cell('adv. selection', c.adverse_selection_fraction.toFixed(2),
+           'warn', 'assumed') +
+      cell('spreads live', c.spreads_measured + '/' + c.spreads_total,
+           c.spreads_measured < c.spreads_total ? 'warn' : 'good');
+
+    var parts = [];
+    if (c.cheapest) parts.push('cheapest ' + c.cheapest.symbol + ' ' +
+                               c.cheapest.bps.toFixed(1) + 'bp');
+    if (c.dearest) parts.push('dearest ' + c.dearest.symbol + ' ' +
+                              c.dearest.bps.toFixed(1) + 'bp');
+    $('cost-note').textContent = parts.join(' · ') || '—';
+
+    // An assumption nobody is told about becomes a fact by default.
+    var warn = $('cost-warn');
+    if (c.fees_assumed) {
+      warn.innerHTML = '<div class="notice" style="margin:0 9px 8px"></div>';
+      warn.firstChild.textContent =
+        'Fee tier is ASSUMED, not confirmed for this account (' + c.fee_source +
+        '). It moves the trade/no-trade line directly.';
+    } else {
+      warn.innerHTML = '';
+    }
+  }
+
+  /* ---------- session statistics ---------- */
+
+  function fmtDuration(sec) {
+    if (!sec || sec < 1) return '—';
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60),
+        x = Math.floor(sec % 60);
+    return h ? h + 'h ' + m + 'm' : m ? m + 'm ' + x + 's' : x + 's';
+  }
+  function fmtCount(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+    return String(n || 0);
+  }
+
+  function renderStats(s) {
+    var c = s.counters || {};
+    var evaluated = (c.decision || 0) + (c.refused || 0) + (c.cap || 0) +
+                    (c.warmup || 0);
+    var acted = c.order || 0;
+    var refusalRate = evaluated ? (100 * (c.refused || 0) / evaluated) : 0;
+
+    $('stat-grid').innerHTML =
+      '<div><span class="k">bars eval</span><span class="v">' +
+        fmtCount(evaluated) + '</span></div>' +
+      '<div><span class="k">decisions</span><span class="v">' +
+        fmtCount(c.decision || 0) + '</span></div>' +
+      '<div><span class="k">refused</span><span class="v">' +
+        fmtCount(c.refused || 0) + '</span></div>' +
+      '<div><span class="k">capped</span><span class="v">' +
+        fmtCount(c.cap || 0) + '</span></div>' +
+      '<div><span class="k">orders</span><span class="v">' +
+        fmtCount(acted) + '</span></div>' +
+      '<div><span class="k">refusal rate</span><span class="v">' +
+        refusalRate.toFixed(0) + '%</span></div>';
+
+    // "Nothing trading" is the normal case, so say so rather than leaving a
+    // zero that reads as a fault.
+    $('perf-note').textContent = acted
+      ? fmtCount(acted) + ' orders · ' + fmtDuration(s.uptime)
+      : (evaluated ? 'scanning, nothing has cleared its costs yet'
+                   : 'no bars evaluated yet');
+  }
+
+  /* ---------- footer ---------- */
+
+  function renderFooter(s) {
+    var v = s.venue_budget || {};
+    $('foot-venue').textContent = s.venue + ' · ' + s.mode;
+    $('foot-weight').textContent = v.limit
+      ? 'weight ' + v.used_weight + '/' + v.limit +
+        ' (' + (v.utilisation * 100).toFixed(0) + '%)'
+      : 'weight —';
+    $('foot-clock').textContent = v.clock_measured
+      ? 'clock ' + (v.clock_offset_ms >= 0 ? '+' : '') + v.clock_offset_ms + 'ms'
+      : 'clock unmeasured';
+    var c = s.counters || {};
+    $('foot-work').textContent =
+      fmtCount(c.scan || 0) + ' scans · ' + fmtCount(c.decision || 0) +
+      ' decisions · ' + fmtCount(c.order || 0) + ' orders';
+    $('foot-uptime').textContent = s.running
+      ? 'up ' + fmtDuration(s.uptime) : 'stopped';
+  }
+
   /* ---------- websocket ---------- */
 
   function connect() {
@@ -379,6 +605,12 @@
     renderLog(s);
     renderHealth(s);
     renderPnl(s);
+    renderRisk(s);
+    renderCensus(s);
+    renderCosts(s);
+    renderStats(s);
+    renderExecution(s);
+    renderFooter(s);
 
     cluster.setUniverse(s.watchlist.map(function (r) { return r.symbol; }));
     var pos = {};
@@ -448,6 +680,13 @@
       $('live-error').innerHTML = '<div class="notice bad"></div>';
       $('live-error').firstChild.textContent = err.message;
     });
+  };
+
+  $('btn-halt').onclick = function () {
+    var halted = state.snapshot && state.snapshot.halted;
+    post('/api/session/halt', {
+      halted: !halted, reason: 'halted by the operator from the terminal'
+    }).catch(alertErr);
   };
 
   $('btn-conn').onclick = function () {

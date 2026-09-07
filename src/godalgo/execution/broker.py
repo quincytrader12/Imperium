@@ -68,13 +68,32 @@ class Fill:
     client_order_id: str
     simulated: bool
     note: str = ""
+    #: The price the decision was taken at. Without it slippage is not
+    #: measurable after the fact, and "did execution cost what the cost gate
+    #: assumed" is the question that decides whether the gate is calibrated.
+    reference_price: Decimal = Decimal("0")
+
+    @property
+    def slippage_bps(self) -> float:
+        """Signed cost of crossing, in basis points. Positive is worse."""
+        if self.reference_price <= 0:
+            return 0.0
+        delta = (self.price - self.reference_price) / self.reference_price
+        signed = delta if self.side == "BUY" else -delta
+        return float(signed) * 10_000
+
+    @property
+    def notional(self) -> Decimal:
+        return self.quantity * self.price
 
     def as_dict(self) -> dict[str, Any]:
         return {"symbol": self.symbol, "side": self.side,
                 "quantity": format_decimal(self.quantity),
                 "price": format_decimal(self.price), "ts": self.ts,
                 "mode": self.mode.value, "simulated": self.simulated,
-                "client_order_id": self.client_order_id, "note": self.note}
+                "client_order_id": self.client_order_id, "note": self.note,
+                "slippage_bps": round(self.slippage_bps, 2),
+                "notional": float(self.notional)}
 
 
 class Broker(Protocol):
@@ -133,7 +152,7 @@ class _BaseBroker:
     _QUANTUM = Decimal("0.00000001")
 
     def _record(self, symbol: str, qty: Decimal, price: Decimal, coid: str,
-                note: str = "") -> Fill:
+                note: str = "", reference_price: Decimal | None = None) -> Fill:
         qty = qty.quantize(self._QUANTUM)
         price = price.quantize(self._QUANTUM)
         pos = self.position(symbol)
@@ -152,7 +171,9 @@ class _BaseBroker:
                 pos.quantity = Decimal("0")
                 pos.avg_price = Decimal("0")
         fill = Fill(symbol, side, abs(qty), price, time.time(), self.mode, coid,
-                    self.simulated, note)
+                    self.simulated, note,
+                    reference_price=(reference_price if reference_price is not None
+                                     else price))
         self.fills.append(fill)
         return fill
 
@@ -224,7 +245,8 @@ class PaperBroker(_BaseBroker):
         fill_price = to_decimal(price) * (1 + slip if delta > 0 else 1 - slip)
         coid = BinanceSpotClient.new_client_order_id("paper")
         return self._record(symbol, delta, fill_price, coid,
-                            note="simulated fill, charged taker cost")
+                            note="simulated fill, charged taker cost",
+                            reference_price=to_decimal(price))
 
 
 class LiveBroker(_BaseBroker):
@@ -323,7 +345,8 @@ class LiveBroker(_BaseBroker):
         signed = executed if side == "BUY" else -executed
         return self._record(symbol, signed, fill_price,
                             result.get("clientOrderId", coid),
-                            note=f"venue order {result.get('orderId')}")
+                            note=f"venue order {result.get('orderId')}",
+                            reference_price=to_decimal(price))
 
 
 async def switch_mode(

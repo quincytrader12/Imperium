@@ -68,3 +68,18 @@ def test_intensity_is_clamped():
     hub = TelemetryHub()
     assert hub.pulse("X", "scan", "r", 5.0).intensity == 1.0
     assert hub.pulse("X", "scan", "r", -3.0).intensity == 0.0
+
+
+def test_lifetime_kind_counts_survive_ring_eviction():
+    """Prevents: answering "how many bars have been evaluated" from the bounded
+    ring, which silently under-reports the moment it wraps. The counts are
+    lifetime totals; the ring is a recent window, and they are different
+    questions."""
+    hub = TelemetryHub(pulse_capacity=8)
+    for _ in range(500):
+        hub.pulse("BTCUSDT", "scan", "r")
+    for _ in range(7):
+        hub.pulse("BTCUSDT", "order", "filled")
+    assert hub.pulse_count == 8              # the ring wrapped many times over
+    assert hub.kind_counts["scan"] == 500    # the totals did not
+    assert hub.kind_counts["order"] == 7

@@ -122,7 +122,9 @@ main {
 .scroll::-webkit-scrollbar-thumb { background: #1c2636; border-radius: 4px; }
 
 #cluster-panel { grid-column: 2; grid-row: 1; position: relative; }
-#watchlist-panel { grid-column: 1; grid-row: 1 / span 2; }
+#left-panel { grid-column: 1; grid-row: 1 / span 2; display: flex;
+              flex-direction: column; gap: 1px; background: var(--line);
+              min-height: 0; }
 #right-panel { grid-column: 3; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 1px; background: var(--line); }
 #bottom-panel { grid-column: 2; grid-row: 2; display: grid;
                 grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr);
@@ -282,8 +284,107 @@ input::placeholder { color: var(--dimmer); }
     grid-template-rows: minmax(0, 300px) minmax(0, 260px) minmax(0, 260px) minmax(0, 220px);
     overflow: auto;
   }
-  #cluster-panel   { grid-column: 1; grid-row: 1; }
-  #watchlist-panel { grid-column: 1; grid-row: 2; }
+  #cluster-panel { grid-column: 1; grid-row: 1; }
+  #left-panel    { grid-column: 1; grid-row: 2; }
   #right-panel     { grid-column: 1; grid-row: 3; }
   #bottom-panel    { grid-column: 1; grid-row: 4; }
+}
+
+
+/* ---------- gauges, limits, census, stats ---------- */
+
+.gauges { padding: 6px 9px 2px; display: flex; flex-direction: column; gap: 6px; }
+
+.gauge { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; }
+.gauge .g-label { color: var(--dim); font-size: 9.5px; letter-spacing: .6px;
+                  text-transform: uppercase; }
+.gauge .g-value { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums;
+                  text-align: right; }
+.gauge .g-track { grid-column: 1 / -1; height: 5px; background: #121a26;
+                  border-radius: 3px; overflow: hidden; position: relative; }
+.gauge .g-fill { display: block; height: 100%; background: var(--accent);
+                 transition: width .35s ease; }
+.gauge.warn .g-fill { background: var(--warn); }
+.gauge.bad  .g-fill { background: var(--bad); }
+.gauge.good .g-fill { background: var(--good); }
+/* The ceiling mark, so a bar that is 60% full against an 80% ceiling reads
+   correctly rather than looking like 60% of everything. */
+.gauge .g-mark { position: absolute; top: -1px; bottom: -1px; width: 1px;
+                 background: var(--line-hot); }
+
+.limit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 4px 8px;
+  padding: 6px 9px 8px;
+}
+.limit-grid > div { min-width: 0; }
+.limit-grid .k { color: var(--dimmer); font-size: 9px; letter-spacing: .7px;
+                 text-transform: uppercase; display: block;
+                 white-space: normal; overflow-wrap: anywhere; }
+.limit-grid .v { color: var(--text); font-size: 12px;
+                 font-variant-numeric: tabular-nums; white-space: nowrap; }
+.limit-grid .v.warn { color: var(--warn); }
+.limit-grid .v.bad  { color: var(--bad); }
+.limit-grid .v.good { color: var(--good); }
+/* The qualifier ("assumed", "15% held") sits on its own line. Inline, it made
+   the widest cells overflow their track by a few pixels at narrow widths -- and
+   a value whose caveat is clipped is worse than one without it. */
+.limit-grid .v small { color: var(--dimmer); font-size: 9px; display: block;
+                       line-height: 1.2; }
+
+.halt-bar { display: flex; align-items: center; gap: 8px; padding: 0 9px 8px;
+            font-size: 9.5px; }
+.halt-bar button { white-space: nowrap; flex: 0 0 auto; }
+.halt-bar .dimmer { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+button.armed { background: #3a1016; border-color: var(--bad); color: #ffd7db; }
+
+.census { padding: 6px 9px 9px; display: flex; flex-direction: column; gap: 4px; }
+.census-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) 26px;
+              gap: 7px; align-items: center; font-size: 10.5px; }
+.census-row .c-name { color: var(--dim); white-space: nowrap; overflow: hidden;
+                      text-overflow: ellipsis; }
+.census-row .c-track { height: 6px; background: #121a26; border-radius: 3px;
+                       overflow: hidden; }
+.census-row .c-fill { display: block; height: 100%; }
+.census-row .c-count { text-align: right; color: var(--text);
+                       font-variant-numeric: tabular-nums; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
+  gap: 3px 8px;
+  padding: 4px 9px 8px;
+  flex: 0 0 auto;
+}
+.stat-grid .k { color: var(--dimmer); font-size: 9px; letter-spacing: .7px;
+                text-transform: uppercase; display: block; }
+.stat-grid .v { color: var(--text); font-size: 12px;
+                font-variant-numeric: tabular-nums; }
+#pnl { flex: 1 1 auto; min-height: 60px; width: 100%; display: block; }
+
+/* ---------- footer ---------- */
+
+footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, #090d14, #06080c);
+  font-size: 10px;
+  color: var(--dimmer);
+  white-space: nowrap;
+  overflow: hidden;
+}
+footer .built-by { color: var(--dim); }
+footer .built-by b { color: var(--accent-2); font-weight: 600; letter-spacing: .4px; }
+footer .foot-sep { color: #1e2836; }
+footer .foot-right { margin-left: auto; }
+footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 900px) {
+  footer .foot-sep, footer #foot-work, footer #foot-clock { display: none; }
 }

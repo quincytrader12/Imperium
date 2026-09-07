@@ -94,10 +94,16 @@ BINANCE_SPOT = VenueSpec(
         source="Binance VIP-0 published spot schedule (not confirmed for this account)",
     ),
     allows_short=False,
+    # The scanned universe. Deliberately wider than the concurrency limit: the
+    # scanner's job is to reject most of what it sees, so a universe barely
+    # larger than the number of slots gives it nothing to choose between.
     default_universe=(
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT",
         "MATICUSDT", "DOTUSDT", "ATOMUSDT", "NEARUSDT", "APTUSDT",
+        "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT", "SEIUSDT",
+        "TIAUSDT", "FILUSDT", "RUNEUSDT", "AAVEUSDT", "UNIUSDT",
+        "ETCUSDT", "ICPUSDT", "STXUSDT", "ALGOUSDT", "GRTUSDT",
     ),
 )
 

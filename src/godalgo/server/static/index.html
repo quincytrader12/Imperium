@@ -43,23 +43,42 @@
 <div id="banner" hidden></div>
 
 <main>
-  <!-- ---------------- watchlist ---------------- -->
-  <section class="panel" id="watchlist-panel">
-    <h2>Watchlist <span class="note" id="wl-note">—</span></h2>
-    <div class="scroll">
-      <table id="watchlist">
-        <thead>
-          <tr>
-            <th>Symbol</th>
-            <th class="num">Price</th>
-            <th class="num">24h</th>
-            <th>Verdict</th>
-          </tr>
-        </thead>
-        <tbody id="wl-body"></tbody>
-      </table>
-    </div>
-  </section>
+  <!-- ---------------- left column ---------------- -->
+  <div id="left-panel">
+    <section class="panel" style="flex:1 1 auto">
+      <h2>Watchlist <span class="note" id="wl-note">—</span></h2>
+      <div class="scroll">
+        <table id="watchlist">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th class="num">Price</th>
+              <th class="num">24h</th>
+              <th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="wl-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Risk &amp; limits
+        <span class="note" id="risk-note">—</span>
+      </h2>
+      <div class="gauges" id="gauges"></div>
+      <div class="limit-grid" id="limit-grid"></div>
+      <div class="halt-bar">
+        <button id="btn-halt" class="danger" title="Blocks new and increased exposure. Reductions and exits always pass.">Halt book</button>
+        <span class="dimmer" id="halt-state">a halt blocks new exposure; exits always pass</span>
+      </div>
+    </section>
+
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Regime census <span class="note" id="census-note">—</span></h2>
+      <div class="census" id="census"></div>
+    </section>
+  </div>
 
   <!-- ---------------- neural cluster ---------------- -->
   <section class="panel" id="cluster-panel">
@@ -98,8 +117,14 @@
       </div>
     </section>
 
-    <section class="panel" style="flex:1 1 45%">
-      <h2>Positions</h2>
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Execution &amp; costs <span class="note" id="cost-note">—</span></h2>
+      <div class="limit-grid" id="cost-grid"></div>
+      <div id="cost-warn"></div>
+    </section>
+
+    <section class="panel" style="flex:1 1 auto; min-height:120px">
+      <h2>Positions <span class="note" id="pos-note">—</span></h2>
       <div class="scroll">
         <table>
           <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Value</th><th class="num">P&amp;L</th></tr></thead>
@@ -112,18 +137,20 @@
   <!-- ---------------- bottom ---------------- -->
   <div id="bottom-panel">
     <section class="panel">
-      <h2>P&amp;L</h2>
-      <canvas id="pnl" height="150"></canvas>
+      <h2>Performance <span class="note" id="perf-note">—</span></h2>
+      <canvas id="pnl"></canvas>
+      <div class="stat-grid" id="stat-grid"></div>
     </section>
 
     <section class="panel">
-      <h2>Journal <span class="note">fills</span></h2>
-      <div class="scroll">
+      <h2>Journal <span class="note" id="exec-note">fills</span></h2>
+      <div class="scroll" style="flex:1 1 auto">
         <table>
-          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th></tr></thead>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Slip</th></tr></thead>
           <tbody id="fill-body"></tbody>
         </table>
       </div>
+      <div class="limit-grid" id="exec-grid" style="border-top:1px solid var(--line)"></div>
     </section>
 
     <section class="panel">
@@ -132,6 +159,19 @@
     </section>
   </div>
 </main>
+
+<footer>
+  <span class="built-by">GODALGO — built by <b>Quincy Gininda</b></span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-venue">venue —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-weight">weight —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-clock">clock —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-work">—</span>
+  <span class="foot-right dimmer" id="foot-uptime">—</span>
+</footer>
 
 <!-- ---------------- connections modal ---------------- -->
 <div class="modal-backdrop" id="conn-modal" hidden>

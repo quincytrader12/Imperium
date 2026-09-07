@@ -133,3 +133,90 @@ def test_a_missing_credential_file_does_not_break_the_page(app_client):
     """Prevents: a first run with no ~/.godalgo failing to serve the UI."""
     assert app_client.get("/").status_code == 200
     assert app_client.get("/api/connections").json()["credentials"] == []
+
+
+def test_the_snapshot_carries_the_operational_panels(app_client):
+    """Prevents: a panel silently rendering nothing because a snapshot key was
+    renamed. Every block the terminal's risk, cost, census, execution and footer
+    panels read from must be present from the first snapshot, before any session
+    has started."""
+    s = app_client.get("/api/snapshot").json()
+    for key in ("limits", "regime_census", "costs", "venue_budget", "counters",
+                "drawdown", "execution", "uptime"):
+        assert key in s, f"snapshot is missing {key!r}"
+    for key in ("max_gross_exposure", "max_concurrent_positions", "slots_used",
+                "slots_max", "buying_power", "buying_power_reserve",
+                "daily_loss_halt", "risk_per_trade", "atr_stop_multiple"):
+        assert key in s["limits"], f"limits is missing {key!r}"
+    for key in ("maker_bps", "taker_bps", "fees_assumed", "fee_source",
+                "safety_multiple", "spreads_measured", "spreads_total"):
+        assert key in s["costs"], f"costs is missing {key!r}"
+
+
+def test_the_daily_loss_gauge_reports_budget_spent_not_raw_loss():
+    """Prevents: showing '3% down' beside a 4% halt limit and letting an operator
+    read that as comfortable. The gauge reports the fraction of the halt budget
+    consumed -- 3% of a 4% limit is 75% spent, not 3%.
+
+    Driven through a session with a real loss, because asserting only that the
+    figure lies in [0, 1] is satisfied by the raw loss too, and a mutation test
+    showed that version passing with the fix reverted.
+    """
+    from decimal import Decimal
+
+    from godalgo.execution.broker import PaperBroker
+    from godalgo.execution.risk import RiskLimits
+    from godalgo.session import TradingSession
+
+    session = TradingSession(limits=RiskLimits(daily_loss_halt=0.04))
+    session.broker = PaperBroker(session.spec, Decimal("9700"))
+    session.day_start_equity = 10_000.0          # a 3% loss against a 4% limit
+
+    dd = session.snapshot()["drawdown"]
+    assert set(dd) >= {"pct", "limit", "used", "day_start_equity"}
+    assert dd["pct"] == pytest.approx(0.03, abs=1e-6)
+    assert dd["limit"] == pytest.approx(0.04)
+    assert dd["used"] == pytest.approx(0.75, abs=1e-6), (
+        "the gauge must report the share of the halt budget spent, not the raw "
+        f"loss; got {dd['used']}"
+    )
+
+
+def test_the_daily_loss_budget_is_capped_at_fully_spent():
+    """Prevents: a gauge that renders past 100% once the halt limit is breached,
+    which would overflow its own track."""
+    from decimal import Decimal
+
+    from godalgo.execution.broker import PaperBroker
+    from godalgo.execution.risk import RiskLimits
+    from godalgo.session import TradingSession
+
+    session = TradingSession(limits=RiskLimits(daily_loss_halt=0.04))
+    session.broker = PaperBroker(session.spec, Decimal("8000"))
+    session.day_start_equity = 10_000.0          # a 20% loss on a 4% limit
+    assert session.snapshot()["drawdown"]["used"] == 1.0
+
+
+def test_the_halt_control_blocks_new_exposure_without_placing_an_order(app_client):
+    """Prevents: an operator with no way to stop the book short of killing the
+    session. A halt is a reduction control: it blocks new and increased exposure
+    and still lets exits through, and it submits nothing to the venue."""
+    r = app_client.post("/api/session/halt", json={"halted": True, "reason": "test"})
+    assert r.status_code == 200 and r.json()["halted"] is True
+    assert app_client.get("/api/snapshot").json()["halted"] is True
+    r = app_client.post("/api/session/halt", json={"halted": False})
+    assert r.json()["halted"] is False
+
+
+def test_the_scanned_universe_is_wider_than_the_concurrency_limit(app_client):
+    """Prevents: a scanner with nothing to choose between. Its job is to reject
+    most of what it sees, so a universe barely larger than the number of slots
+    makes selection meaningless."""
+    s = app_client.get("/api/snapshot").json()
+    assert len(s["watchlist"]) >= 3 * s["limits"]["max_concurrent_positions"]
+
+
+def test_the_ui_credits_its_author(app_client):
+    """Prevents: losing the attribution in a future layout change."""
+    page = app_client.get("/").text
+    assert "Quincy Gininda" in page

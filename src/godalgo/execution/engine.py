@@ -60,6 +60,10 @@ class Decision:
     expected_edge_bps: float = 0.0
     round_trip_cost_bps: float = 0.0
     required_bps: float = 0.0
+    spread_bps: float = 0.0
+    #: True when the spread is a default rather than a live quote. Surfaced so
+    #: the operator can tell a priced symbol from a guessed one.
+    spread_assumed: bool = True
     clamp_binding: str = "none"
     clamp_reason: str = ""
     sizing_reason: str = ""
@@ -109,6 +113,8 @@ class Decision:
             "expected_edge_bps": round(self.expected_edge_bps, 2),
             "round_trip_cost_bps": round(self.round_trip_cost_bps, 2),
             "required_bps": round(self.required_bps, 2),
+            "spread_bps": round(self.spread_bps, 3),
+            "spread_assumed": self.spread_assumed,
             "clamp_binding": self.clamp_binding,
             "clamp_reason": self.clamp_reason,
             "sizing_reason": self.sizing_reason,
@@ -193,6 +199,8 @@ class SymbolEngine:
             self.symbol, self.spec, bid=self.bid, ask=self.ask, style="taker",
         )
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
+        d.spread_bps = float(estimate.spread_bps)
+        d.spread_assumed = estimate.spread_is_assumed
         d.cost_warnings = estimate.warnings
         d.expected_edge_bps = signal.expected_edge_bps
 

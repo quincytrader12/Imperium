@@ -114,6 +114,11 @@ class AttachRequest(BaseModel):
     name: str | None = None
 
 
+class HaltRequest(BaseModel):
+    halted: bool
+    reason: str = "halted by the operator"
+
+
 def create_app(session: TradingSession | None = None) -> FastAPI:
     state: dict[str, Any] = {}
 
@@ -282,6 +287,27 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
             raise HTTPException(502, detail=exc.operator_text()) from None
         return JSONResponse({"mode": session.broker.mode.value,
                              "phrase_required": LIVE_CONFIRMATION_PHRASE})
+
+    @app.post("/api/session/halt")
+    async def set_halt(body: HaltRequest) -> JSONResponse:
+        """Stop the book taking new or increased exposure.
+
+        This is a *reduction* control, not an order path: a halt blocks new and
+        increased exposure and explicitly still lets reductions through, so it
+        cannot trap a position. Nothing here submits an order, which is what
+        keeps the "the UI never places an order" rule intact -- flattening
+        happens through a mode switch, which already exists.
+        """
+        session = get_session()
+        session.allocator.set_halt(body.halted, body.reason if body.halted else "")
+        session.telemetry.event(
+            Level.WARN if body.halted else Level.GOOD, "risk",
+            f"the book was {'HALTED' if body.halted else 'released'} by the operator",
+            detail=body.reason if body.halted else "")
+        if body.halted:
+            session.telemetry.pulse("BOOK", "halt", body.reason, 1.0)
+        return JSONResponse({"halted": session.allocator.halted,
+                             "reason": session.allocator.halt_reason})
 
     @app.get("/api/snapshot")
     async def snapshot() -> JSONResponse:
