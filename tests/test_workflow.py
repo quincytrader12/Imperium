@@ -90,3 +90,41 @@ def test_every_inline_script_actually_runs():
             f"the inline script for step {name!r} failed in CI conditions:\n"
             f"{(proc.stdout + proc.stderr)[-2000:]}"
         )
+
+
+@pytest.mark.skipif(yaml is None, reason="pyyaml is not installed")
+def test_every_file_the_workflow_runs_is_tracked_by_git():
+    """Prevents: CI failing on a file that exists locally but was never
+    committed.
+
+    This happened: .gitignore carried a bare ``*.spec`` to exclude the spec
+    PyInstaller generates, and it also excluded the hand-written
+    ``packaging/godalgo.spec``. The local build worked because the file was on
+    disk; the Windows job failed with "Spec file not found" for a file that had
+    never entered the repository. Existing on disk is not evidence.
+    """
+    import subprocess
+
+    root = WORKFLOW.resolve().parents[2]
+    tracked = set(subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True,
+        check=True).stdout.split())
+
+    doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    referenced: set[str] = set()
+    for job in doc.get("jobs", {}).values():
+        for step in job.get("steps", []):
+            run = step.get("run") or ""
+            # Any repo-relative path with an extension mentioned in a shell step.
+            for token in re.findall(r"[\w./\\-]+\.(?:spec|py|txt|cfg|toml|json)",
+                                    run):
+                candidate = token.replace("\\", "/").lstrip("./")
+                if (root / candidate).exists():
+                    referenced.add(candidate)
+
+    assert referenced, "no repo files were found referenced by the workflow"
+    missing = sorted(referenced - tracked)
+    assert not missing, (
+        f"the workflow runs these files but git does not track them, so they "
+        f"exist only on this machine and CI cannot see them: {missing}"
+    )
