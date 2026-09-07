@@ -231,13 +231,18 @@ def test_a_busy_port_falls_back_instead_of_crashing():
 
     from godalgo.server.app import choose_port, port_is_free
 
+    # No SO_REUSEADDR on the listener either: this test must model an ordinary
+    # server holding the port, and on Windows SO_REUSEADDR changes who else is
+    # allowed to bind it -- which is the very difference under test.
     sock = socket.socket()
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     taken = sock.getsockname()[1]
     sock.listen(1)
     try:
-        assert port_is_free("127.0.0.1", taken) is False
+        assert port_is_free("127.0.0.1", taken) is False, (
+            "a port with a live listener was reported free; on Windows this "
+            "happens when the probe sets SO_REUSEADDR"
+        )
         chosen = choose_port("127.0.0.1", taken)
         assert chosen != taken
         assert port_is_free("127.0.0.1", chosen) is True

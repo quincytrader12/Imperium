@@ -161,6 +161,50 @@ The front-end invariants that a screenshot cannot show — orb dedupe, bounded
 replay, a bloom-measured budget, jittered speed and depth — run under Node from
 `tests/test_cluster_js.py`.
 
+## Running the Windows build
+
+`GODALGO.exe` is a single self-contained file — no Python install, no
+dependencies, nothing to unpack. Double-click it, or run it from a terminal:
+
+```
+GODALGO.exe                  start on http://127.0.0.1:8787/ and open a browser
+GODALGO.exe --port 9000      serve on port 9000 instead
+GODALGO.exe --no-browser     start without opening a browser
+GODALGO.exe --version
+GODALGO.exe --help
+```
+
+It prints the URL it is serving on:
+
+```
+==============================================================
+  GODALGO — built by Quincy Gininda
+==============================================================
+  Open:        http://127.0.0.1:8787/
+  Diagnostics: http://127.0.0.1:8787/diagnose
+  Bound to 127.0.0.1 only — not reachable from your network.
+  Press Ctrl+C to stop.
+==============================================================
+```
+
+If the port is already taken — a second copy, or something else on 8787 — it
+uses the next free one and says so, rather than dying with a bare
+`WinError 10048` before printing anything.
+
+**It binds 127.0.0.1 only, and there is no flag to change that.** The process
+holds API keys and has no authentication of its own, so the bind address is a
+rule rather than an option. Reaching it from another machine would mean putting
+your own authenticated proxy in front of it deliberately.
+
+Nothing needs to be configured before the first run: open it, and the watchlist
+and scanner work with no API key at all. Add a key only when you want balances
+or trading, and note that a stored key cannot trade until you separately enable
+it and type the confirmation phrase.
+
+On first run Windows SmartScreen will warn about an unsigned executable — the
+binary is not code-signed. "More info" → "Run anyway", or check the SHA-256
+against the one published with the build.
+
 ## Packaging
 
 PyInstaller does not cross-compile, so the Windows `.exe` is built on a Windows

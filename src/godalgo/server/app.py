@@ -349,11 +349,30 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
 
 
 def port_is_free(host: str, port: int) -> bool:
-    """True if nothing is already listening on this address."""
+    """True if nothing is already listening on this address.
+
+    **Do not set SO_REUSEADDR here.** Its meaning differs between platforms in
+    exactly the way that breaks this check: on POSIX it only permits reusing a
+    socket in TIME_WAIT, but on Windows it permits binding to a port that is
+    *actively listening*. With it set, this function returned True for a busy
+    port on Windows, so :func:`choose_port` handed back the port that was
+    already taken and the server died with the bare ``WinError 10048`` this
+    whole mechanism exists to avoid.
+
+    It is invisible on Linux, which is why the test suite runs on Windows too.
+
+    ``SO_EXCLUSIVEADDRUSE`` (Windows only) makes the probe stricter still: it
+    refuses the bind if anything else could also claim the port.
+    """
     import socket
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:                      # Windows
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            except OSError:
+                pass
         try:
             sock.bind((host, port))
         except OSError:
