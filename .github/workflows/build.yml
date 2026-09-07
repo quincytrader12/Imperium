@@ -65,7 +65,11 @@ jobs:
       - name: Every text read in source must name its encoding
         shell: python
         run: |
-          # read_text()/open() without encoding= picks up the platform default.
+          # A text read that names no explicit codec uses the platform default,
+          # which is cp1252 on Windows.
+          # (Careful: a comment containing the six letters c-o-d-i-n-g followed
+          #  by '=' or ':' is a PEP 263 declaration and Python will try to load
+          #  the next word as a codec. That exact mistake made this job fail.)
           import pathlib, re, sys
           offenders = []
           # (?<![.\w]) so that webbrowser.open / opener.open / socket.open are

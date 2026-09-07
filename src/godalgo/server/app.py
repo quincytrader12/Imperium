@@ -348,6 +348,38 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
     return app
 
 
+def port_is_free(host: str, port: int) -> bool:
+    """True if nothing is already listening on this address."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def choose_port(host: str, preferred: int, attempts: int = 20) -> int:
+    """Return the preferred port, or the next free one above it.
+
+    A second copy of the program, or anything else holding the port, otherwise
+    kills the process with a bare ``WinError 10048`` before it prints a URL --
+    which reads as "the program is broken" rather than "that port is taken".
+    """
+    for offset in range(attempts):
+        candidate = preferred + offset
+        if candidate > 65535:
+            break
+        if port_is_free(host, candidate):
+            return candidate
+    raise RuntimeError(
+        f"no free port between {preferred} and {preferred + attempts - 1}. "
+        f"Close whatever is holding them, or pass --port with a free one."
+    )
+
+
 def run_server(host: str = "127.0.0.1", port: int = config.DEFAULT_PORT,
                open_browser: bool = True) -> int:
     import uvicorn
@@ -361,11 +393,28 @@ def run_server(host: str = "127.0.0.1", port: int = config.DEFAULT_PORT,
     if not (static / "index.html").exists():
         raise RuntimeError(f"static files are missing from {static}")
 
-    url = f"http://{host}:{port}/"
+    chosen = choose_port(host, port)
+    if chosen != port:
+        print(f"  note: port {port} is already in use, so this instance is on "
+              f"{chosen} instead.")
+
+    url = f"http://{host}:{chosen}/"
     if open_browser:
         threading.Thread(target=_open_when_ready, args=(url,), daemon=True).start()
-    print(f"GODALGO on {url}   (diagnostics at {url}diagnose)")
-    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+
+    # A banner rather than a log line: this is the one piece of information the
+    # operator needs, and it must survive being scrolled past.
+    bar = "=" * 62
+    print(bar)
+    print("  GODALGO — built by Quincy Gininda")
+    print(bar)
+    print(f"  Open:        {url}")
+    print(f"  Diagnostics: {url}diagnose")
+    print(f"  Bound to {host} only — not reachable from your network.")
+    print("  Press Ctrl+C to stop.")
+    print(bar, flush=True)
+
+    uvicorn.run(create_app(), host=host, port=chosen, log_level="warning")
     return 0
 
 

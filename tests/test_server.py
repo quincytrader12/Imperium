@@ -220,3 +220,95 @@ def test_the_ui_credits_its_author(app_client):
     """Prevents: losing the attribution in a future layout change."""
     page = app_client.get("/").text
     assert "Quincy Gininda" in page
+
+
+def test_a_busy_port_falls_back_instead_of_crashing():
+    """Prevents: a double-clicked executable dying with a bare WinError 10048
+    before it prints anything. A second copy of the program, or anything else
+    holding the port, otherwise reads as "the program is broken" rather than
+    "that port is taken"."""
+    import socket
+
+    from godalgo.server.app import choose_port, port_is_free
+
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    taken = sock.getsockname()[1]
+    sock.listen(1)
+    try:
+        assert port_is_free("127.0.0.1", taken) is False
+        chosen = choose_port("127.0.0.1", taken)
+        assert chosen != taken
+        assert port_is_free("127.0.0.1", chosen) is True
+    finally:
+        sock.close()
+
+
+def test_the_packaged_launcher_accepts_a_port_and_refuses_a_bad_one():
+    """Prevents: shipping an executable with no way to move it off a busy port,
+    and one that accepts a nonsense port only to fail later inside the server."""
+    import runpy
+    import sys
+    from pathlib import Path
+
+    launcher = Path(__file__).resolve().parents[1] / "packaging" / "launcher.py"
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    module = runpy.run_path(str(launcher))
+    parse_args = module["parse_args"]
+
+    old = sys.argv[:]
+    try:
+        sys.argv = ["GODALGO", "--port", "9123"]
+        args = parse_args()
+        assert args.port == 9123 and args.no_browser is False
+
+        sys.argv = ["GODALGO", "--no-browser"]
+        assert parse_args().no_browser is True
+
+        sys.argv = ["GODALGO", "--port", "99999"]
+        with pytest.raises(SystemExit):
+            parse_args()
+    finally:
+        sys.argv = old
+
+
+def test_the_launcher_offers_no_way_to_bind_publicly():
+    """Prevents: a --host flag on the shipped executable. The bind address is a
+    rule, not an option: the process holds API keys and has no authentication,
+    so no argument may widen it.
+
+    Asserted against the parser's real options rather than by grepping the
+    source, which matched the docstring explaining why --host does not exist.
+    """
+    import argparse
+    import runpy
+    import sys
+    from pathlib import Path
+
+    launcher = Path(__file__).resolve().parents[1] / "packaging" / "launcher.py"
+    module = runpy.run_path(str(launcher))
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_init = argparse.ArgumentParser.parse_args
+
+    def spy(self, *a, **kw):
+        captured["parser"] = self
+        raise SystemExit(0)
+
+    old_argv = sys.argv[:]
+    argparse.ArgumentParser.parse_args = spy
+    try:
+        sys.argv = ["GODALGO"]
+        with pytest.raises(SystemExit):
+            module["parse_args"]()
+    finally:
+        argparse.ArgumentParser.parse_args = real_init
+        sys.argv = old_argv
+
+    options = {opt for action in captured["parser"]._actions
+               for opt in action.option_strings}
+    assert "--host" not in options and "--bind" not in options, options
+    assert "--port" in options

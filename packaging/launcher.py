@@ -14,6 +14,52 @@ import sys
 import traceback
 
 
+def parse_args() -> "argparse.Namespace":
+    """Arguments for the double-clickable build.
+
+    Deliberately small. There is no --host: the bind address is a rule, not an
+    option, because this process holds API keys and has no authentication.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="GODALGO",
+        description=("GODALGO trading terminal — built by Quincy Gininda. "
+                     "Serves a local web UI on 127.0.0.1."),
+        epilog=("Examples:\n"
+                "  GODALGO.exe                  start on the default port and "
+                "open a browser\n"
+                "  GODALGO.exe --port 9000      start on port 9000\n"
+                "  GODALGO.exe --no-browser     start without opening a browser\n"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("GODALGO_PORT", 0)) or None,
+        help=f"port to serve on (default {config_default_port()}; if it is busy, "
+             f"the next free port above it is used)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="do not open a browser on start")
+    parser.add_argument("--version", action="store_true",
+                        help="print the version and exit")
+    args = parser.parse_args()
+    if args.port is None:
+        args.port = config_default_port()
+    if not (1 <= args.port <= 65535):
+        parser.error(f"--port must be between 1 and 65535, not {args.port}")
+    if args.version:
+        import godalgo
+
+        print(f"GODALGO {godalgo.__version__} — built by Quincy Gininda")
+        raise SystemExit(0)
+    return args
+
+
+def config_default_port() -> int:
+    from godalgo import config
+
+    return config.DEFAULT_PORT
+
+
 def _pause() -> None:
     """Hold the console open so the operator can read the error.
 
@@ -45,13 +91,15 @@ def main() -> int:
         _pause()
         return 1
 
+    args = parse_args()
+
     logging_setup.configure()
     try:
         config.ensure_home()
         # CI launches this to verify the build; opening a browser on a headless
         # runner is at best noise and at worst a hang.
-        open_browser = not os.environ.get("GODALGO_NO_BROWSER")
-        return run_server(host="127.0.0.1", port=config.DEFAULT_PORT,
+        open_browser = not (args.no_browser or os.environ.get("GODALGO_NO_BROWSER"))
+        return run_server(host="127.0.0.1", port=args.port,
                           open_browser=open_browser)
     except KeyboardInterrupt:
         return 0

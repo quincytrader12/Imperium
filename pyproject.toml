@@ -19,6 +19,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "scipy>=1.13",
     "pyinstaller>=6.6",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
