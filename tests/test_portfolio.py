@@ -153,6 +153,34 @@ def test_retiring_a_symbol_is_reported_so_it_can_be_flattened():
     assert "AUSDT" in retired
 
 
+def test_a_symbol_displaced_from_a_slot_is_also_reported_for_flattening():
+    """Prevents: only announcing retirement for *rejected* symbols.
+
+    A mutation test found this gap: removing the retirement report from the
+    concurrency-displacement branch left the suite green, because the only test
+    covering retirement used a rejected symbol and took a different branch. A
+    symbol displaced from its slot while holding a position is exactly as
+    dangerous -- a stopped engine still holding a position is a position with
+    nothing managing its stop.
+    """
+    a = make_allocator(max_concurrent_positions=2)
+    for s in ("AUSDT", "BUSDT"):
+        a.set_scan(s, score=0.9, turnover=1e9, tradeable=True, reason="ok")
+    a.rebalance_admissions()
+    a.observe("AUSDT").current_weight = 0.10
+    a.observe("BUSDT").current_weight = 0.10
+    assert set(a.admitted_symbols) == {"AUSDT", "BUSDT"}
+
+    # The operator tightens concurrency while both symbols hold positions.
+    a.limits = RiskLimits(max_concurrent_positions=1)
+    _, retired = a.rebalance_admissions()
+
+    assert len(retired) == 1, "a displaced holder must be reported once"
+    assert retired[0] in {"AUSDT", "BUSDT"}
+    assert a.states[retired[0]].verdict is Verdict.NOT_ADMITTED
+    assert not a.states[retired[0]].admitted
+
+
 # -- the wiring test the brief specifically asks for ---------------------
 
 def test_the_real_engine_class_requires_an_allocator():

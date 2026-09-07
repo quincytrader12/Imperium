@@ -31,6 +31,20 @@ def test_a_registered_secret_cannot_be_logged_even_via_an_argument():
     forget_secrets()
 
 
+def test_the_registry_catches_a_secret_no_pattern_would_match():
+    """Prevents: relying entirely on the secret-shaped patterns. A mutation test
+    found this gap -- disabling the registry entirely left every other redaction
+    test passing, because their 64-character secrets also match the key-shaped
+    pattern. This one uses a secret with punctuation and ordinary length, which
+    no pattern matches, so only the registry can catch it."""
+    forget_secrets()
+    odd_secret = "corr-horse-battery"      # matches none of the patterns
+    assert odd_secret in scrub(f"key={odd_secret}")   # not caught before
+    register_secret(odd_secret)
+    assert odd_secret not in scrub(f"key={odd_secret}")
+    forget_secrets()
+
+
 def test_a_proxy_url_never_has_its_credentials_printed():
     """Prevents: reporting proxy configuration by value. A proxy URL embeds a
     username and password, and this output is designed to be pasted into a bug

@@ -81,8 +81,13 @@ for (let i = 1; i <= 5000; i++) {
   flood.push({ seq: i, symbol: 'BTCUSDT', kind: 'scan', reason: 'r', intensity: 0.5 });
 }
 c2.ingest(flood);
-check('replay_is_bounded', c2.orbs.length <= window.Cluster.MAX_REPLAY,
-      `${c2.orbs.length} orbs from a 5000-pulse backlog`);
+/* Asserted against a fixed literal, not against MAX_REPLAY itself. A mutation
+ * test found that comparing to the exported constant made this check pass when
+ * MAX_REPLAY was raised to 100000 -- a test that moves with the thing it is
+ * testing is not a test. */
+const REPLAY_CEILING = 250;
+check('replay_is_bounded', c2.orbs.length <= REPLAY_CEILING,
+      `${c2.orbs.length} orbs from a 5000-pulse backlog (ceiling ${REPLAY_CEILING})`);
 check('replay_advances_seq', c2.seenSeq === 5000, `seq=${c2.seenSeq}`);
 
 /* 3. The orb budget is measured against the bloom radius, not the 2px core, and

@@ -62,6 +62,23 @@ def test_crypto_volatility_is_annualised_over_a_market_that_never_closes():
     assert crypto == pytest.approx(0.01 * math.sqrt(CRYPTO_YEAR / 60), rel=0.1)
 
 
+def test_the_venue_registry_itself_declares_a_market_that_never_closes():
+    """Prevents: the registry shipping an equity calendar for a crypto venue.
+
+    A mutation test found this gap: the annualisation test above uses its own
+    constants, so it kept passing when the registry's seconds_per_year was
+    changed to an equity calendar. The value that actually reaches the sizer is
+    the one on the spec, so that is what this asserts."""
+    from godalgo.venues.registry import VENUES
+
+    for venue_id, spec in VENUES.items():
+        assert spec.seconds_per_year == CRYPTO_YEAR, (
+            f"{venue_id} annualises over {spec.seconds_per_year}s; a crypto "
+            f"market never closes, and an equity calendar understates its "
+            f"volatility by ~2.3x"
+        )
+
+
 def test_a_short_on_a_long_only_venue_is_clamped_to_flat_not_to_a_small_long():
     """Prevents: turning a short signal into a small long. Binance Spot has
     nothing to borrow, so a short is not a risky position -- it is a rejected

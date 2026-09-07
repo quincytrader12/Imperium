@@ -45,8 +45,28 @@ def test_no_credential_material_appears_in_the_masked_view():
 
 
 def test_mask_with_no_tail_reveals_nothing():
-    """Prevents: the value[-0:] slicing bug directly, at the unit that had it."""
-    assert "S" not in mask("S" * 40, keep_head=0, keep_tail=0)
+    """Prevents: the value[-0:] slicing bug directly, at the unit that had it.
+
+    ``value[-0:]`` is the *whole string* in Python, so a "masked" value with
+    keep_tail=0 was being rendered verbatim. Both shapes are covered:
+
+    * ``keep_head=0, keep_tail=0`` takes an early return;
+    * ``keep_head=4, keep_tail=0`` reaches the slicing itself, which is where
+      the bug actually was. A mutation test found that only the first was
+      covered, so reverting the real fix left the suite green.
+    """
+    secret = "SECRETVALUE" + "z" * 29
+    assert "z" not in mask(secret, keep_head=0, keep_tail=0)
+    assert "SECRET" not in mask(secret, keep_head=0, keep_tail=0)
+
+    head_only = mask(secret, keep_head=4, keep_tail=0)
+    assert head_only == "SECR…", head_only
+    assert "z" not in head_only, "the tail leaked through value[-0:]"
+
+    tail_only = mask(secret, keep_head=0, keep_tail=4)
+    assert tail_only == "…zzzz", tail_only
+    assert "SECRET" not in tail_only
+
     assert describe_secret("S" * 40) == "•••••••• (40 chars)"
     assert describe_secret("") == "(unset)"
 
