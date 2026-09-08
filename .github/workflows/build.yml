@@ -91,6 +91,8 @@ jobs:
     # Windows runner. Gated on the tests, so a red suite cannot ship a binary.
     needs: test
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -123,8 +125,67 @@ jobs:
         # the API, and 404s its own page. PyInstaller calls that a success.
         run: python packaging/verify_build.py dist/GODALGO.exe
 
+      - name: Record the SHA-256
+        id: hash
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist/GODALGO.exe -Algorithm SHA256).Hash.ToLower()
+          $size = [math]::Round((Get-Item dist/GODALGO.exe).Length / 1MB, 1)
+          Write-Output "sha256=$h" >> $env:GITHUB_OUTPUT
+          Write-Output "size=$size" >> $env:GITHUB_OUTPUT
+          Write-Output "GODALGO.exe  $size MB  sha256 $h"
+
       - uses: actions/upload-artifact@v4
         with:
           name: GODALGO-windows
           path: dist/GODALGO.exe
           if-no-files-found: error
+
+      - name: Publish the executable as a downloadable release
+        # An Actions artifact is a zip that only a signed-in user can fetch. A
+        # release asset is a direct, permanent link to the .exe itself, which is
+        # what someone who just wants to run the program actually needs.
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-latest-build"
+          $notes = @"
+          Windows build of the GODALGO trading terminal — built by Quincy Gininda.
+
+          Commit ``${{ github.sha }}`` on ``${{ github.ref_name }}``.
+          Size ${{ steps.hash.outputs.size }} MB.
+          SHA-256 ``${{ steps.hash.outputs.sha256 }}``
+
+          Single self-contained file. No Python install, nothing to unpack.
+
+              GODALGO.exe                  serve on http://127.0.0.1:8787/ and open a browser
+              GODALGO.exe --port 9000      serve on another port
+              GODALGO.exe --no-browser     start without opening a browser
+              GODALGO.exe --help
+
+          It binds 127.0.0.1 only and there is no flag to change that: the process
+          holds API keys and has no authentication of its own.
+
+          No key is needed to start — the watchlist and scanner run without one.
+          A stored key cannot trade until it is separately enabled and the
+          confirmation phrase is typed.
+
+          Unsigned, so SmartScreen will warn on first run: More info -> Run anyway,
+          or check the SHA-256 above.
+
+          This binary was built on a Windows runner and then launched by
+          packaging/verify_build.py, which requires it to serve its own page, its
+          static assets, its API and a diagnostics verdict before the build is
+          allowed to pass.
+          "@
+          # A rolling tag, so the download link stays stable across builds.
+          gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag 2>$null
+          gh release create $tag dist/GODALGO.exe `
+            --repo $env:GITHUB_REPOSITORY `
+            --target ${{ github.sha }} `
+            --title "GODALGO for Windows (latest build)" `
+            --notes "$notes" `
+            --prerelease
+          Write-Output "Released: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
