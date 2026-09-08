@@ -83,6 +83,10 @@ class TradingSession:
         self.status_message = "idle"
         self.venue_error: str = ""
         self.calibration_error: str = ""
+        #: Why the credential store is unusable, if it is. Shown in the UI: a
+        #: terminal that starts but silently has no credentials is worse than
+        #: one that says why.
+        self.store_error: str = ""
         self._loop_task: asyncio.Task | None = None
         self._pending_bars: asyncio.Queue[tuple[str, Bar]] = asyncio.Queue(maxsize=4096)
         self._thresholds: dict | None = None
@@ -487,6 +491,7 @@ class TradingSession:
             "status": self.status_message,
             "venue_error": self.venue_error,
             "calibration_error": self.calibration_error,
+            "store_error": self.store_error,
             "lamps": self.lamps.as_dict(),
             "equity": equity,
             "cash": float(self.broker.cash),

@@ -90,6 +90,7 @@
     var banner = $('banner');
     var messages = [];
     if (s.calibration_error) messages.push(['bad', s.calibration_error]);
+    if (s.store_error) messages.push(['bad', 'Credentials: ' + s.store_error]);
     if (s.halted) messages.push(['bad', 'BOOK HALTED — ' + s.halt_reason]);
     if (s.venue_error) messages.push(['warn', s.venue_error]);
     if (!messages.length) { banner.hidden = true; banner.textContent = ''; return; }
@@ -698,7 +699,10 @@
   function loadConnections() {
     fetch('/api/connections').then(function (r) { return r.json(); }).then(function (j) {
       var perm = $('conn-perm');
-      if (!j.permissions_ok) {
+      if (j.error) {
+        perm.innerHTML = '<div class="notice bad"></div>';
+        perm.firstChild.textContent = j.error;
+      } else if (!j.permissions_ok) {
         perm.innerHTML = '<div class="notice bad"></div>';
         perm.firstChild.textContent =
           'INSECURE CREDENTIAL FILE: ' + j.permissions_detail +

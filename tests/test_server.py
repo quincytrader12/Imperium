@@ -317,3 +317,84 @@ def test_the_launcher_offers_no_way_to_bind_publicly():
                for opt in action.option_strings}
     assert "--host" not in options and "--bind" not in options, options
     assert "--port" in options
+
+
+@pytest.mark.parametrize("content", [
+    '{"credentials": "main"}',
+    'not json at all',
+    '[1, 2, 3]',
+])
+def test_the_terminal_still_starts_when_the_credentials_file_is_broken(content):
+    """Prevents the exact failure a user hit: a malformed credentials file
+    aborting application startup, so the terminal never opened at all.
+
+    This program exists to make the difference between "not trading" and
+    "broken" visible. It cannot do that if a broken file stops it from starting,
+    so a credential store that cannot load must degrade to no credentials plus a
+    stated reason -- never to a dead server.
+    """
+    from godalgo import config
+
+    config.ensure_home()
+    config.credentials_path().write_text(content, encoding="utf-8")
+
+    with TestClient(create_app(TradingSession())) as client:
+        assert client.get("/").status_code == 200
+        snapshot = client.get("/api/snapshot").json()
+        assert snapshot["store_error"], "the reason must be reported, not swallowed"
+        # And the rest of the terminal must be fully usable.
+        assert len(snapshot["watchlist"]) > 0
+        assert snapshot["lamps"]["key"] == "off"
+
+        conns = client.get("/api/connections")
+        assert conns.status_code == 200, "the panel must render and explain"
+        assert conns.json()["credentials"] == []
+        assert conns.json()["error"]
+
+
+def test_a_broken_credential_store_never_leaks_the_file_contents():
+    """Prevents an error message quoting a credentials file back into the UI. A
+    corrupt file may still contain a real secret."""
+    from godalgo import config
+
+    secret = "S3cr3tKeyMaterial" + "z" * 40
+    config.ensure_home()
+    config.credentials_path().write_text(
+        '{"credentials": "' + secret + '"}', encoding="utf-8")
+
+    with TestClient(create_app(TradingSession())) as client:
+        blob = client.get("/api/snapshot").text + client.get("/api/connections").text
+        assert secret not in blob
+        assert secret[:20] not in blob
+
+
+def test_the_terminal_survives_an_unanticipated_credential_store_failure(monkeypatch):
+    """Prevents the *class* of bug that took the terminal down, not just the one
+    instance of it.
+
+    The loader now validates shape and raises CredentialError for everything it
+    can foresee. This asserts the safety net underneath that: if the store ever
+    raises something nobody predicted -- which is exactly what happened, a bare
+    TypeError -- the server must still start and say so.
+
+    Without it, a mutation test showed the broad `except Exception` in the
+    lifespan could be reverted with the suite still green, because after the
+    loader fix nothing reached it any more.
+    """
+    import godalgo.server.app as app_module
+
+    class Exploding:
+        def __init__(self, *a, **kw):
+            raise RuntimeError("something nobody predicted")
+
+    monkeypatch.setattr(app_module, "CredentialStore", Exploding)
+
+    with TestClient(create_app(TradingSession())) as client:
+        assert client.get("/").status_code == 200, (
+            "an unforeseen credential-store failure must not stop the terminal "
+            "from starting"
+        )
+        snapshot = client.get("/api/snapshot").json()
+        assert "something nobody predicted" in snapshot["store_error"]
+        assert "RuntimeError" in snapshot["store_error"]
+        assert len(snapshot["watchlist"]) > 0

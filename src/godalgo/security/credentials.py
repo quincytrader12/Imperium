@@ -146,6 +146,23 @@ def _check_permissions(path: Path) -> PermissionReport:
     return PermissionReport(path, True, f"mode {mode:04o}")
 
 
+def _describe_json(value: Any) -> str:
+    """Name a JSON value's type in words an operator can act on."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a true/false value"
+    if isinstance(value, str):
+        return f"the text {value[:24]!r}" if len(value) <= 24 else "a piece of text"
+    if isinstance(value, (int, float)):
+        return f"the number {value}"
+    if isinstance(value, list):
+        return f"a list of {len(value)} item(s)"
+    if isinstance(value, dict):
+        return "an object"
+    return type(value).__name__
+
+
 def _atomic_write(path: Path, payload: str) -> None:
     """Write owner-only, atomically.
 
@@ -194,28 +211,77 @@ class CredentialStore:
         self._creds = {}
         if not self.path.exists():
             return self.permission_report
+        repair = f"repair or delete {self.path} and re-add the key"
         try:
             raw = json.loads(self.path.read_text(encoding=config.TEXT_ENCODING))
         except json.JSONDecodeError as exc:
             raise CredentialError(
                 f"the credentials file is not valid JSON ({exc.msg} at line {exc.lineno})",
-                remedy=f"repair or delete {self.path} and re-add the key",
+                remedy=repair,
             ) from exc
-        for entry in raw.get("credentials", []):
-            try:
-                cred = Credential(
-                    name=entry["name"],
-                    venue=entry["venue"],
-                    api_key=entry["api_key"],
-                    secret=entry["secret"],
-                    trade_enabled=bool(entry.get("trade_enabled", False)),
-                    note=entry.get("note", ""),
-                )
-            except KeyError as exc:
+        except OSError as exc:
+            raise CredentialError(
+                f"the credentials file could not be read: {exc.strerror or exc}",
+                remedy=f"check that {self.path} exists and is readable by you",
+            ) from exc
+
+        # Everything below validates *shape* before touching it. Valid JSON says
+        # nothing about structure, and a file that parses but is shaped wrongly
+        # used to raise a bare TypeError out of this method -- which took the
+        # whole application down, because callers reasonably only expect
+        # CredentialError from here.
+        if not isinstance(raw, dict):
+            raise CredentialError(
+                f"the credentials file should contain a JSON object, but it "
+                f"contains {_describe_json(raw)}",
+                remedy=repair,
+            )
+        entries = raw.get("credentials", [])
+        if entries is None:
+            entries = []
+        if isinstance(entries, dict):
+            # A plausible hand-edit: {"credentials": {"main": {...}}}. Accept it
+            # rather than refuse, since the intent is unambiguous.
+            entries = list(entries.values())
+        if not isinstance(entries, list):
+            raise CredentialError(
+                f"the 'credentials' field should be a list, but it is "
+                f"{_describe_json(entries)}",
+                remedy=repair,
+            )
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
                 raise CredentialError(
-                    f"a credential entry is missing the field {exc.args[0]!r}",
-                    remedy=f"repair or delete {self.path} and re-add the key",
-                ) from exc
+                    f"credential #{index + 1} should be a JSON object, but it is "
+                    f"{_describe_json(entry)}",
+                    remedy=repair,
+                )
+            missing = [f for f in ("name", "venue", "api_key", "secret")
+                       if f not in entry]
+            if missing:
+                raise CredentialError(
+                    f"credential #{index + 1} is missing "
+                    f"{', '.join(repr(m) for m in missing)}",
+                    remedy=repair,
+                )
+            wrong = [f for f in ("name", "venue", "api_key", "secret")
+                     if not isinstance(entry[f], str)]
+            if wrong:
+                raise CredentialError(
+                    f"credential #{index + 1} has non-text "
+                    f"{', '.join(repr(w) for w in wrong)}",
+                    remedy=repair,
+                )
+            note = entry.get("note", "")
+            cred = Credential(
+                name=entry["name"],
+                venue=entry["venue"],
+                api_key=entry["api_key"],
+                secret=entry["secret"],
+                trade_enabled=bool(entry.get("trade_enabled", False)),
+                note=note if isinstance(note, str) else str(note),
+            )
             self._creds[cred.name] = cred
             register_secret(cred.secret)
             register_secret(cred.api_key)

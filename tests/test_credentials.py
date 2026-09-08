@@ -131,3 +131,57 @@ def test_a_corrupt_credentials_file_names_the_file_to_repair():
     with pytest.raises(CredentialError) as excinfo:
         CredentialStore()
     assert str(config.credentials_path()) in excinfo.value.remedy
+
+
+@pytest.mark.parametrize("content,label", [
+    ('{"credentials": "main"}', "the credentials field is a string"),
+    ('{"credentials": ["main"]}', "a list of strings instead of objects"),
+    ('[{"name": "x"}]', "the whole file is a list"),
+    ('"hello"', "the whole file is a string"),
+    ('42', "the whole file is a number"),
+    ('true', "the whole file is a boolean"),
+    ('{"credentials": [{"name": 1, "venue": "v", "api_key": "k", "secret": "s"}]}',
+     "a field of the wrong type"),
+    ('{"credentials": [{"name": "n"}]}', "an entry missing fields"),
+    ('', "the file is empty"),
+])
+def test_a_wrongly_shaped_file_raises_a_credential_error_not_a_bare_type_error(
+        content, label):
+    """Prevents the failure that took the whole application down on Windows.
+
+    The loader anticipated exactly two problems -- invalid JSON and a missing
+    field -- and let every other shape raise whatever it happened to raise. A
+    file containing {"credentials": "main"} parsed fine, then raised
+    ``TypeError: string indices must be integers`` from inside the loop. Callers
+    only catch CredentialError, so uvicorn aborted startup and the terminal
+    never opened.
+
+    Valid JSON says nothing about structure. Every shape must produce a
+    CredentialError carrying a remedy.
+    """
+    config.ensure_home()
+    config.credentials_path().write_text(content, encoding="utf-8")
+    with pytest.raises(CredentialError) as excinfo:
+        CredentialStore()
+    assert excinfo.value.remedy, f"no remedy offered for {label}"
+    assert str(config.credentials_path()) in excinfo.value.remedy
+
+
+def test_a_hand_written_mapping_of_credentials_is_accepted():
+    """Prevents refusing a file whose intent is unambiguous. Someone editing by
+    hand may key the credentials by name rather than listing them; that is not
+    ambiguous, so it is read rather than rejected."""
+    config.ensure_home()
+    config.credentials_path().write_text(
+        '{"credentials": {"main": {"name": "main", "venue": "binance_spot",'
+        ' "api_key": "PK1234567890", "secret": "SECRETVALUE0000"}}}',
+        encoding="utf-8")
+    store = CredentialStore()
+    assert [c.name for c in store] == ["main"]
+
+
+def test_a_null_credentials_field_loads_as_empty():
+    """Prevents a file with no credentials in it being treated as corrupt."""
+    config.ensure_home()
+    config.credentials_path().write_text('{"credentials": null}', encoding="utf-8")
+    assert len(CredentialStore()) == 0

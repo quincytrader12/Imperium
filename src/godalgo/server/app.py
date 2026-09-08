@@ -125,11 +125,28 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         state["session"] = session or TradingSession()
+
+        # The credential store must never prevent the terminal from starting.
+        # This is the whole point of the program: a bot that will not run and a
+        # bot that cannot explain why look identical, and the UI is what tells
+        # them apart -- so it has to come up even when something is broken.
+        #
+        # A malformed credentials file did take the whole application down once:
+        # a file that parsed as JSON but was shaped wrongly raised a TypeError
+        # out of CredentialStore, only CredentialError was caught here, and
+        # uvicorn aborted startup. Catching the broad Exception is deliberate.
         try:
             state["store"] = CredentialStore()
         except CredentialError as exc:
             state["store"] = None
-            state["store_error"] = exc
+            state["store_error"] = f"{exc}" + (f" — {exc.remedy}" if exc.remedy else "")
+        except Exception as exc:  # noqa: BLE001 - see above
+            log.exception("the credential store failed to load")
+            state["store"] = None
+            state["store_error"] = (
+                f"the credential store could not be read ({type(exc).__name__}: "
+                f"{exc}). This is a bug -- the terminal is running without it."
+            )
         else:
             report = state["store"].permission_report
             if not report.ok:
@@ -137,6 +154,13 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                     Level.ERROR, "security",
                     f"INSECURE CREDENTIAL FILE: {report.detail}",
                     detail=report.remedy)
+
+        if state.get("store_error"):
+            state["session"].store_error = state["store_error"]
+            state["session"].telemetry.event(
+                Level.ERROR, "security",
+                "the credentials file could not be loaded",
+                detail=state["store_error"])
         yield
         await state["session"].stop()
         await state["session"].detach_client()
@@ -189,7 +213,19 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
     @app.get("/api/connections")
     async def connections() -> JSONResponse:
         """Masked views and nothing else. Not once, not for debugging."""
-        store = get_store()
+        store = state.get("store")
+        if store is None:
+            # The panel still renders, and says what is wrong and where. A raw
+            # 500 here would tell the operator only that something failed.
+            return JSONResponse({
+                "credentials": [],
+                "path": str(config.credentials_path()),
+                "permissions_ok": True,
+                "permissions_detail": "",
+                "permissions_remedy": "",
+                "attached": None,
+                "error": state.get("store_error", "the credential store is unavailable"),
+            })
         report = store.permission_report
         return JSONResponse({
             "credentials": store.masked_list(),
