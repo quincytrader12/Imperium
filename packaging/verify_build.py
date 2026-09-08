@@ -53,8 +53,8 @@ def main(exe: str) -> int:
     proc = subprocess.Popen(
         [str(path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        env={**__import__("os").environ, "GODALGO_NO_BROWSER": "1",
-             "GODALGO_NO_PAUSE": "1"},
+        env={**__import__("os").environ, "IMPERIUM_NO_BROWSER": "1",
+             "IMPERIUM_NO_PAUSE": "1"},
     )
     failures: list[str] = []
     try:
@@ -64,7 +64,7 @@ def main(exe: str) -> int:
         status, body = fetch("/")
         if status != 200:
             failures.append(f"the page returned HTTP {status}")
-        elif "GODALGO" not in body:
+        elif "IMPERIUM" not in body:
             failures.append("the page did not contain the expected markup")
         else:
             print("  served its own page")
@@ -129,4 +129,4 @@ def main(exe: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "dist/GODALGO.exe"))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "dist/IMPERIUM.exe"))

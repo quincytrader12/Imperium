@@ -6,9 +6,9 @@ from decimal import Decimal
 
 import pytest
 
-from godalgo.execution import costs
-from godalgo.execution.costs import ADVERSE_SELECTION_FRACTION, gate, round_trip_cost_bps
-from godalgo.venues.registry import FeeSchedule, get
+from imperium.execution import costs
+from imperium.execution.costs import ADVERSE_SELECTION_FRACTION, gate, round_trip_cost_bps
+from imperium.venues.registry import FeeSchedule, get
 
 FREE = FeeSchedule(maker_bps=Decimal("0"), taker_bps=Decimal("0"), assumed=False,
                    source="test")
@@ -116,7 +116,7 @@ def test_there_is_exactly_one_round_trip_cost_implementation():
     import pathlib
     import re
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "godalgo"
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "imperium"
     offenders = []
     for path in src.rglob("*.py"):
         if path.name == "costs.py":
@@ -127,5 +127,5 @@ def test_there_is_exactly_one_round_trip_cost_implementation():
             offenders.append(str(path.relative_to(src)))
     assert offenders == [], (
         f"these modules compute round-trip cost themselves instead of importing "
-        f"godalgo.execution.costs: {offenders}"
+        f"imperium.execution.costs: {offenders}"
     )

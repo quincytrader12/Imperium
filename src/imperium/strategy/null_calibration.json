@@ -1,0 +1,150 @@
+{
+  "generated_by": "imperium.strategy.calibration",
+  "seed": 20240517,
+  "trials": 1500,
+  "window": 250,
+  "q": 20,
+  "thresholds": {
+    "nominal_alpha": 0.05,
+    "vr_z": {
+      "reject_trend_above": 2.4706844303627213,
+      "reject_revert_below": -1.6756102465237892,
+      "null_median": -0.09760721570608794,
+      "null_median_abs": 0.7226883895920307,
+      "standard_normal_would_have_used": 1.959963985
+    },
+    "hurst": {
+      "null_median": 0.6054095830927148,
+      "null_q1": 0.5632332581852894,
+      "null_q3": 0.6457997746319301,
+      "trend_above": 0.7314776728737757,
+      "revert_below": 0.4820567981559817,
+      "textbook_would_have_used": 0.5
+    },
+    "adf": {
+      "stationary_below": -2.815744743382763,
+      "null_median": -1.5032235455731189
+    },
+    "sub_threshold": {
+      "samples": 1912,
+      "directional_accuracy": 0.7348326359832636,
+      "usable": true,
+      "required_accuracy": 0.55
+    }
+  },
+  "null_distribution": {
+    "vr": {
+      "p2.5": 0.4750021001947858,
+      "p25": 0.7643892779211698,
+      "p50": 0.9698112089466144,
+      "p75": 1.1970883886938548,
+      "p97.5": 1.7701247939235991
+    },
+    "z": {
+      "p2.5": -1.6756102465237892,
+      "p25": -0.7597139189396733,
+      "p50": -0.09760721570608794,
+      "p75": 0.6360605023546373,
+      "p97.5": 2.4706844303627213
+    },
+    "hurst": {
+      "p2.5": 0.4820567981559817,
+      "p25": 0.5632332581852894,
+      "p50": 0.6054095830927148,
+      "p75": 0.6457997746319301,
+      "p97.5": 0.7314776728737757
+    },
+    "adf": {
+      "p2.5": -3.040405511644308,
+      "p25": -2.0525174409137943,
+      "p50": -1.5032235455731189,
+      "p75": -0.9571268185733051,
+      "p97.5": 0.39757708374523854
+    }
+  },
+  "false_positive_rate": {
+    "random_walk": {
+      "trending": 0.024666666666666667,
+      "mean_reverting": 0.025333333333333333,
+      "indeterminate": 0.9493333333333334,
+      "contradicted": 0.0006666666666666666,
+      "warming_up": 0.0
+    }
+  },
+  "power": {
+    "ou_mean_reverting": {
+      "trending": 0.0,
+      "mean_reverting": 0.22266666666666668,
+      "indeterminate": 0.7773333333333333,
+      "contradicted": 0.0,
+      "warming_up": 0.0
+    },
+    "trend_with_drift": {
+      "trending": 0.02,
+      "mean_reverting": 0.026,
+      "indeterminate": 0.9533333333333334,
+      "contradicted": 0.0006666666666666666,
+      "warming_up": 0.0
+    },
+    "momentum_ar1": {
+      "trending": 0.202,
+      "mean_reverting": 0.0006666666666666666,
+      "indeterminate": 0.788,
+      "contradicted": 0.009333333333333334,
+      "warming_up": 0.0
+    }
+  },
+  "held_out_false_positive_rate": {
+    "garch_1_1": {
+      "trending": 0.03,
+      "mean_reverting": 0.012,
+      "indeterminate": 0.9573333333333334,
+      "contradicted": 0.0006666666666666666,
+      "warming_up": 0.0
+    },
+    "student_t4": {
+      "trending": 0.024666666666666667,
+      "mean_reverting": 0.024,
+      "indeterminate": 0.95,
+      "contradicted": 0.0013333333333333333,
+      "warming_up": 0.0
+    },
+    "high_vol_walk": {
+      "trending": 0.02266666666666667,
+      "mean_reverting": 0.03,
+      "indeterminate": 0.9446666666666667,
+      "contradicted": 0.0026666666666666666,
+      "warming_up": 0.0
+    },
+    "low_vol_walk": {
+      "trending": 0.019333333333333334,
+      "mean_reverting": 0.026,
+      "indeterminate": 0.954,
+      "contradicted": 0.0006666666666666666,
+      "warming_up": 0.0
+    }
+  },
+  "sub_threshold_evidence": {
+    "samples": 1912,
+    "directional_accuracy": 0.7348326359832636,
+    "usable": true,
+    "required_accuracy": 0.55
+  },
+  "power_curve": {
+    "mean_reversion_ou_theta": {
+      "0.02": 0.046,
+      "0.06": 0.2,
+      "0.12": 0.746,
+      "0.25": 1.0,
+      "0.50": 1.0
+    },
+    "momentum_ar1_phi": {
+      "0.05": 0.04,
+      "0.10": 0.104,
+      "0.18": 0.226,
+      "0.30": 0.432,
+      "0.45": 0.772
+    },
+    "drift_is_not_serial_correlation": "A random walk with drift has independent increments, so its variance ratio is 1 by construction and this classifier is blind to it *by design*. Detection of 'trend_with_drift' at the false-positive rate is the correct result, not a defect: drift is exploited by the momentum signal itself, while the classifier's job is to decide whether serial correlation favours momentum or mean reversion."
+  }
+}

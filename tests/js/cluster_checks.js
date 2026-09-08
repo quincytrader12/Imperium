@@ -30,7 +30,7 @@ global.document = {
 };
 
 const src = fs.readFileSync(
-  path.join(__dirname, '..', '..', 'src', 'godalgo', 'server', 'static', 'cluster.js'),
+  path.join(__dirname, '..', '..', 'src', 'imperium', 'server', 'static', 'cluster.js'),
   'utf8');
 eval(src);
 

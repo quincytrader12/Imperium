@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from godalgo.strategy import statistics as st
-from godalgo.strategy.calibration import CALIBRATION_PATH, build_thresholds, Sample
-from godalgo.strategy.regime import (
+from imperium.strategy import statistics as st
+from imperium.strategy.calibration import CALIBRATION_PATH, build_thresholds, Sample
+from imperium.strategy.regime import (
     CalibrationMissing, Regime, classify, classify_from_stats, load_calibration,
 )
 
@@ -36,7 +36,7 @@ def test_the_classifier_refuses_to_run_uncalibrated(tmp_path):
     and a Hurst of 0.5 would produce a classifier that fires on a large fraction
     of pure noise while appearing to work."""
     load_calibration.cache_clear()
-    with pytest.raises(CalibrationMissing, match="godalgo calibrate"):
+    with pytest.raises(CalibrationMissing, match="imperium calibrate"):
         load_calibration(str(tmp_path / "absent.json"))
 
 

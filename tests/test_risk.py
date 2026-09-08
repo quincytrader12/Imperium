@@ -7,12 +7,12 @@ import math
 import numpy as np
 import pytest
 
-from godalgo.execution.risk import (
+from imperium.execution.risk import (
     OPTIMISABLE_PARAMETERS, RiskLimits, assert_search_space_is_safe,
     risk_limit_field_names,
 )
-from godalgo.execution.sizing import annualised_volatility, size_position
-from godalgo.strategy.signals import StrategyParams
+from imperium.execution.sizing import annualised_volatility, size_position
+from imperium.strategy.signals import StrategyParams
 
 CRYPTO_YEAR = 365 * 24 * 3600
 EQUITY_YEAR = int(252 * 6.5 * 3600)
@@ -69,7 +69,7 @@ def test_the_venue_registry_itself_declares_a_market_that_never_closes():
     constants, so it kept passing when the registry's seconds_per_year was
     changed to an equity calendar. The value that actually reaches the sizer is
     the one on the spec, so that is what this asserts."""
-    from godalgo.venues.registry import VENUES
+    from imperium.venues.registry import VENUES
 
     for venue_id, spec in VENUES.items():
         assert spec.seconds_per_year == CRYPTO_YEAR, (

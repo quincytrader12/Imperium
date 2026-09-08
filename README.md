@@ -1,4 +1,4 @@
-# GODALGO
+# IMPERIUM
 
 A self-contained algorithmic crypto trading terminal for **Binance Spot**, with a
 live instrument-panel UI, packaged as a double-clickable Windows executable.
@@ -14,17 +14,17 @@ HTML/CSS/canvas for the front end. No framework, no build step.
 uv venv && uv pip install -e ".[dev]"
 
 # 1. Can this machine even reach the venue? Six layers, first failure wins.
-uv run godalgo diagnose
+uv run imperium diagnose
 
 # 2. Store a key. It cannot trade until you separately enable it.
-uv run godalgo keys add --name main          # prompts without echo
-uv run godalgo balance                       # the Phase-1 deliverable
+uv run imperium keys add --name main          # prompts without echo
+uv run imperium balance                       # the Phase-1 deliverable
 
 # 3. Measure the regime classifier's thresholds. Nothing is hardcoded.
-uv run godalgo calibrate
+uv run imperium calibrate
 
 # 4. Run the terminal.
-uv run godalgo serve
+uv run imperium serve
 ```
 
 The terminal is at <http://127.0.0.1:8787/> and the diagnostics at
@@ -36,7 +36,7 @@ The terminal is at <http://127.0.0.1:8787/> and the diagnostics at
 
 ### No ccxt, and no multi-venue abstraction
 
-`src/godalgo/venues/binance/` is a direct REST client against the documented
+`src/imperium/venues/binance/` is a direct REST client against the documented
 HTTP API. A library covering a hundred venues must flatten each venue's error
 vocabulary into a common one, and that flattening discards precisely what an
 operator needs: whether `-2015` was the key's IP allow-list, its trading
@@ -50,8 +50,8 @@ accounts cannot fund each other.
 
 ### Every threshold is measured
 
-`godalgo calibrate` generates nulls, measures the estimators against them, and
-writes `src/godalgo/strategy/null_calibration.json`. That file is the only
+`imperium calibrate` generates nulls, measures the estimators against them, and
+writes `src/imperium/strategy/null_calibration.json`. That file is the only
 source of thresholds; the classifier raises rather than falling back to textbook
 constants, because a silent fallback would produce something that fires on a
 large share of pure noise while appearing to work.
@@ -88,7 +88,7 @@ its own half-spread constant during development.
 
 - The server **validates** its bind address; `0.0.0.0` raises. This process holds
   API keys and has no authentication.
-- Credentials live in `~/.godalgo/credentials.json`, owner-only (`0600`, or an
+- Credentials live in `~/.imperium/credentials.json`, owner-only (`0600`, or an
   icacls ACL on Windows), and the permissions are **verified on load** — the
   interesting case is a file created correctly and later copied or restored.
 - A credential never leaves the process. The connections endpoint returns masked
@@ -120,7 +120,7 @@ behaving correctly. So:
 ## Layout
 
 ```
-src/godalgo/
+src/imperium/
   cli.py                    keys / balance / diagnose / serve / calibrate
   config.py                 paths and invariants
   logging_setup.py          redaction that cannot be bypassed
@@ -163,7 +163,7 @@ replay, a bloom-measured budget, jittered speed and depth — run under Node fro
 
 ## Running the Windows build
 
-**Download `GODALGO-windows.zip`** from the
+**Download `IMPERIUM-windows.zip`** from the
 [latest release](https://github.com/quincytrader12/Imperium/releases/tag/windows-latest-build).
 
 1. Right-click the downloaded zip → **Properties** → tick **Unblock** → OK.
@@ -171,14 +171,14 @@ replay, a bloom-measured budget, jittered speed and depth — run under Node fro
    makes SmartScreen refuse to run what is inside.
 2. **Extract it** anywhere — the Desktop is fine. Do not run it from inside the
    zip; Windows runs that from a temporary folder and it will not work properly.
-3. Double-click **Start-GODALGO.bat**.
+3. Double-click **Start-IMPERIUM.bat**.
 
 Your browser opens at <http://127.0.0.1:8787/>. The console window shows the URL
 and stays open; close it or press Ctrl+C to stop.
 
 ### If it does not start
 
-The folder contains **`godalgo-startup.log`** after any attempt, successful or
+The folder contains **`imperium-startup.log`** after any attempt, successful or
 not. That file says what happened.
 
 By far the most common cause is **Microsoft Defender deleting the file** —
@@ -186,7 +186,7 @@ unsigned PyInstaller executables are a frequent false positive. Check Windows
 Security → Virus & threat protection → **Protection history**. If it is there,
 restore it and add the folder as an exclusion.
 
-Use `Start-GODALGO.bat` rather than the `.exe` directly: if the program exits
+Use `Start-IMPERIUM.bat` rather than the `.exe` directly: if the program exits
 for any reason, the batch file keeps the window open so you can read why. A
 double-clicked `.exe` closes its own console and takes the message with it.
 
@@ -196,26 +196,26 @@ A single-file build unpacks its whole payload into `%TEMP%` on every launch.
 Defender scans that unpack each time, which is slow and is the usual reason the
 file gets quarantined — "extract a pile of DLLs to a temp folder and run them"
 is also what malware does. The folder build runs in place and starts
-immediately. `GODALGO.exe` is still published for anyone who wants one file.
+immediately. `IMPERIUM.exe` is still published for anyone who wants one file.
 
 ## Options
 
-`GODALGO.exe` is a single self-contained file — no Python install, no
+`IMPERIUM.exe` is a single self-contained file — no Python install, no
 dependencies, nothing to unpack. Double-click it, or run it from a terminal:
 
 ```
-GODALGO.exe                  start on http://127.0.0.1:8787/ and open a browser
-GODALGO.exe --port 9000      serve on port 9000 instead
-GODALGO.exe --no-browser     start without opening a browser
-GODALGO.exe --version
-GODALGO.exe --help
+IMPERIUM.exe                  start on http://127.0.0.1:8787/ and open a browser
+IMPERIUM.exe --port 9000      serve on port 9000 instead
+IMPERIUM.exe --no-browser     start without opening a browser
+IMPERIUM.exe --version
+IMPERIUM.exe --help
 ```
 
 It prints the URL it is serving on:
 
 ```
 ==============================================================
-  GODALGO — built by Quincy Gininda
+  IMPERIUM — built by Quincy Gininda
 ==============================================================
   Open:        http://127.0.0.1:8787/
   Diagnostics: http://127.0.0.1:8787/diagnose
@@ -255,7 +255,7 @@ that a success, so the binary itself is checked.
 ## Known limits
 
 - **The live network path is unverified from the development sandbox.** Binance
-  is blocked there by a TLS-intercepting proxy, which `godalgo diagnose`
+  is blocked there by a TLS-intercepting proxy, which `imperium diagnose`
   correctly identifies. Every authenticated path is tested against a mock venue
   that recomputes the HMAC over the exact query string it receives, so signing is
   genuinely exercised — but no order has been sent to the real venue.

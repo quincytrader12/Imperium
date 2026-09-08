@@ -8,12 +8,12 @@ import math
 import numpy as np
 import pytest
 
-from godalgo.execution.engine import SymbolEngine
-from godalgo.execution.portfolio import PortfolioAllocator, Verdict
-from godalgo.execution.risk import RiskLimits
-from godalgo.strategy.signals import StrategyParams
-from godalgo.telemetry.streams import TelemetryHub
-from godalgo.venues.registry import get
+from imperium.execution.engine import SymbolEngine
+from imperium.execution.portfolio import PortfolioAllocator, Verdict
+from imperium.execution.risk import RiskLimits
+from imperium.strategy.signals import StrategyParams
+from imperium.telemetry.streams import TelemetryHub
+from imperium.venues.registry import get
 
 
 def make_allocator(**kw) -> PortfolioAllocator:

@@ -11,7 +11,7 @@ import urllib.parse
 import httpx
 import pytest
 
-from godalgo.venues.binance.client import BinanceSpotClient, VenueError
+from imperium.venues.binance.client import BinanceSpotClient, VenueError
 from mock_venue import API_KEY, SECRET, MockVenue, html_block_page
 
 

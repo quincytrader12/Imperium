@@ -9,9 +9,9 @@ import sys
 
 import pytest
 
-from godalgo import config
-from godalgo.logging_setup import describe_secret, mask
-from godalgo.security.credentials import CredentialError, CredentialStore
+from imperium import config
+from imperium.logging_setup import describe_secret, mask
+from imperium.security.credentials import CredentialError, CredentialStore
 
 SECRET = "S3cr3t" + "x" * 58
 KEY = "PK" + "A" * 62
@@ -185,3 +185,26 @@ def test_a_null_credentials_field_loads_as_empty():
     config.ensure_home()
     config.credentials_path().write_text('{"credentials": null}', encoding="utf-8")
     assert len(CredentialStore()) == 0
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX modes")
+def test_quarantining_does_not_leave_a_stale_permission_warning():
+    """Prevents a loud "INSECURE CREDENTIAL FILE" alarm about a file that no
+    longer exists.
+
+    The permission report is taken at the start of the load, against the file
+    that is then moved aside. Reporting it afterwards describes a file that is
+    gone -- and a false alarm about credential security is worse than none,
+    because it teaches the operator to ignore the real one.
+    """
+    config.ensure_home()
+    path = config.credentials_path()
+    path.write_text('{"credentials": "main"}', encoding="utf-8")
+    os.chmod(path, 0o644)
+
+    store = CredentialStore(quarantine_corrupt=True)
+    assert store.quarantined_to is not None
+    assert store.permission_report.ok is True, (
+        f"stale warning about a moved file: {store.permission_report.detail}"
+    )
+    assert "does not exist" in store.permission_report.detail

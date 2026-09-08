@@ -17,7 +17,7 @@ import os
 import sys
 import traceback
 
-LOG_NAME = "godalgo-startup.log"
+LOG_NAME = "imperium-startup.log"
 
 
 def _log_path() -> "os.PathLike[str] | str":
@@ -32,7 +32,7 @@ def _log_path() -> "os.PathLike[str] | str":
     candidates = []
     if getattr(sys, "frozen", False):
         candidates.append(pathlib.Path(sys.executable).parent)
-    candidates.append(pathlib.Path.home() / ".godalgo")
+    candidates.append(pathlib.Path.home() / ".imperium")
     candidates.append(pathlib.Path(os.environ.get("TEMP", ".")))
 
     for base in candidates:
@@ -93,7 +93,7 @@ def _start_logging():
     except Exception:
         return None
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    handle.write(f"\n{'=' * 70}\n{stamp}  GODALGO starting\n")
+    handle.write(f"\n{'=' * 70}\n{stamp}  IMPERIUM starting\n")
     handle.write(f"  executable: {sys.executable}\n")
     handle.write(f"  frozen:     {getattr(sys, 'frozen', False)}\n")
     handle.write(f"  argv:       {sys.argv}\n")
@@ -113,18 +113,18 @@ def parse_args():
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="GODALGO",
-        description=("GODALGO trading terminal — built by Quincy Gininda. "
+        prog="IMPERIUM",
+        description=("IMPERIUM trading terminal — built by Quincy Gininda. "
                      "Serves a local web UI on 127.0.0.1."),
         epilog=("Examples:\n"
-                "  GODALGO.exe                  start on the default port and "
+                "  IMPERIUM.exe                  start on the default port and "
                 "open a browser\n"
-                "  GODALGO.exe --port 9000      start on port 9000\n"
-                "  GODALGO.exe --no-browser     start without opening a browser\n"),
+                "  IMPERIUM.exe --port 9000      start on port 9000\n"
+                "  IMPERIUM.exe --no-browser     start without opening a browser\n"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--port", type=int, default=int(os.environ.get("GODALGO_PORT", 0)) or None,
+        "--port", type=int, default=int(os.environ.get("IMPERIUM_PORT", 0)) or None,
         help=f"port to serve on (default {config_default_port()}; if it is busy, "
              f"the next free port above it is used)")
     parser.add_argument("--no-browser", action="store_true",
@@ -137,15 +137,15 @@ def parse_args():
     if not (1 <= args.port <= 65535):
         parser.error(f"--port must be between 1 and 65535, not {args.port}")
     if args.version:
-        import godalgo
+        import imperium
 
-        print(f"GODALGO {godalgo.__version__} — built by Quincy Gininda")
+        print(f"IMPERIUM {imperium.__version__} — built by Quincy Gininda")
         raise SystemExit(0)
     return args
 
 
 def config_default_port() -> int:
-    from godalgo import config
+    from imperium import config
 
     return config.DEFAULT_PORT
 
@@ -157,7 +157,7 @@ def _pause() -> None:
     input() raises EOFError, which buries the actual failure under an unrelated
     traceback.
     """
-    if os.environ.get("GODALGO_NO_PAUSE"):
+    if os.environ.get("IMPERIUM_NO_PAUSE"):
         return
     try:
         if not sys.stdin or not sys.stdin.isatty():
@@ -191,11 +191,11 @@ def main() -> int:
     log_handle = _start_logging()
 
     try:
-        from godalgo import config, logging_setup
-        from godalgo.server.app import run_server
+        from imperium import config, logging_setup
+        from imperium.server.app import run_server
     except Exception:
         traceback.print_exc()
-        _report("GODALGO could not start: its own modules failed to import.\n"
+        _report("IMPERIUM could not start: its own modules failed to import.\n"
                 "This is a packaging fault, not a configuration problem.",
                 log_handle)
         _pause()
@@ -211,7 +211,7 @@ def main() -> int:
         config.ensure_home()
         # CI launches this to verify the build; opening a browser on a headless
         # runner is at best noise and at worst a hang.
-        open_browser = not (args.no_browser or os.environ.get("GODALGO_NO_BROWSER"))
+        open_browser = not (args.no_browser or os.environ.get("IMPERIUM_NO_BROWSER"))
         return run_server(host="127.0.0.1", port=args.port,
                           open_browser=open_browser)
     except KeyboardInterrupt:
@@ -219,7 +219,7 @@ def main() -> int:
         return 0
     except Exception as exc:
         traceback.print_exc()
-        _report(f"GODALGO stopped: {exc}", log_handle)
+        _report(f"IMPERIUM stopped: {exc}", log_handle)
         _pause()
         return 1
     finally:

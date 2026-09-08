@@ -99,7 +99,7 @@ def test_every_file_the_workflow_runs_is_tracked_by_git():
 
     This happened: .gitignore carried a bare ``*.spec`` to exclude the spec
     PyInstaller generates, and it also excluded the hand-written
-    ``packaging/godalgo.spec``. The local build worked because the file was on
+    ``packaging/imperium.spec``. The local build worked because the file was on
     disk; the Windows job failed with "Spec file not found" for a file that had
     never entered the repository. Existing on disk is not evidence.
     """

@@ -7,8 +7,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from godalgo.server.app import create_app, validate_bind_host
-from godalgo.session import TradingSession
+from imperium.server.app import create_app, validate_bind_host
+from imperium.session import TradingSession
 
 KEY = "PK" + "A" * 62
 SECRET = "S3cr3t" + "x" * 58
@@ -130,7 +130,7 @@ def test_the_watchlist_works_with_no_credential_at_all(app_client):
 
 
 def test_a_missing_credential_file_does_not_break_the_page(app_client):
-    """Prevents: a first run with no ~/.godalgo failing to serve the UI."""
+    """Prevents: a first run with no ~/.imperium failing to serve the UI."""
     assert app_client.get("/").status_code == 200
     assert app_client.get("/api/connections").json()["credentials"] == []
 
@@ -164,9 +164,9 @@ def test_the_daily_loss_gauge_reports_budget_spent_not_raw_loss():
     """
     from decimal import Decimal
 
-    from godalgo.execution.broker import PaperBroker
-    from godalgo.execution.risk import RiskLimits
-    from godalgo.session import TradingSession
+    from imperium.execution.broker import PaperBroker
+    from imperium.execution.risk import RiskLimits
+    from imperium.session import TradingSession
 
     session = TradingSession(limits=RiskLimits(daily_loss_halt=0.04))
     session.broker = PaperBroker(session.spec, Decimal("9700"))
@@ -187,9 +187,9 @@ def test_the_daily_loss_budget_is_capped_at_fully_spent():
     which would overflow its own track."""
     from decimal import Decimal
 
-    from godalgo.execution.broker import PaperBroker
-    from godalgo.execution.risk import RiskLimits
-    from godalgo.session import TradingSession
+    from imperium.execution.broker import PaperBroker
+    from imperium.execution.risk import RiskLimits
+    from imperium.session import TradingSession
 
     session = TradingSession(limits=RiskLimits(daily_loss_halt=0.04))
     session.broker = PaperBroker(session.spec, Decimal("8000"))
@@ -229,7 +229,7 @@ def test_a_busy_port_falls_back_instead_of_crashing():
     "that port is taken"."""
     import socket
 
-    from godalgo.server.app import choose_port, port_is_free
+    from imperium.server.app import choose_port, port_is_free
 
     # No SO_REUSEADDR on the listener either: this test must model an ordinary
     # server holding the port, and on Windows SO_REUSEADDR changes who else is
@@ -266,14 +266,14 @@ def test_the_packaged_launcher_accepts_a_port_and_refuses_a_bad_one():
 
     old = sys.argv[:]
     try:
-        sys.argv = ["GODALGO", "--port", "9123"]
+        sys.argv = ["IMPERIUM", "--port", "9123"]
         args = parse_args()
         assert args.port == 9123 and args.no_browser is False
 
-        sys.argv = ["GODALGO", "--no-browser"]
+        sys.argv = ["IMPERIUM", "--no-browser"]
         assert parse_args().no_browser is True
 
-        sys.argv = ["GODALGO", "--port", "99999"]
+        sys.argv = ["IMPERIUM", "--port", "99999"]
         with pytest.raises(SystemExit):
             parse_args()
     finally:
@@ -306,7 +306,7 @@ def test_the_launcher_offers_no_way_to_bind_publicly():
     old_argv = sys.argv[:]
     argparse.ArgumentParser.parse_args = spy
     try:
-        sys.argv = ["GODALGO"]
+        sys.argv = ["IMPERIUM"]
         with pytest.raises(SystemExit):
             module["parse_args"]()
     finally:
@@ -328,12 +328,12 @@ def test_the_terminal_still_starts_when_the_credentials_file_is_broken(content):
     """Prevents the exact failure a user hit: a malformed credentials file
     aborting application startup, so the terminal never opened at all.
 
-    This program exists to make the difference between "not trading" and
-    "broken" visible. It cannot do that if a broken file stops it from starting,
-    so a credential store that cannot load must degrade to no credentials plus a
-    stated reason -- never to a dead server.
+    It then nagged about the same file on every start, which is barely better --
+    a file that cannot be parsed cannot be used, so the application moves it
+    aside (never deletes it) and starts clean. The problem is resolved rather
+    than reported forever.
     """
-    from godalgo import config
+    from imperium import config
 
     config.ensure_home()
     config.credentials_path().write_text(content, encoding="utf-8")
@@ -341,21 +341,35 @@ def test_the_terminal_still_starts_when_the_credentials_file_is_broken(content):
     with TestClient(create_app(TradingSession())) as client:
         assert client.get("/").status_code == 200
         snapshot = client.get("/api/snapshot").json()
-        assert snapshot["store_error"], "the reason must be reported, not swallowed"
-        # And the rest of the terminal must be fully usable.
+
+        # The file is repaired, not merely reported. A file that cannot be
+        # parsed cannot be used either, so a standing error about it helps
+        # nobody -- it is moved aside and a clean one takes its place.
+        assert snapshot["store_error"] == "", (
+            "a corrupt file should be resolved, not left as a standing error"
+        )
+        moved = list(config.home_dir().glob("credentials.json.broken-*"))
+        assert len(moved) == 1, "the unreadable file must be kept, not deleted"
+        assert not config.credentials_path().exists()
+
+        # It is still recorded once, where a human can see it.
+        messages = " ".join(e["message"] for e in snapshot["events"])
+        assert "moved aside" in messages
+
+        # And the rest of the terminal is fully usable.
         assert len(snapshot["watchlist"]) > 0
         assert snapshot["lamps"]["key"] == "off"
 
         conns = client.get("/api/connections")
-        assert conns.status_code == 200, "the panel must render and explain"
+        assert conns.status_code == 200
         assert conns.json()["credentials"] == []
-        assert conns.json()["error"]
+        assert not conns.json().get("error")
 
 
 def test_a_broken_credential_store_never_leaks_the_file_contents():
     """Prevents an error message quoting a credentials file back into the UI. A
     corrupt file may still contain a real secret."""
-    from godalgo import config
+    from imperium import config
 
     secret = "S3cr3tKeyMaterial" + "z" * 40
     config.ensure_home()
@@ -381,7 +395,7 @@ def test_the_terminal_survives_an_unanticipated_credential_store_failure(monkeyp
     lifespan could be reverted with the suite still green, because after the
     loader fix nothing reached it any more.
     """
-    import godalgo.server.app as app_module
+    import imperium.server.app as app_module
 
     class Exploding:
         def __init__(self, *a, **kw):

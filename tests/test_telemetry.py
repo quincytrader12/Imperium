@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from godalgo.telemetry.streams import Level, TelemetryHub
+from imperium.telemetry.streams import Level, TelemetryHub
 
 
 def test_a_pulse_flood_cannot_evict_readable_events():

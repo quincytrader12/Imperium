@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from godalgo.venues.binance.filters import (
+from imperium.venues.binance.filters import (
     floor_to_step, format_decimal, parse_symbol, round_price, to_decimal,
 )
 from mock_venue import EXCHANGE_INFO

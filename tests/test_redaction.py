@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 import logging
 
-from godalgo import logging_setup
-from godalgo.logging_setup import RedactingFilter, forget_secrets, register_secret, scrub
+from imperium import logging_setup
+from imperium.logging_setup import RedactingFilter, forget_secrets, register_secret, scrub
 
 SECRET = "S3cr3t" + "x" * 58
 
@@ -19,7 +19,7 @@ def test_a_registered_secret_cannot_be_logged_even_via_an_argument():
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.addFilter(RedactingFilter())
-    logger = logging.getLogger("godalgo.test.redaction")
+    logger = logging.getLogger("imperium.test.redaction")
     logger.handlers = [handler]
     logger.propagate = False
     logger.setLevel(logging.DEBUG)
@@ -70,7 +70,7 @@ def test_an_exception_carrying_a_signed_url_is_scrubbed(caplog):
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.addFilter(RedactingFilter())
-    logger = logging.getLogger("godalgo.test.exc")
+    logger = logging.getLogger("imperium.test.exc")
     logger.handlers = [handler]
     logger.propagate = False
     try:

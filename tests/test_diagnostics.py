@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from godalgo.diagnostics.layers import (
+from imperium.diagnostics.layers import (
     NetworkDiagnostic, Status, _blocked_by_intermediary,
 )
 
@@ -56,7 +56,7 @@ def test_the_text_report_is_plain_and_states_a_verdict():
     """Prevents: a diagnostic whose output cannot be pasted anywhere. It is
     exposed at a URL as well as a button, because a button in a scrolling panel
     is a control people cannot find."""
-    from godalgo.diagnostics.layers import Diagnosis, LayerResult
+    from imperium.diagnostics.layers import Diagnosis, LayerResult
 
     d = Diagnosis(host="api.example", verdict="it works", remedy="nothing to do")
     d.layers.append(LayerResult(1, "environment", Status.PASS, "fine"))
