@@ -92,3 +92,72 @@ def test_proxy_environment_is_reported_by_name_only():
         assert not any("swordfish" in n for n in names)
     finally:
         os.environ.pop("HTTPS_PROXY", None)
+
+
+def test_an_alpaca_key_is_scrubbed_even_though_it_is_short():
+    """Prevents the gap the venue switch opened.
+
+    Binance keys are 64 characters, so a single length rule covered them. An
+    Alpaca key id is twenty, and Alpaca does not sign requests -- authentication
+    *is* the header -- so a key echoed into an error message is the whole
+    credential, not a derived signature. The length rule alone would let it
+    straight through.
+    """
+    forget_secrets()
+    paper = "PK" + "7ABCDEFGHIJKLMNOPQ"
+    live = "AK" + "9ZYXWVUTSRQPONMLKJ"
+    assert len(paper) == 20 and len(live) == 20
+
+    for key in (paper, live):
+        out = scrub(f"the venue rejected the key {key} against the paper host")
+        assert key not in out
+        assert "[redacted]" in out
+        # The surrounding text has to survive, or the message stops being
+        # diagnostic and the operator learns nothing.
+        assert "the venue rejected" in out and "paper host" in out
+
+
+def test_an_alpaca_auth_header_never_reaches_a_handler():
+    """Each redaction layer is tested on a value only that layer can catch.
+
+    The value here is deliberately short and ordinary-looking: not long enough
+    for the length rule, not shaped like a key id. If the header rule were
+    deleted, nothing else would save it -- which is the point, and is what an
+    earlier version of this test missed by using a 40-character value that the
+    length rule caught regardless.
+    """
+    forget_secrets()
+    short = "notlongenough12"
+    assert len(short) < 40 and not short.startswith(("PK", "AK"))
+    for header in ("APCA-API-KEY-ID", "APCA-API-SECRET-KEY"):
+        out = scrub(f"{header}: {short}")
+        assert short not in out
+        assert header in out, "the header name is diagnostic; only its value is not"
+
+
+def test_a_secret_shaped_string_is_scrubbed_on_length_alone():
+    """The length rule, on a value no other rule covers.
+
+    Forty characters is Alpaca's secret length. Not in a header, not shaped
+    like a key id: if the bound drifts back up, this is the test that goes red.
+    """
+    forget_secrets()
+    secret = "Zq" + "3wRt7yUi0pLkJhGfDsAaQwErTyUiOpZxCv18"
+    assert len(secret) == 38
+    secret += "Bn"
+    assert len(secret) == 40 and not secret.startswith(("PK", "AK"))
+    out = scrub(f"the store rejected {secret} as malformed")
+    assert secret not in out
+    assert "the store rejected" in out
+
+
+def test_a_client_order_id_is_still_readable_after_scrubbing():
+    """The length rule was lowered to forty characters to cover an Alpaca
+    secret. A client order id must not be collateral damage: it is the only
+    handle on an ambiguous submission, and an unreadable journal is how a
+    duplicate order gets sent."""
+    from imperium.venues.alpaca.client import AlpacaClient
+
+    forget_secrets()
+    coid = AlpacaClient.new_client_order_id("imp")
+    assert coid in scrub(f"venue accepted {coid}")

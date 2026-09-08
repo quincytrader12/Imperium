@@ -205,7 +205,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="imperium",
-        description="Algorithmic crypto trading terminal for Binance Spot.",
+        description="Autonomous trading terminal for Alpaca: US equities and crypto.",
     )
     p.add_argument("-v", "--verbose", action="store_true",
                    help="debug logging (credentials are still never logged)")

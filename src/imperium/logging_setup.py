@@ -34,14 +34,24 @@ _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # this output gets pasted into bug reports.
     (re.compile(r"(?P<scheme>\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"),
      r"\g<scheme>" + _REDACTED + "@"),
-    # Query-string secrets. Signed Binance requests carry both.
+    # Query-string secrets, wherever they turn up.
     (re.compile(r"(?i)\b(signature|secret|secretKey|apiKey|api_key|token|password)=[^&\s\"']+"),
      r"\1=" + _REDACTED),
-    # Binance-style keys: 64 chars of base62. Long enough that false positives
-    # on ordinary prose are vanishingly unlikely.
-    (re.compile(r"\b[A-Za-z0-9]{56,}\b"), _REDACTED),
-    # The header a signed request carries.
-    (re.compile(r"(?i)(X-MBX-APIKEY['\"]?\s*[:=]\s*)\S+"), r"\1" + _REDACTED),
+    # The two headers Alpaca authenticates with. There is no request signing --
+    # authentication *is* these headers -- so a logged request header is the
+    # whole credential rather than a derived signature.
+    (re.compile(r"(?i)(APCA-API-(?:KEY-ID|SECRET-KEY)['\"]?\s*[:=]\s*)\S+"),
+     r"\1" + _REDACTED),
+    # An Alpaca key id: twenty uppercase characters beginning PK (paper) or AK
+    # (live). Short enough that the length rule below would never catch it,
+    # which is exactly the gap this closes.
+    (re.compile(r"\b[AP]K[A-Z0-9]{18}\b"), _REDACTED),
+    # Anything else long enough to be a secret rather than prose. Forty
+    # characters is set by Alpaca's secret length; the cost of the lower bound
+    # is that a bare 40-character git SHA would also be redacted, which this
+    # program never logs. Client order ids are unaffected: "imp-" breaks the
+    # run, leaving 24 characters.
+    (re.compile(r"\b[A-Za-z0-9]{40,}\b"), _REDACTED),
 )
 
 #: Below this length a "secret" is too short to scrub without mangling
