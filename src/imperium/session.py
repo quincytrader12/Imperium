@@ -168,6 +168,12 @@ class TradingSession:
         if e is None:
             e = SymbolEngine(symbol, self.spec, self.limits, self.allocator,
                              self.telemetry, self.params)
+            # Engines are created lazily, so one built after the last refresh
+            # would otherwise start with no market estimate and no idea what
+            # time it is -- and would then refuse the overnight trade with a
+            # reason that describes the wiring rather than the market.
+            e.pooled_drift = self.pooled_drift
+            e.session_phase = self.session_phase
             self.engines[symbol] = e
             self.allocator.observe(symbol)
         return e
@@ -389,10 +395,18 @@ class TradingSession:
         """
         if self.client is None:
             return
-        if not force and time.time() - self._daily_loaded_at < OVERNIGHT_REFRESH_SECONDS:
-            return
         equities = [s for s in self.universe
                     if classify_symbol(s) is AssetClass.US_EQUITY]
+        # Daily bars change once a day, so the interval exists to stop this
+        # spending request budget to learn nothing. It must not strand a symbol
+        # the scanner admitted since the last pull: that symbol would carry no
+        # history for up to six hours and refuse every night in that window
+        # with "warming up", which describes this method rather than the market.
+        missing = any(not self.engines.get(s) or not self.engines[s].daily_bars
+                      for s in equities)
+        if (not force and not missing
+                and time.time() - self._daily_loaded_at < OVERNIGHT_REFRESH_SECONDS):
+            return
         if not equities:
             self.overnight_note = ("no equities in the universe, so there is no "
                                    "overnight session to measure")

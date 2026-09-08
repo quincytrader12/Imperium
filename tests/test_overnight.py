@@ -848,3 +848,61 @@ async def test_the_unmanaged_warning_returns_on_the_next_morning(tmp_path,
         session.market_clock = preopen
         await session._tick()
         assert len(warnings()) == 2, "a new morning is a new warning"
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_the_scanner_admits_later_is_not_stranded(tmp_path,
+                                                                 monkeypatch):
+    """Prevents a refusal that describes the wiring rather than the market.
+
+    The universe is scanned continuously, so an equity can be admitted hours
+    after the last daily-history pull. The refresh interval exists to stop this
+    spending request budget to learn nothing -- daily bars change once a day --
+    but a symbol with no history at all is not "nothing to learn". Stranded, it
+    would carry no overnight sample and refuse every night for up to six hours
+    with "warming up", which is a statement about this method, not about the
+    symbol.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    async with _session(venue) as session:
+        await session.refresh_daily_history(force=True)
+        first_pull = len([r for r in venue.requests if r.url.path.endswith("/bars")])
+        assert session.engines["AAPL"].daily_bars
+
+        # Nothing changed: the interval holds and no request is made.
+        await session.refresh_daily_history()
+        assert len([r for r in venue.requests
+                    if r.url.path.endswith("/bars")]) == first_pull
+
+        # The scanner admits a new equity. That one has no history at all.
+        session.universe = ["AAPL", "SPY", "BTC/USD", "HARD"]
+        await session.refresh_daily_history()
+
+        assert len([r for r in venue.requests
+                    if r.url.path.endswith("/bars")]) > first_pull
+        assert session.engines["HARD"].daily_bars
+        assert session.engines["HARD"].pooled_drift is session.pooled_drift
+
+
+@pytest.mark.asyncio
+async def test_an_engine_built_after_a_refresh_starts_from_the_same_estimate():
+    """Prevents a lazily created engine trading in the dark.
+
+    Engines are built on demand. One created after the last refresh would hold
+    no market estimate and no session phase, so it would refuse the overnight
+    trade for a reason that has nothing to do with the market -- and, worse,
+    would run the intraday path during the closing window because its phase
+    still said CLOSED.
+    """
+    venue = MockVenue()
+    async with _session(venue) as session:
+        await session.refresh_daily_history(force=True)
+        session.market_clock = MarketClock(
+            is_open=True,
+            next_close=dt.datetime.now(UTC) + dt.timedelta(minutes=18))
+        assert session._update_session_phase() is SessionPhase.CLOSING
+
+        fresh = session.engine("NVDA")           # never seen before now
+        assert fresh.pooled_drift is session.pooled_drift
+        assert fresh.session_phase is SessionPhase.CLOSING
