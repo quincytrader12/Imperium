@@ -130,6 +130,13 @@ around that fact rather than around the headline:
   calendar, so a last gap beyond 3 sigma of the symbol's own overnight
   volatility is treated as news rather than premium. This is a statistical
   stand-in and is labelled as one.
+- **A position the night does not want is closed, not carried.** A refusal
+  never reduces a position during the session — "no new exposure" is not "sell
+  what you have" — but at the close that would silently turn an intraday
+  position into an overnight one, sized against an intraday distribution and
+  stopped by an ATR stop that a gap goes straight through. The closing window
+  is where that gets decided explicitly, on the answer the overnight strategy
+  just gave.
 - **It is not a day trade.** Entering on one close and exiting on the next open
   does not touch the PDT counter. This is a genuine structural advantage on a
   sub-$25,000 account: the intraday strategy stops at two day trades, the

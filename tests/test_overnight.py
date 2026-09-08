@@ -906,3 +906,154 @@ async def test_an_engine_built_after_a_refresh_starts_from_the_same_estimate():
         fresh = session.engine("NVDA")           # never seen before now
         assert fresh.pooled_drift is session.pooled_drift
         assert fresh.session_phase is SessionPhase.CLOSING
+
+
+async def _closing_session(venue, symbol="AAPL"):
+    """A session in the closing window holding a position in ``symbol``."""
+    from imperium.venues.alpaca.client import AlpacaClient
+
+    session = TradingSession()
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    session.universe = [symbol, "BTC/USD"]
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    q = session.feed.quote(symbol)
+    q.last, q.bid, q.ask, q.updated_at = 100.0, 99.99, 100.01, time.time()
+    await session.broker.apply_target(symbol, 0.1, 100.0, 10_000.0)
+    session.market_clock = MarketClock(
+        is_open=True, next_close=dt.datetime.now(UTC) + dt.timedelta(minutes=18))
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_position_the_night_does_not_want_is_closed_not_carried(
+        tmp_path, monkeypatch):
+    """Prevents an intraday position becoming an accidental overnight one.
+
+    _act_on returns early on any verdict that is not TRADING, so a refusal
+    never reduces a position. During the session that is right -- "no new
+    exposure" is not "sell what you have". At the close it is wrong: the
+    position is carried through the night, sized against an intraday
+    distribution and stopped by an ATR stop, and a gap goes through both.
+
+    The overnight strategy has just answered exactly this question and said no.
+    Acting on the no is the point of asking it.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    session = await _closing_session(venue)
+    try:
+        engine = session.engine("AAPL")
+        engine.daily_bars = daily_bars(200, overnight_bps=4.0, intraday_bps=0.0)
+        engine.pooled_drift = PooledDrift(4.0, 6.5, 3560, 40, 80.0)
+        engine.session_phase = SessionPhase.CLOSING
+        _warm(engine)
+        engine.set_book(99.99, 100.01)
+
+        d = engine.evaluate()
+        assert d.strategy == "overnight" and d.verdict is Verdict.REJECTED
+        assert not session.broker.positions["AAPL"].is_flat
+
+        await session._tick()
+
+        assert session.broker.positions["AAPL"].is_flat
+        assert session.broker.fills[-1].side == "SELL"
+        assert MARKET_ON_CLOSE in session.broker.fills[-1].note
+    finally:
+        await session.detach_client()
+
+
+@pytest.mark.asyncio
+async def test_a_position_the_night_does_want_is_left_alone(tmp_path, monkeypatch):
+    """The other side: a symbol the strategy is deliberately holding must not
+    be closed by the same sweep that closes the ones it declined."""
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    session = await _closing_session(venue)
+    try:
+        session.overnight_holdings["AAPL"] = 0.1
+        engine = session.engine("AAPL")
+        engine.session_phase = SessionPhase.CLOSING
+        engine.decision.strategy = "overnight"
+        engine.decision.verdict = Verdict.REJECTED   # a later, weaker read
+
+        await session._tick()
+
+        assert not session.broker.positions["AAPL"].is_flat
+    finally:
+        await session.detach_client()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_intraday_verdict_is_not_treated_as_an_overnight_answer(
+        tmp_path, monkeypatch):
+    """Prevents flattening on a verdict that answered a different question.
+
+    An engine that has not yet evaluated inside the closing window still holds
+    an intraday decision. "The intraday blend sees no edge right now" is not
+    "this is not worth holding overnight", and closing a position on it would
+    be acting on an answer to a question nobody asked.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    session = await _closing_session(venue)
+    try:
+        engine = session.engine("AAPL")
+        engine.decision.strategy = "intraday"
+        engine.decision.verdict = Verdict.REJECTED
+
+        await session._tick()
+
+        assert not session.broker.positions["AAPL"].is_flat
+    finally:
+        await session.detach_client()
+
+
+@pytest.mark.asyncio
+async def test_crypto_is_never_closed_for_a_session_that_does_not_end(
+        tmp_path, monkeypatch):
+    """Crypto has no close to flatten into. Applying an equity's session
+    boundary to it would liquidate the book once a day for no reason."""
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    session = await _closing_session(venue, symbol="BTC/USD")
+    try:
+        engine = session.engine("BTC/USD")
+        engine.decision.strategy = "overnight"      # cannot happen, but pin it
+        engine.decision.verdict = Verdict.REJECTED
+
+        await session._tick()
+
+        assert not session.broker.positions["BTC/USD"].is_flat
+    finally:
+        await session.detach_client()
+
+
+@pytest.mark.asyncio
+async def test_a_symbol_the_strategy_wants_is_not_closed_by_the_same_sweep(
+        tmp_path, monkeypatch):
+    """The TRADING guard, tested on its own.
+
+    A symbol can want to be held without yet appearing in the holdings map --
+    the decision is taken on a closed bar and recorded when the order goes out.
+    In that gap the only thing standing between an intended overnight hold and
+    the sweep that closes unwanted ones is the verdict check, so it is tested
+    with the holdings map deliberately empty. An earlier version of this file
+    asserted the same property through a symbol that was *also* in the holdings
+    map, which meant the verdict check could be deleted with everything green.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    session = await _closing_session(MockVenue())
+    try:
+        assert session.overnight_holdings == {}
+        engine = session.engine("AAPL")
+        engine.session_phase = SessionPhase.CLOSING
+        engine.decision.strategy = "overnight"
+        engine.decision.verdict = Verdict.TRADING
+        engine.decision.target_weight = 0.1
+
+        await session._tick()
+
+        assert not session.broker.positions["AAPL"].is_flat
+    finally:
+        await session.detach_client()

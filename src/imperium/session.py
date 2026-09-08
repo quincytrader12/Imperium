@@ -558,6 +558,62 @@ class TradingSession:
             self._unmanaged_reported.clear()
         return self.session_phase
 
+    async def _flatten_unwanted_before_the_close(self) -> None:
+        """Close any equity the overnight strategy has just declined to hold.
+
+        The engine refuses a target by returning a verdict that is not TRADING,
+        and :meth:`_act_on` returns early on those -- so a refusal never reduces
+        a position. That is right during the session: "no new exposure" is not
+        "sell what you have". It is wrong at the close, because the position
+        does not simply sit there until tomorrow. It is carried through the
+        night, and the intraday strategy that opened it sized it against an
+        intraday distribution and put an ATR stop behind it, neither of which
+        survives a gap.
+
+        So the closing window is where that decision gets made explicitly. The
+        overnight strategy has just evaluated this exact question -- is this
+        symbol worth holding through the night -- and said no. Acting on the no
+        is the whole point of asking.
+
+        Only symbols the overnight strategy actually evaluated in this window
+        are considered: a stale intraday verdict is not an answer to the
+        question being asked, and skipping is the safe direction.
+        """
+        for symbol, position in list(self.broker.positions.items()):
+            if position.is_flat or symbol in self.overnight_holdings:
+                continue
+            if classify_symbol(symbol) is not AssetClass.US_EQUITY:
+                continue
+            engine = self.engines.get(symbol)
+            if engine is None or engine.decision.strategy != "overnight":
+                continue
+            if engine.decision.verdict is Verdict.TRADING:
+                continue
+            price = self.feed.quote(symbol).last
+            if price <= 0:
+                self.telemetry.event(
+                    Level.ERROR, "overnight",
+                    f"{symbol} should not be carried overnight but has no "
+                    f"price, so no closing order could be sized. It will be "
+                    f"held through the night.")
+                continue
+            try:
+                fill = await self.broker.apply_target(
+                    symbol, 0.0, price, self.equity(), order=MARKET_ON_CLOSE)
+            except (VenueError, ModeSwitchRefused) as exc:
+                self.telemetry.event(
+                    Level.ERROR, "overnight",
+                    f"could not lodge the closing exit for {symbol}: {exc}")
+                continue
+            self.allocator.observe(symbol).current_weight = 0.0
+            if fill:
+                self.telemetry.pulse(symbol, "order",
+                                     "closed rather than carried overnight", 1.0)
+            self.telemetry.event(
+                Level.INFO, "overnight",
+                f"{symbol}: closing on the auction rather than carrying it "
+                f"overnight — {engine.decision.reason}")
+
     async def _exit_overnight_holdings(self) -> None:
         """Sell every overnight hold on the opening auction.
 
@@ -764,7 +820,11 @@ class TradingSession:
     async def _tick(self) -> None:
         phase = self._update_session_phase()
         await self._drain_bars()
-        if phase is SessionPhase.PREOPEN:
+        if phase is SessionPhase.CLOSING:
+            # After the drain, so a position entered on this tick is already
+            # recorded as an intentional overnight hold and is not closed again.
+            await self._flatten_unwanted_before_the_close()
+        elif phase is SessionPhase.PREOPEN:
             await self._exit_overnight_holdings()
             self._report_unmanaged_equity()
         await self._refresh_account_limits()
