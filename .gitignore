@@ -10,3 +10,4 @@ dist/
 # with "Spec file not found" for a file that had never been committed.
 /*.spec
 .godalgo/
+*.log

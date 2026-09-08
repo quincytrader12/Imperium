@@ -117,28 +117,56 @@ jobs:
               sys.exit("null_calibration.json is missing; run 'godalgo calibrate'")
           print(f"calibration present ({p.stat().st_size} bytes)")
 
-      - name: Build the one-file executable
+      - name: Build the folder application
+        # The build people actually run. A one-file executable unpacks ~27MB
+        # into %TEMP% on every launch, which Defender scans every time and
+        # frequently quarantines; a folder build executes in place and starts
+        # immediately.
+        run: pyinstaller --clean --noconfirm packaging/godalgo-folder.spec
+
+      - name: Verify the folder build serves its own page and assets
+        run: python packaging/verify_build.py dist/GODALGO/GODALGO.exe
+
+      - name: Assemble the distributable folder
+        shell: pwsh
+        run: |
+          Copy-Item packaging/Start-GODALGO.bat dist/GODALGO/ -Force
+          Copy-Item README.md dist/GODALGO/README.txt -Force
+          Remove-Item dist/GODALGO/godalgo-startup.log -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/GODALGO/* -DestinationPath dist/GODALGO-windows.zip -Force
+          Write-Output "zip: $([math]::Round((Get-Item dist/GODALGO-windows.zip).Length / 1MB, 1)) MB"
+
+      - name: Build the single-file executable
+        # Kept for anyone who wants one file and is willing to allow it past
+        # Defender. Built second so a failure here cannot cost the folder build.
         run: pyinstaller --clean --noconfirm packaging/godalgo.spec
 
-      - name: Verify the build serves its own page and assets
+      - name: Verify the single-file executable
         # The check that matters: a build that lost --add-data starts, serves
         # the API, and 404s its own page. PyInstaller calls that a success.
         run: python packaging/verify_build.py dist/GODALGO.exe
 
-      - name: Record the SHA-256
+      - name: Record the SHA-256 of both
         id: hash
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist/GODALGO.exe -Algorithm SHA256).Hash.ToLower()
-          $size = [math]::Round((Get-Item dist/GODALGO.exe).Length / 1MB, 1)
-          Write-Output "sha256=$h" >> $env:GITHUB_OUTPUT
-          Write-Output "size=$size" >> $env:GITHUB_OUTPUT
-          Write-Output "GODALGO.exe  $size MB  sha256 $h"
+          $zh = (Get-FileHash dist/GODALGO-windows.zip -Algorithm SHA256).Hash.ToLower()
+          $zs = [math]::Round((Get-Item dist/GODALGO-windows.zip).Length / 1MB, 1)
+          $eh = (Get-FileHash dist/GODALGO.exe -Algorithm SHA256).Hash.ToLower()
+          $es = [math]::Round((Get-Item dist/GODALGO.exe).Length / 1MB, 1)
+          Write-Output "zip_sha=$zh"  >> $env:GITHUB_OUTPUT
+          Write-Output "zip_size=$zs" >> $env:GITHUB_OUTPUT
+          Write-Output "exe_sha=$eh"  >> $env:GITHUB_OUTPUT
+          Write-Output "exe_size=$es" >> $env:GITHUB_OUTPUT
+          Write-Output "zip $zs MB $zh"
+          Write-Output "exe $es MB $eh"
 
       - uses: actions/upload-artifact@v4
         with:
           name: GODALGO-windows
-          path: dist/GODALGO.exe
+          path: |
+            dist/GODALGO-windows.zip
+            dist/GODALGO.exe
           if-no-files-found: error
 
       - name: Publish the executable as a downloadable release
@@ -153,16 +181,29 @@ jobs:
           $tag = "windows-latest-build"
           $notes = @"
           Windows build of the GODALGO trading terminal — built by Quincy Gininda.
-
           Commit ``${{ github.sha }}`` on ``${{ github.ref_name }}``.
-          Size ${{ steps.hash.outputs.size }} MB.
-          SHA-256 ``${{ steps.hash.outputs.sha256 }}``
 
-          Single self-contained file. No Python install, nothing to unpack.
+          ## Download this one: ``GODALGO-windows.zip`` (${{ steps.hash.outputs.zip_size }} MB)
 
-              GODALGO.exe                  serve on http://127.0.0.1:8787/ and open a browser
-              GODALGO.exe --port 9000      serve on another port
-              GODALGO.exe --no-browser     start without opening a browser
+          1. Download the **.zip**, right-click it, Properties, tick **Unblock**, OK.
+          2. Extract it anywhere (Desktop is fine). Do not run it from inside the zip.
+          3. Double-click **Start-GODALGO.bat**.
+
+          Your browser opens at http://127.0.0.1:8787/ . The window stays open and
+          shows the URL; close it or press Ctrl+C to stop.
+
+          SHA-256 ``${{ steps.hash.outputs.zip_sha }}``
+
+          ## If it does not start
+
+          The folder contains **godalgo-startup.log** after any attempt. That file
+          says what happened. The most common cause by far is Microsoft Defender
+          removing the file — check Windows Security, Protection history.
+
+          ## Options
+
+              Start-GODALGO.bat --port 9000    serve on another port
+              GODALGO.exe --no-browser         start without opening a browser
               GODALGO.exe --help
 
           It binds 127.0.0.1 only and there is no flag to change that: the process
@@ -172,17 +213,23 @@ jobs:
           A stored key cannot trade until it is separately enabled and the
           confirmation phrase is typed.
 
-          Unsigned, so SmartScreen will warn on first run: More info -> Run anyway,
-          or check the SHA-256 above.
+          ## ``GODALGO.exe`` (single file, ${{ steps.hash.outputs.exe_size }} MB)
 
-          This binary was built on a Windows runner and then launched by
-          packaging/verify_build.py, which requires it to serve its own page, its
-          static assets, its API and a diagnostics verdict before the build is
-          allowed to pass.
+          Also attached for anyone who wants one file. It unpacks itself to %TEMP%
+          on every launch, which is slower and is the usual reason Defender
+          quarantines it, so prefer the zip.
+          SHA-256 ``${{ steps.hash.outputs.exe_sha }}``
+
+          Both are unsigned, so SmartScreen warns on first run: More info -> Run
+          anyway, or check the SHA-256 above.
+
+          Both were built on a Windows runner and then launched by
+          packaging/verify_build.py, which requires each to serve its own page, its
+          static assets, its API and a diagnostics verdict before the build passes.
           "@
           # A rolling tag, so the download link stays stable across builds.
           gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag 2>$null
-          gh release create $tag dist/GODALGO.exe `
+          gh release create $tag dist/GODALGO-windows.zip dist/GODALGO.exe `
             --repo $env:GITHUB_REPOSITORY `
             --target ${{ github.sha }} `
             --title "GODALGO for Windows (latest build)" `

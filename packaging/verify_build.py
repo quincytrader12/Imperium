@@ -53,7 +53,8 @@ def main(exe: str) -> int:
     proc = subprocess.Popen(
         [str(path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        env={**__import__("os").environ, "GODALGO_NO_BROWSER": "1"},
+        env={**__import__("os").environ, "GODALGO_NO_BROWSER": "1",
+             "GODALGO_NO_PAUSE": "1"},
     )
     failures: list[str] = []
     try:

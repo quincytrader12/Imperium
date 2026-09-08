@@ -163,6 +163,43 @@ replay, a bloom-measured budget, jittered speed and depth — run under Node fro
 
 ## Running the Windows build
 
+**Download `GODALGO-windows.zip`** from the
+[latest release](https://github.com/quincytrader12/Imperium/releases/tag/windows-latest-build).
+
+1. Right-click the downloaded zip → **Properties** → tick **Unblock** → OK.
+   Windows marks anything downloaded from the internet, and that mark is what
+   makes SmartScreen refuse to run what is inside.
+2. **Extract it** anywhere — the Desktop is fine. Do not run it from inside the
+   zip; Windows runs that from a temporary folder and it will not work properly.
+3. Double-click **Start-GODALGO.bat**.
+
+Your browser opens at <http://127.0.0.1:8787/>. The console window shows the URL
+and stays open; close it or press Ctrl+C to stop.
+
+### If it does not start
+
+The folder contains **`godalgo-startup.log`** after any attempt, successful or
+not. That file says what happened.
+
+By far the most common cause is **Microsoft Defender deleting the file** —
+unsigned PyInstaller executables are a frequent false positive. Check Windows
+Security → Virus & threat protection → **Protection history**. If it is there,
+restore it and add the folder as an exclusion.
+
+Use `Start-GODALGO.bat` rather than the `.exe` directly: if the program exits
+for any reason, the batch file keeps the window open so you can read why. A
+double-clicked `.exe` closes its own console and takes the message with it.
+
+### Why a folder rather than one file
+
+A single-file build unpacks its whole payload into `%TEMP%` on every launch.
+Defender scans that unpack each time, which is slow and is the usual reason the
+file gets quarantined — "extract a pile of DLLs to a temp folder and run them"
+is also what malware does. The folder build runs in place and starts
+immediately. `GODALGO.exe` is still published for anyone who wants one file.
+
+## Options
+
 `GODALGO.exe` is a single self-contained file — no Python install, no
 dependencies, nothing to unpack. Double-click it, or run it from a terminal:
 

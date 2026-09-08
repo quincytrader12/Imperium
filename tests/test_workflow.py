@@ -116,7 +116,7 @@ def test_every_file_the_workflow_runs_is_tracked_by_git():
         for step in job.get("steps", []):
             run = step.get("run") or ""
             # Any repo-relative path with an extension mentioned in a shell step.
-            for token in re.findall(r"[\w./\\-]+\.(?:spec|py|txt|cfg|toml|json)",
+            for token in re.findall(r"[\w./\\-]+\.(?:spec|py|txt|cfg|toml|json|bat|ps1)",
                                     run):
                 candidate = token.replace("\\", "/").lstrip("./")
                 if (root / candidate).exists():
