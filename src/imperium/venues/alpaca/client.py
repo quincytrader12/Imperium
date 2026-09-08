@@ -436,13 +436,27 @@ class AlpacaClient:
         payload = await self._request("GET", "/v2/clock")
 
         def when(key: str) -> dt.datetime | None:
+            """Parse a venue timestamp, always as an aware UTC datetime.
+
+            fromisoformat returns a *naive* datetime for a string carrying no
+            offset. Alpaca documents an offset, but a naive value escaping this
+            function is not a small inaccuracy: every consumer compares it
+            against an aware now(), and that comparison raises TypeError rather
+            than returning a wrong answer. Inside the trading loop the exception
+            is caught and logged, the session phase never advances, and the
+            overnight strategy silently never runs. A bare timestamp is read as
+            UTC, which is what the venue serves.
+            """
             raw = payload.get(key)
             if not raw:
                 return None
             try:
-                return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                parsed = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
             except ValueError:
                 return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed.astimezone(dt.timezone.utc)
 
         self.clock = MarketClock(
             is_open=bool(payload.get("is_open", False)),

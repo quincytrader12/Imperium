@@ -1057,3 +1057,44 @@ async def test_a_symbol_the_strategy_wants_is_not_closed_by_the_same_sweep(
         assert not session.broker.positions["AAPL"].is_flat
     finally:
         await session.detach_client()
+
+
+@pytest.mark.asyncio
+async def test_a_venue_timestamp_without_an_offset_still_compares(monkeypatch):
+    """Prevents the whole strategy failing silently on a parsing detail.
+
+    datetime.fromisoformat returns a *naive* datetime for a string with no UTC
+    offset. Alpaca documents an offset, but a naive value reaching the phase
+    calculation is not a small inaccuracy: it is compared against an aware
+    now(), which raises TypeError instead of returning a wrong answer. Inside
+    the trading loop that exception is caught and logged once a second, the
+    session phase never advances past whatever it was, and the overnight
+    strategy never fires -- with nothing on screen saying why.
+    """
+    from imperium.venues.alpaca.client import AlpacaClient
+
+    venue = MockVenue()
+
+    def naive_clock(request):
+        now = dt.datetime.now(UTC)
+        return venue._json({
+            # No offset, and no trailing Z.
+            "timestamp": now.replace(tzinfo=None).isoformat(),
+            "is_open": True,
+            "next_open": (now + dt.timedelta(hours=8)).replace(tzinfo=None).isoformat(),
+            "next_close": (now + dt.timedelta(minutes=18)).replace(tzinfo=None).isoformat(),
+        })
+
+    venue.fail_next.append(naive_clock)
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    try:
+        clock = await client.get_clock()
+    finally:
+        await client.aclose()
+
+    assert clock.next_close is not None
+    assert clock.next_close.tzinfo is not None, "a naive value poisons every comparison"
+
+    session = TradingSession()
+    session.market_clock = clock
+    assert session._update_session_phase() is SessionPhase.CLOSING
