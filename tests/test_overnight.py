@@ -726,3 +726,125 @@ async def test_the_session_carries_the_auction_order_from_decision_to_broker():
         fill = session.broker.fills[-1]
         assert fill.side == "BUY"
         assert MARKET_ON_CLOSE in fill.note
+
+
+@pytest.mark.asyncio
+async def test_an_overnight_book_survives_closing_the_application(tmp_path,
+                                                                  monkeypatch):
+    """Prevents the failure that a desktop application makes routine.
+
+    Entering at the close and exiting at the next open means the application is
+    normally *shut* in between -- the operator closes the laptop and reopens it
+    before the bell. An in-memory record of which positions are being carried
+    would be gone by then, no opening exit would be lodged, and a real position
+    would be left with nothing managing it.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+
+    # Driven through the real entry path rather than by calling the save
+    # method: an earlier version of this test saved and loaded by hand, so
+    # deleting either call site left it passing while the feature was gone.
+    async with _session(venue) as first:
+        first.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+        q = first.feed.quote("AAPL")
+        q.last, q.updated_at = 100.0, time.time()
+        d = first.engine("AAPL").decision
+        d.symbol, d.verdict, d.target_weight = "AAPL", Verdict.TRADING, 0.08
+        d.entry_order = MARKET_ON_CLOSE
+        await first._act_on(d)
+
+    assert (tmp_path / "state.json").exists()
+
+    # A completely new session object, as a restarted process builds, brought
+    # up through start() so the recovery has to be wired into it.
+    async with _session(venue) as second:
+        assert second.overnight_holdings == {}
+        await second.start()
+        try:
+            assert second.overnight_holdings == {"AAPL": 0.08}
+        finally:
+            await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_state_file_does_not_stop_the_session_starting(
+        tmp_path, monkeypatch):
+    """A state file is a convenience. Refusing to start because one is
+    unreadable turns a lost note into an outage."""
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state.json").write_text("{not json at all", encoding="utf-8")
+
+    async with _session(MockVenue()) as session:
+        session._load_overnight_state()          # must not raise
+        assert session.overnight_holdings == {}
+
+
+@pytest.mark.asyncio
+async def test_an_equity_held_through_the_close_by_nothing_is_reported(tmp_path,
+                                                                      monkeypatch):
+    """Prevents a position with nothing managing it going unmentioned.
+
+    An equity held while the market is shut that this strategy did not enter is
+    either an orphaned overnight hold or an intraday position that failed to
+    flatten. Both are unmanaged, both are the operator's call, and silence is
+    the one wrong answer. It is said once per window, not once per tick.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    venue = MockVenue()
+    async with _session(venue) as session:
+        session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+        session.feed.quote("SPY").last = 200.0
+        await session.broker.apply_target("SPY", 0.1, 200.0, 10_000.0)
+
+        session.market_clock = MarketClock(
+            is_open=False,
+            next_open=dt.datetime.now(UTC) + dt.timedelta(minutes=25))
+        await session._tick()
+        await session._tick()
+        await session._tick()
+
+        warnings = [e for e in session.telemetry.events(200)
+                    if e["source"] == "overnight" and "SPY" in e["message"]]
+        assert len(warnings) == 1, "said once per window, not once per tick"
+        assert "no opening exit will be lodged" in warnings[0]["message"]
+        # And it is still not exited on the strategy's own authority.
+        assert not session.broker.positions["SPY"].is_flat
+
+
+@pytest.mark.asyncio
+async def test_the_unmanaged_warning_returns_on_the_next_morning(tmp_path,
+                                                                 monkeypatch):
+    """Said once per window, but said again the next window.
+
+    Deduplicating without ever clearing would report an unmanaged position on
+    the first morning and stay silent every morning after, which is worse than
+    not deduplicating at all: the operator would read the silence as the
+    position having been dealt with.
+    """
+    monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path))
+    async with _session(MockVenue()) as session:
+        session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+        session.feed.quote("SPY").last = 200.0
+        await session.broker.apply_target("SPY", 0.1, 200.0, 10_000.0)
+
+        def warnings():
+            return [e for e in session.telemetry.events(200)
+                    if e["source"] == "overnight" and "SPY" in e["message"]]
+
+        preopen = MarketClock(
+            is_open=False, next_open=dt.datetime.now(UTC) + dt.timedelta(minutes=25))
+        session.market_clock = preopen
+        await session._tick()
+        await session._tick()
+        assert len(warnings()) == 1
+
+        # The session opens, runs the day, and closes again.
+        session.market_clock = MarketClock(
+            is_open=True, next_close=dt.datetime.now(UTC) + dt.timedelta(hours=4))
+        await session._tick()
+
+        session.market_clock = preopen
+        await session._tick()
+        assert len(warnings()) == 2, "a new morning is a new warning"

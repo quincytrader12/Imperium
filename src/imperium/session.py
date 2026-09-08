@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 import math
 import time
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from imperium import config
 from imperium.execution.bars import Bar
 from imperium.execution.broker import (
     MARKET_ON_CLOSE, MARKET_ON_OPEN, Broker, DryRunBroker, Fill, LiveBroker,
@@ -129,7 +131,16 @@ class TradingSession:
         #: entered them. Tracked explicitly rather than inferred from "holds an
         #: equity while shut", so an intraday position that failed to flatten is
         #: never silently adopted and exited as though it were planned.
+        #:
+        #: Written to disk on every change. This program is a desktop
+        #: application: closing the laptop after the close and reopening it
+        #: before the bell is the *normal* way to use it, and an in-memory-only
+        #: record would lose the one fact that says which positions still need
+        #: an opening exit -- leaving a real position with nothing managing it.
         self.overnight_holdings: dict[str, float] = {}
+        #: Symbols already reported as unmanaged in this pre-open window, so the
+        #: warning is said once rather than once per tick.
+        self._unmanaged_reported: set[str] = set()
         self._daily_loaded_at: float = 0.0
         self._equity_curve: list[tuple[float, float]] = []
         self._account_checked_at: float = 0.0
@@ -436,6 +447,86 @@ class TradingSession:
             Level.INFO if (pooled and pooled.credible) else Level.WARN,
             "overnight", f"overnight drift: {self.overnight_note}")
 
+    def _save_overnight_state(self) -> None:
+        """Persist which symbols are being carried overnight.
+
+        Best effort by design: a state file that cannot be written must not
+        stop the session, and a session that cannot read one starts with an
+        empty map and reports the positions it cannot account for rather than
+        guessing at them.
+        """
+        try:
+            config.ensure_home()
+            path = config.state_path()
+            path.write_text(json.dumps(
+                {"overnight_holdings": self.overnight_holdings,
+                 "saved_at": time.time()}, indent=2), encoding="utf-8")
+            try:
+                path.chmod(0o600)
+            except (OSError, NotImplementedError):
+                # Windows ignores POSIX modes. The file holds no secrets --
+                # only symbols and weights -- so this is tidiness, not a gate.
+                pass
+        except OSError as exc:
+            self.telemetry.event(
+                Level.WARN, "overnight",
+                "could not save which positions are held overnight; a restart "
+                "before the open would not know to exit them",
+                detail=str(exc))
+
+    def _load_overnight_state(self) -> None:
+        """Recover the overnight book across a restart."""
+        try:
+            raw = config.state_path().read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return
+        try:
+            payload = json.loads(raw)
+            holdings = payload.get("overnight_holdings")
+            if not isinstance(holdings, dict):
+                return
+            recovered = {str(k): float(v) for k, v in holdings.items()}
+        except (AttributeError, TypeError, ValueError) as exc:
+            # A corrupt state file is not a reason to refuse to start. It is a
+            # reason to say the overnight book is unknown.
+            self.telemetry.event(
+                Level.WARN, "overnight",
+                "the saved overnight state could not be read; any position "
+                "held overnight will be reported as unmanaged rather than "
+                "exited automatically", detail=str(exc))
+            return
+        if recovered:
+            self.overnight_holdings = recovered
+            self.telemetry.event(
+                Level.INFO, "overnight",
+                f"recovered {len(recovered)} overnight "
+                f"{'hold' if len(recovered) == 1 else 'holds'} across a "
+                f"restart: {', '.join(sorted(recovered))}")
+
+    def _report_unmanaged_equity(self) -> None:
+        """Name any equity held while shut that this strategy did not enter.
+
+        It is not exited automatically, because "holds an equity while the
+        market is closed" is not the same fact as "was entered on last night's
+        close" -- it is equally the signature of an intraday position that
+        failed to flatten. Both are positions with nothing managing them, and
+        both are the operator's call. Silence would be the one wrong answer.
+        """
+        for symbol, position in self.broker.positions.items():
+            if position.is_flat or symbol in self.overnight_holdings:
+                continue
+            if classify_symbol(symbol) is not AssetClass.US_EQUITY:
+                continue
+            if symbol in self._unmanaged_reported:
+                continue
+            self._unmanaged_reported.add(symbol)
+            self.telemetry.event(
+                Level.WARN, "overnight",
+                f"{symbol} is held through the close but was not entered by the "
+                f"overnight strategy, so no opening exit will be lodged for it",
+                detail="flatten it by hand, or halt and let the retirement "
+                       "sweep close it")
+
     def _update_session_phase(self) -> SessionPhase:
         """Where the clock is, relative to the two auction windows.
 
@@ -449,6 +540,8 @@ class TradingSession:
             next_open=self.market_clock.next_open)
         for engine in self.engines.values():
             engine.session_phase = self.session_phase
+        if self.session_phase is not SessionPhase.PREOPEN:
+            self._unmanaged_reported.clear()
         return self.session_phase
 
     async def _exit_overnight_holdings(self) -> None:
@@ -463,6 +556,7 @@ class TradingSession:
             position = self.broker.positions.get(symbol)
             if position is None or position.is_flat:
                 self.overnight_holdings.pop(symbol, None)
+                self._save_overnight_state()
                 continue
             price = self.feed.quote(symbol).last or float(position.avg_price)
             if price <= 0:
@@ -480,6 +574,7 @@ class TradingSession:
                     f"could not lodge the opening exit for {symbol}: {exc}")
                 continue
             self.overnight_holdings.pop(symbol, None)
+            self._save_overnight_state()
             self.allocator.observe(symbol).current_weight = 0.0
             if fill:
                 self.telemetry.pulse(symbol, "order",
@@ -639,6 +734,7 @@ class TradingSession:
             # happened yet, and a hold that is forgotten because the fill was
             # still pending is a hold with no exit order behind it.
             self.overnight_holdings[decision.symbol] = decision.target_weight
+            self._save_overnight_state()
         if fill:
             self.allocator.observe(decision.symbol).current_weight = \
                 self.broker.weight_of(decision.symbol, price, self.equity())
@@ -656,6 +752,7 @@ class TradingSession:
         await self._drain_bars()
         if phase is SessionPhase.PREOPEN:
             await self._exit_overnight_holdings()
+            self._report_unmanaged_equity()
         await self._refresh_account_limits()
         equity = self.equity()
         self.allocator.equity = equity
@@ -723,6 +820,7 @@ class TradingSession:
         self.status_message = f"running in {self.broker.mode.value}"
         self.telemetry.event(Level.GOOD, "session",
                              f"session started in {self.broker.mode.value}")
+        self._load_overnight_state()
         await self.refresh_clock()
         await self.scan_universe()
         await self.seed_history()
