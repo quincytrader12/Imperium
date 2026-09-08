@@ -29,15 +29,23 @@ from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
+from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.strategy.signals import StrategyParams
 from imperium.telemetry.streams import Level, TelemetryHub
 from imperium.venues import registry
-from imperium.venues.binance.client import BinanceSpotClient, VenueError
-from imperium.venues.binance.feed import MarketFeed
-from imperium.venues.binance.filters import format_decimal
+from imperium.venues.alpaca.client import AlpacaClient, MarketClock, VenueError
+from imperium.venues.alpaca.feed import MarketFeed
+from imperium.venues.alpaca.filters import format_decimal
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.session")
+
+
+def _bar_ms(value: Any) -> int:
+    """Alpaca timestamps are RFC-3339; bars are keyed by epoch milliseconds."""
+    from imperium.venues.alpaca.feed import _ms
+
+    return _ms(value)
 
 #: A quote older than this is stale enough that acting on it is guessing.
 STALE_AFTER_SECONDS = 20.0
@@ -70,7 +78,7 @@ class TradingSession:
         self.telemetry = TelemetryHub()
         self.allocator = PortfolioAllocator(self.limits)
         self.engines: dict[str, SymbolEngine] = {}
-        self.feed = MarketFeed(self.spec.ws_url, self.telemetry)
+        self.feed = MarketFeed(self.spec, self.telemetry, feed=self.spec.default_feed)
         self.feed.on_bar(self._on_bar)
         self.broker: Broker = DryRunBroker(self.spec)
         self.client: BinanceSpotClient | None = None
@@ -79,7 +87,13 @@ class TradingSession:
         self.running = False
         self.started_at: float = 0.0
         self.day_start_equity: float = 0.0
-        self.universe: list[str] = list(self.spec.default_universe)
+        #: Seeded, then replaced by a live scan of what the venue actually
+        #: lists and what is actually trading.
+        self.universe: list[str] = list(self.spec.seed_universe)
+        self.paper_endpoint: bool = True
+        self.market_clock: MarketClock = MarketClock()
+        self.universe_scanned_at: float = 0.0
+        self.scan_note: str = "not yet scanned"
         self.status_message = "idle"
         self.venue_error: str = ""
         self.calibration_error: str = ""
@@ -91,26 +105,31 @@ class TradingSession:
         self._pending_bars: asyncio.Queue[tuple[str, Bar]] = asyncio.Queue(maxsize=4096)
         self._thresholds: dict | None = None
         self._equity_curve: list[tuple[float, float]] = []
+        self._account_checked_at: float = 0.0
 
     # -- setup -----------------------------------------------------------
 
     def thresholds(self) -> dict | None:
-        if self._thresholds is None:
-            try:
-                self._thresholds = load_calibration()["thresholds"]
-                self.calibration_error = ""
-            except CalibrationMissing as exc:
-                self.calibration_error = str(exc)
-                self.telemetry.event(Level.ERROR, "strategy",
-                                     "the regime classifier is not calibrated",
-                                     detail=str(exc))
-        return self._thresholds
+        """Kept only to surface a calibration failure early.
+
+        Each engine now selects the measured thresholds for its own asset
+        class, because equities and crypto are fitted separately.
+        """
+        try:
+            load_calibration()
+            self.calibration_error = ""
+        except CalibrationMissing as exc:
+            self.calibration_error = str(exc)
+            self.telemetry.event(Level.ERROR, "strategy",
+                                 "the regime classifier is not calibrated",
+                                 detail=str(exc))
+        return None
 
     def engine(self, symbol: str) -> SymbolEngine:
         e = self.engines.get(symbol)
         if e is None:
             e = SymbolEngine(symbol, self.spec, self.limits, self.allocator,
-                             self.telemetry, self.params, self.thresholds())
+                             self.telemetry, self.params)
             self.engines[symbol] = e
             self.allocator.observe(symbol)
         return e
@@ -131,11 +150,14 @@ class TradingSession:
             return
         cred = store.require(name)
         self.credential = cred
-        self.client = BinanceSpotClient(cred.api_key, cred.secret,
-                                        base_url=self.spec.base_url)
+        self.client = AlpacaClient(cred.api_key, cred.secret,
+                                   paper=self.paper_endpoint,
+                                   data_url=self.spec.data_url,
+                                   feed=self.spec.default_feed)
+        self.feed.set_credentials(cred.api_key, cred.secret)
         try:
-            await self.client.sync_time()
             await self.client.account()
+            self.market_clock = await self.client.get_clock()
         except VenueError as exc:
             self.lamps.key = "bad"
             self.venue_error = exc.operator_text()
@@ -146,34 +168,116 @@ class TradingSession:
         self.lamps.key = "ok"
         self.lamps.venue = "ok"
         self.venue_error = ""
-        self.telemetry.event(Level.GOOD, "venue",
-                             f"key {name!r} accepted by {self.spec.display_name}")
-        await self._confirm_fee_tier()
+        self.telemetry.event(
+            Level.GOOD, "venue",
+            f"key {name!r} accepted by {self.spec.display_name} "
+            f"({self.client.environment}) — {self.market_clock.describe()}")
+        await self.scan_universe()
 
-    async def _confirm_fee_tier(self) -> None:
-        """Replace the assumed fee schedule with the account's real rates.
+    async def refresh_clock(self) -> None:
+        """Ask the venue whether the market is open.
 
-        An assumed tier is reported as a warning precisely so that this can
-        remove it. Until this succeeds, every cost estimate says ASSUMED.
+        Believing the venue rather than computing a calendar locally is the only
+        way to get early closes, holidays and unscheduled halts right, and each
+        of those is a day a naive calendar trades into a closed market.
         """
-        if not self.client or not self.universe:
-            return
-        data = await self.client.account_commission(self.universe[0])
-        if not data:
+        if self.client is None or not self.client.authenticated:
             return
         try:
-            std = data["standardCommission"]
-            maker = Decimal(str(std["maker"])) * 10_000
-            taker = Decimal(str(std["taker"])) * 10_000
-        except (KeyError, TypeError, ValueError):
+            self.market_clock = await self.client.get_clock()
+        except VenueError as exc:
+            self.telemetry.event(Level.WARN, "venue",
+                                 "could not read the market clock",
+                                 detail=exc.message)
             return
-        confirmed = self.spec.fees.confirmed(
-            maker, taker, "read from /api/v3/account/commission")
-        object.__setattr__(self.spec, "fees", confirmed)
-        self.telemetry.event(
-            Level.GOOD, "costs",
-            f"fee tier confirmed for this account: {maker}bp maker, {taker}bp taker",
-        )
+        self.allocator.market_open = self.market_clock.is_open or self._crypto_only()
+        self.allocator.market_note = (
+            "" if self.allocator.market_open
+            else f"{self.market_clock.describe()}; equities take no new exposure "
+                 f"while closed")
+
+    def _crypto_only(self) -> bool:
+        """True when every admitted symbol trades around the clock.
+
+        A closed equity market must not stop a crypto book, and vice versa.
+        """
+        admitted = self.allocator.admitted_symbols or self.universe
+        return bool(admitted) and all(
+            classify_symbol(s) is AssetClass.CRYPTO for s in admitted)
+
+    async def scan_universe(self, limit: int = 40) -> None:
+        """Discover what this account can actually trade, ranked by turnover.
+
+        The seed list is a starting point, not the universe. This asks the venue
+        what it lists, drops anything not tradable right now, and ranks what is
+        left by dollar volume -- because a scanner whose job is to reject most of
+        what it sees needs a real field to choose from, and because a symbol
+        that is halted or delisted should never reach the sizer.
+        """
+        if self.client is None or not self.client.authenticated:
+            self.scan_note = "no key attached, using the seed list"
+            return
+        try:
+            assets = await self.client.assets()
+        except VenueError as exc:
+            self.scan_note = f"scan failed, using the seed list: {exc.message}"
+            self.telemetry.event(Level.WARN, "universe", self.scan_note)
+            return
+        if not assets:
+            self.scan_note = "the venue listed no assets; using the seed list"
+            return
+
+        candidates = [a for a in assets.values()
+                      if a.tradable and spec_for(a.asset_class).tradeable]
+        # Rank by traded value, which needs a quote. Snapshots are batched, so
+        # ask about a bounded shortlist rather than every listed symbol.
+        seeded = [s for s in self.spec.seed_universe if s in assets]
+        others = [a.symbol for a in candidates if a.symbol not in set(seeded)]
+        shortlist = seeded + others[:400]
+
+        snaps = await self.client.snapshots(shortlist)
+        ranked: list[tuple[float, str]] = []
+        for symbol, snap in snaps.items():
+            daily = snap.get("dailyBar") or snap.get("prevDailyBar") or {}
+            try:
+                close = float(daily.get("c", 0) or 0)
+                volume = float(daily.get("v", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            turnover = close * volume
+            if turnover <= 0:
+                continue
+            q = self.feed.quote(symbol)
+            q.quote_volume = turnover
+            if not q.last:
+                q.last = close
+            open_px = float(daily.get("o", 0) or 0)
+            if open_px > 0:
+                q.change_pct = (close - open_px) / open_px * 100.0
+            if not q.updated_at:
+                q.updated_at = time.time()
+            ranked.append((turnover, symbol))
+
+        if not ranked:
+            self.scan_note = ("the venue returned no traded volume; using the "
+                              "seed list")
+            return
+        ranked.sort(reverse=True)
+        chosen = [symbol for _, symbol in ranked[:limit]]
+        # Keep anything currently held, whatever its rank: dropping a symbol
+        # that holds a position leaves the position with nothing managing it.
+        for symbol, pos in self.broker.positions.items():
+            if not pos.is_flat and symbol not in chosen:
+                chosen.append(symbol)
+
+        self.universe = chosen
+        self.universe_scanned_at = time.time()
+        equities = sum(1 for s in chosen if classify_symbol(s) is AssetClass.US_EQUITY)
+        crypto = len(chosen) - equities
+        self.scan_note = (f"{len(chosen)} of {len(shortlist)} scanned "
+                          f"({equities} equity, {crypto} crypto), ranked by "
+                          f"traded value")
+        self.telemetry.event(Level.INFO, "universe", f"scanned: {self.scan_note}")
 
     async def detach_client(self) -> None:
         if self.client is not None:
@@ -193,28 +297,48 @@ class TradingSession:
                                  "the bar queue is full; a bar was dropped")
 
     async def seed_history(self) -> None:
-        if not self.client:
-            return
-        for symbol in self.universe:
-            try:
-                rows = await self.client.klines(symbol, "1m", limit=500)
-            except VenueError as exc:
-                self.telemetry.event(
-                    Level.WARN, "data",
-                    f"could not load history for {symbol}: {exc.message}",
-                    detail=exc.remedy)
-                self.allocator.set_scan(symbol, score=0.0, turnover=0.0,
-                                        tradeable=False,
-                                        reason=f"no price history: {exc.message}")
-                continue
-            self.engine(symbol).seed(rows)
-
-    async def refresh_universe(self) -> None:
-        """Score and admit symbols. Failures here demote a symbol, never crash."""
+        """Seed each engine with recent bars, batched by asset class."""
         if not self.client:
             return
         try:
-            tickers = await self.client.ticker_24h(self.universe)
+            batches = await self.client.bars(self.universe, timeframe="1Min",
+                                             limit=1000)
+        except VenueError as exc:
+            self.telemetry.event(Level.WARN, "data",
+                                 f"could not load history: {exc.message}",
+                                 detail=exc.remedy)
+            return
+        for symbol in self.universe:
+            rows = batches.get(symbol) or []
+            if not rows:
+                self.allocator.set_scan(
+                    symbol, score=0.0, turnover=0.0, tradeable=False,
+                    reason="no recent bars from the venue for this symbol")
+                continue
+            engine = self.engine(symbol)
+            for index, row in enumerate(rows):
+                try:
+                    bar = Bar(
+                        open_time=_bar_ms(row.get("t")),
+                        open=float(row["o"]), high=float(row["h"]),
+                        low=float(row["l"]), close=float(row["c"]),
+                        volume=float(row.get("v", 0.0)),
+                        # The final row is the bar still forming; treating it as
+                        # closed makes every strategy act on a partial bar.
+                        closed=index < len(rows) - 1,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                engine.series.add(bar)
+
+    async def refresh_universe(self) -> None:
+        """Re-price and re-admit. Failures demote a symbol, never crash."""
+        if not self.client:
+            return
+        await self.refresh_clock()
+        try:
+            snaps = await self.client.snapshots(self.universe)
+            assets = await self.client.assets()
         except VenueError as exc:
             self.lamps.venue = "bad"
             self.venue_error = exc.operator_text()
@@ -224,29 +348,57 @@ class TradingSession:
             return
         self.lamps.venue = "ok"
         self.venue_error = ""
-        for t in tickers:
-            symbol = t.get("symbol", "")
-            if not symbol:
-                continue
+
+        for symbol in self.universe:
+            snap = snaps.get(symbol) or {}
+            daily = snap.get("dailyBar") or snap.get("prevDailyBar") or {}
+            quote = snap.get("latestQuote") or {}
+            trade = snap.get("latestTrade") or {}
+            q = self.feed.quote(symbol)
             try:
-                turnover = float(t.get("quoteVolume", 0.0))
-                change = float(t.get("priceChangePercent", 0.0))
-                last = float(t.get("lastPrice", 0.0))
+                close = float(daily.get("c", 0) or 0)
+                open_px = float(daily.get("o", 0) or 0)
+                volume = float(daily.get("v", 0) or 0)
+                last = float(trade.get("p", 0) or 0) or close
+                bid = float(quote.get("bp", 0) or 0)
+                ask = float(quote.get("ap", 0) or 0)
             except (TypeError, ValueError):
                 continue
-            q = self.feed.quote(symbol)
-            q.quote_volume = turnover
-            q.change_pct = change
-            if not q.last:
+            if last > 0:
                 q.last = last
-            if not q.updated_at:
+            if bid > 0:
+                q.bid = bid
+            if ask > 0:
+                q.ask = ask
+            turnover = close * volume
+            q.quote_volume = turnover
+            if open_px > 0 and close > 0:
+                q.change_pct = (close - open_px) / open_px * 100.0
+            if q.last and not q.updated_at:
                 q.updated_at = time.time()
-            decision = self.engine(symbol).decision
+
+            engine = self.engine(symbol)
+            engine.set_book(q.bid or None, q.ask or None)
+            # Shortability and borrow are per-symbol facts that change, so they
+            # are refreshed rather than assumed once.
+            asset = assets.get(symbol)
+            if asset is not None:
+                engine.can_short = asset.can_short
+                engine.tradable = asset.tradable and spec_for(
+                    asset.asset_class).tradeable
+
+            reason = ""
+            tradeable = True
+            if asset is not None and not asset.tradable:
+                tradeable, reason = False, (
+                    f"the venue lists {symbol} as not tradable "
+                    f"(status {asset.status})")
+            elif turnover <= 0:
+                tradeable, reason = False, "no traded value reported for this symbol"
             self.allocator.set_scan(
-                symbol, score=abs(decision.conviction), turnover=turnover,
-                tradeable=turnover > 0,
-                reason="24h turnover is zero at the venue" if turnover <= 0 else "",
-            )
+                symbol, score=abs(engine.decision.conviction), turnover=turnover,
+                tradeable=tradeable, reason=reason)
+
         admitted, retired = self.allocator.rebalance_admissions()
         for symbol in admitted:
             self.telemetry.event(Level.INFO, "universe", f"{symbol} admitted")
@@ -337,6 +489,7 @@ class TradingSession:
 
     async def _tick(self) -> None:
         await self._drain_bars()
+        await self._refresh_account_limits()
         equity = self.equity()
         self.allocator.equity = equity
         self.allocator.cash = float(self.broker.cash)
@@ -347,6 +500,29 @@ class TradingSession:
         self._equity_curve.append((time.time(), equity))
         if len(self._equity_curve) > 2000:
             self._equity_curve = self._equity_curve[-2000:]
+
+    async def _refresh_account_limits(self) -> None:
+        """Read the venue's own day-trade count and equity.
+
+        Counting day trades locally cannot survive a restart or trades made
+        elsewhere in the same account, and being wrong here means a
+        ninety-day restriction rather than a missed trade.
+        """
+        if self.client is None or not self.client.authenticated:
+            return
+        if time.time() - self._account_checked_at < 30:
+            return
+        try:
+            account = await self.client.account()
+        except VenueError:
+            return
+        self._account_checked_at = time.time()
+        try:
+            self.allocator.day_trade_count = int(account.get("daytrade_count", 0) or 0)
+            self.allocator.flagged_pattern_day_trader = bool(
+                account.get("pattern_day_trader", False))
+        except (TypeError, ValueError):
+            pass
 
     async def _run(self) -> None:
         last_universe = 0.0
@@ -378,6 +554,8 @@ class TradingSession:
         self.status_message = f"running in {self.broker.mode.value}"
         self.telemetry.event(Level.GOOD, "session",
                              f"session started in {self.broker.mode.value}")
+        await self.refresh_clock()
+        await self.scan_universe()
         await self.seed_history()
         await self.refresh_universe()
         await self.feed.start(self.universe)
@@ -488,6 +666,22 @@ class TradingSession:
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),
             "venue": self.spec.display_name,
+            "environment": self.client.environment if self.client else "paper",
+            "market": {
+                "is_open": self.market_clock.is_open,
+                "describe": self.market_clock.describe(),
+                "next_open": (self.market_clock.next_open.isoformat()
+                              if self.market_clock.next_open else None),
+                "next_close": (self.market_clock.next_close.isoformat()
+                               if self.market_clock.next_close else None),
+                "crypto_only": self._crypto_only(),
+                "feed": self.spec.default_feed,
+            },
+            "universe_scan": {
+                "note": self.scan_note,
+                "scanned_at": self.universe_scanned_at,
+                "size": len(self.universe),
+            },
             "status": self.status_message,
             "venue_error": self.venue_error,
             "calibration_error": self.calibration_error,
@@ -541,6 +735,11 @@ class TradingSession:
             "target_volatility": lim.target_volatility,
             "atr_stop_multiple": lim.atr_stop_multiple,
             "slots_used": admitted,
+            "day_trade_count": self.allocator.day_trade_count,
+            "pdt_floor": lim.pdt_equity_floor,
+            "pdt_max_day_trades": lim.pdt_max_day_trades,
+            "pdt_blocked": self.allocator.pdt_blocked(),
+            "flagged_pattern_day_trader": self.allocator.flagged_pattern_day_trader,
             "slots_max": lim.max_concurrent_positions,
             "buying_power": self.allocator.buying_power(),
             "reserved": float(self.broker.cash) * lim.buying_power_reserve,
@@ -579,34 +778,53 @@ class TradingSession:
         return census
 
     def _cost_summary(self) -> dict[str, Any]:
-        """What the book is being priced at, and how much of that is assumed.
+        """What the book is being priced at, per asset class.
 
-        The fee tier and the spread are the two inputs that decide whether
-        anything trades at all, and an assumed value for either is reported as
-        an assumption rather than shown as a measurement.
+        Reported per class rather than as one number, because the classes are
+        not comparable: a US equity round trip is almost entirely spread, while
+        a crypto round trip is dominated by commission. A single blended figure
+        would describe neither.
         """
-        fees = self.spec.fees
         decisions = [e.decision for e in self.engines.values()
                      if e.decision.round_trip_cost_bps > 0]
-        costs_bps = sorted(d.round_trip_cost_bps for d in decisions)
-        measured = sum(1 for d in decisions if not d.spread_assumed)
+        by_class: dict[str, Any] = {}
+        for asset_class in (AssetClass.US_EQUITY, AssetClass.CRYPTO):
+            spec = spec_for(asset_class)
+            members = [d for d in decisions if d.asset_class == asset_class.value]
+            costs_bps = sorted(d.round_trip_cost_bps for d in members)
+            by_class[asset_class.value] = {
+                "display_name": spec.display_name,
+                "commission_bps": float(spec.cost_model.commission_bps),
+                "sell_side_bps": float(spec.cost_model.sell_side_bps),
+                "assumed": spec.cost_model.assumed,
+                "source": spec.cost_model.source,
+                "symbols": len(members),
+                "median_round_trip_bps": (costs_bps[len(costs_bps) // 2]
+                                          if costs_bps else 0.0),
+                "spreads_measured": sum(1 for d in members if not d.spread_assumed),
+                "seconds_per_year": spec.seconds_per_year,
+                "shortable": spec.shortable,
+            }
         cheapest = min(decisions, key=lambda d: d.round_trip_cost_bps, default=None)
         dearest = max(decisions, key=lambda d: d.round_trip_cost_bps, default=None)
+        all_costs = sorted(d.round_trip_cost_bps for d in decisions)
         return {
-            "maker_bps": float(fees.maker_bps),
-            "taker_bps": float(fees.taker_bps),
-            "fees_assumed": fees.assumed,
-            "fee_source": fees.source,
+            "by_asset_class": by_class,
             "safety_multiple": self.params.safety_multiple,
             "adverse_selection_fraction": float(ADVERSE_SELECTION_FRACTION),
-            "median_round_trip_bps": (costs_bps[len(costs_bps) // 2]
-                                      if costs_bps else 0.0),
+            "median_round_trip_bps": (all_costs[len(all_costs) // 2]
+                                      if all_costs else 0.0),
+            "fees_assumed": any(b["assumed"] for b in by_class.values()),
+            "fee_source": "; ".join(
+                f"{b['display_name']}: {b['source']}" for b in by_class.values()),
             "cheapest": ({"symbol": cheapest.symbol,
                           "bps": cheapest.round_trip_cost_bps} if cheapest else None),
             "dearest": ({"symbol": dearest.symbol,
                          "bps": dearest.round_trip_cost_bps} if dearest else None),
-            "spreads_measured": measured,
+            "spreads_measured": sum(1 for d in decisions if not d.spread_assumed),
             "spreads_total": len(decisions),
+            "maker_bps": 0.0,
+            "taker_bps": float(spec_for(AssetClass.US_EQUITY).cost_model.commission_bps),
         }
 
     def _execution_quality(self) -> dict[str, Any]:
@@ -614,7 +832,8 @@ class TradingSession:
 
         The gate admits a symbol on a *modelled* crossing cost. Measuring what
         crossing actually cost is the only way to find out the model is wrong
-        before the P&L does.
+        before the P&L does -- and with two asset classes carrying very
+        different models, one being wrong is easy to miss in a blended figure.
         """
         fills = self.broker.fills
         if not fills:

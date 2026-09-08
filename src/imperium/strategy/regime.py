@@ -68,6 +68,27 @@ class CalibrationMissing(RuntimeError):
     """
 
 
+def thresholds_for(asset_class: str, path: str | None = None) -> dict[str, Any]:
+    """The measured thresholds for one asset class.
+
+    Equities and crypto are fitted separately, against nulls that reflect how
+    each actually behaves -- an unbroken walk for crypto, sessions with
+    overnight seams for equities -- and each is scored on its own held-out
+    generators. Handing an equity the crypto thresholds changes its error rate
+    directly, which is why this takes the class rather than defaulting.
+    """
+    report = load_calibration(path)
+    by_class = report.get("by_asset_class", {})
+    block = by_class.get(asset_class)
+    if block is None:
+        known = ", ".join(sorted(by_class)) or "(none)"
+        raise CalibrationMissing(
+            f"no measured thresholds for asset class {asset_class!r}; the "
+            f"calibration file has {known}. Run 'imperium calibrate'."
+        )
+    return block["thresholds"]
+
+
 @lru_cache(maxsize=4)
 def load_calibration(path: str | None = None) -> dict[str, Any]:
     p = Path(path) if path else CALIBRATION_PATH
@@ -225,11 +246,19 @@ def classify_from_stats(
     )
 
 
-def classify(prices: np.ndarray, thresholds: dict | None = None) -> RegimeVerdict:
-    """Classify a window of prices."""
+def classify(prices: np.ndarray, thresholds: dict | None = None, *,
+             returns: np.ndarray | None = None) -> RegimeVerdict:
+    """Classify a window of prices.
+
+    ``returns`` may be supplied when the caller has already computed them --
+    which the engine does, because for an equity it must drop the returns that
+    span an overnight seam before any statistic is calculated.
+    """
     th = thresholds if thresholds is not None else load_calibration()["thresholds"]
     prices = np.asarray(prices, dtype=float)
-    rets = st.log_returns(prices)
+    rets = st.log_returns(prices) if returns is None else np.asarray(
+        returns, dtype=float)
+    rets = rets[np.isfinite(rets)]
     if rets.size < st.MIN_SAMPLES:
         return RegimeVerdict(
             Regime.WARMING_UP, 0.0, 0.0,

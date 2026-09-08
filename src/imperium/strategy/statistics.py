@@ -290,6 +290,53 @@ def garch_process(n: int, rng: np.random.Generator, omega: float = 1e-6,
     return s0 * np.exp(np.cumsum(r))
 
 
+def equity_session_walk(n: int, rng: np.random.Generator, sigma: float = 0.0007,
+                        bars_per_session: int = 390, gap_sigma: float = 0.006,
+                        s0: float = 100.0) -> np.ndarray:
+    """A null for *equity* minute bars: sessions separated by overnight gaps.
+
+    Crypto nulls are a single unbroken walk. An equity's minute series is a
+    sequence of 390-bar sessions with a much larger jump between them, and that
+    structure changes the null distribution of every statistic computed over a
+    250-bar window -- often enough that a threshold fitted on the crypto null
+    misfires on equities.
+
+    The gaps are generated here so that the calibration measures them. Whether
+    the classifier then *sees* them is a separate decision: the engine drops
+    gap-spanning returns before the statistics are computed.
+    """
+    out = np.zeros(n)
+    x = 0.0
+    for i in range(n):
+        if i > 0 and i % bars_per_session == 0:
+            x += rng.normal(0.0, gap_sigma)      # the overnight seam
+        else:
+            x += rng.normal(0.0, sigma)
+        out[i] = x
+    return s0 * np.exp(out)
+
+
+def intraday_u_shape_walk(n: int, rng: np.random.Generator, sigma: float = 0.0007,
+                          bars_per_session: int = 390,
+                          s0: float = 100.0) -> np.ndarray:
+    """A held-out equity null with a U-shaped intraday volatility profile.
+
+    Equity volatility is high at the open, falls through midday and rises into
+    the close. It is still a martingale -- there is no serial correlation to
+    find -- so any regime the classifier reports on it is a false positive, and
+    one produced by a structure that genuinely exists in the data.
+    """
+    out = np.zeros(n)
+    x = 0.0
+    for i in range(n):
+        pos = (i % bars_per_session) / max(1, bars_per_session - 1)
+        # 2.2x at the open and close, 0.7x at midday.
+        scale = 0.7 + 1.5 * (2 * pos - 1) ** 2
+        x += rng.normal(0.0, sigma * scale)
+        out[i] = x
+    return s0 * np.exp(out)
+
+
 def fat_tail_process(n: int, rng: np.random.Generator, df: int = 4,
                      sigma: float = 0.01, s0: float = 100.0) -> np.ndarray:
     """Held-out null: a martingale with t(4) innovations."""

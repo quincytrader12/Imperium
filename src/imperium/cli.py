@@ -43,7 +43,9 @@ async def _client_for(cred, *, timeout: float = 15.0):
 
     spec = registry.get(cred.venue)
     factory = load_client_factory(spec)
-    return factory(cred.api_key, cred.secret, base_url=spec.base_url, timeout=timeout)
+    return factory(cred.api_key, cred.secret, paper=True,
+                   data_url=spec.data_url, timeout=timeout,
+                   feed=spec.default_feed)
 
 
 # -- commands ------------------------------------------------------------
@@ -117,7 +119,7 @@ def cmd_keys_remove(args: argparse.Namespace) -> int:
 
 async def _balance(args: argparse.Namespace) -> int:
     from imperium.security.credentials import CredentialError
-    from imperium.venues.binance.client import VenueError
+    from imperium.venues.alpaca.client import VenueError
 
     store = _store()
     try:
@@ -130,13 +132,9 @@ async def _balance(args: argparse.Namespace) -> int:
 
     client = await _client_for(cred)
     try:
-        try:
-            await client.sync_time()
-        except VenueError:
-            # A failure here is not fatal; the account call below will produce a
-            # better-targeted error, and reporting this one first would bury it.
-            pass
-        rows = await client.balances(hide_dust=not args.all)
+        account = await client.account()
+        clock = await client.get_clock()
+        positions = await client.positions()
     except VenueError as exc:
         _print_err("")
         _print_err(f"Could not read the account for {cred.name!r} ({mask(cred.api_key)}).")
@@ -152,13 +150,23 @@ async def _balance(args: argparse.Namespace) -> int:
     finally:
         await client.aclose()
 
-    if not rows:
-        print("The account has no non-zero balances.")
-        return 0
-    print(f"Balances for {cred.name!r} ({mask(cred.api_key)}) on {cred.venue}:")
-    print(f"  {'ASSET':<10} {'FREE':>20} {'LOCKED':>20}")
-    for r in rows:
-        print(f"  {r['asset']:<10} {str(r['free']):>20} {str(r['locked']):>20}")
+    print(f"Account for {cred.name!r} ({mask(cred.api_key)}) on {cred.venue} "
+          f"[{client.environment}]")
+    for field, label in (("status", "status"), ("equity", "equity"),
+                         ("cash", "cash"), ("buying_power", "buying power"),
+                         ("daytrade_count", "day trades used"),
+                         ("pattern_day_trader", "flagged PDT")):
+        if field in account:
+            print(f"  {label:<18} {account[field]}")
+    print(f"  {'market':<18} {clock.describe()}")
+    if positions:
+        print()
+        print(f"  {'SYMBOL':<12} {'QTY':>16} {'MARKET VALUE':>16} {'P&L':>14}")
+        for p in positions:
+            print(f"  {p.get('symbol',''):<12} {p.get('qty',''):>16} "
+                  f"{p.get('market_value',''):>16} {p.get('unrealized_pl',''):>14}")
+    else:
+        print("  no open positions")
     return 0
 
 
@@ -211,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ka = keys_sub.add_parser("add", help="store a key (not tradeable by default)")
     ka.add_argument("--name", required=True)
-    ka.add_argument("--venue", default="binance_spot")
+    ka.add_argument("--venue", default="alpaca")
     ka.add_argument("--key", default=None, help="omit to be prompted without echo")
     ka.add_argument("--secret", default=None, help="omit to be prompted without echo")
     ka.add_argument("--note", default="")
@@ -226,13 +234,12 @@ def build_parser() -> argparse.ArgumentParser:
     kr.add_argument("name")
     kr.set_defaults(func=cmd_keys_remove)
 
-    b = sub.add_parser("balance", help="read real balances for a stored key")
+    b = sub.add_parser("balance", help="read the real account for a stored key")
     b.add_argument("--name", default="main")
-    b.add_argument("--all", action="store_true", help="include zero balances")
     b.set_defaults(func=cmd_balance)
 
     d = sub.add_parser("diagnose", help="layered connectivity diagnosis")
-    d.add_argument("--venue", default="binance_spot")
+    d.add_argument("--venue", default="alpaca")
     d.set_defaults(func=cmd_diagnose)
 
     s = sub.add_parser("serve", help="run the terminal UI")

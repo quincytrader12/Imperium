@@ -374,14 +374,21 @@ class NetworkDiagnostic:
         program, and the diagnosis says so rather than sending the operator back
         to their network team.
         """
-        from imperium.venues.binance.client import BinanceSpotClient, VenueError
+        from imperium.venues.alpaca.client import AlpacaClient, VenueError
 
         t0 = time.perf_counter()
-        client = BinanceSpotClient(base_url=self.base_url, timeout=self.timeout,
-                                   trust_env=trust_env, max_retries=0)
+        client = AlpacaClient(base_url=self.base_url, timeout=self.timeout,
+                              trust_env=trust_env, max_retries=0)
         try:
-            await client.ping()
-            offset = await client.sync_time()
+            # An unauthenticated call that still proves the venue answered:
+            # 401 from the venue is a *reachable* venue, which is exactly what
+            # this layer tests. Anything else is a transport problem.
+            try:
+                await client._request("GET", "/v2/clock", needs_auth=False)
+            except VenueError as exc:
+                if exc.status != 401:
+                    raise
+            offset = 0
         except VenueError as exc:
             return LayerResult(
                 6, "the venue client against a public endpoint", Status.FAIL,
@@ -399,18 +406,11 @@ class NetworkDiagnostic:
         finally:
             await client.aclose()
 
-        status = Status.PASS
-        remedy = ""
-        detail = f"ping and server-time both answered; clock offset {offset} ms"
-        if abs(offset) > 1000:
-            status = Status.WARN
-            detail += " — that is a large offset"
-            remedy = ("This machine's clock is off by more than a second. Signed "
-                      "requests will be corrected for it, but sync the clock: "
-                      "'w32tm /resync' on Windows, or enable NTP.")
-        return LayerResult(6, "the venue client against a public endpoint", status,
-                           detail, remedy, (time.perf_counter() - t0) * 1000,
-                           data={"clock_offset_ms": offset})
+        return LayerResult(
+            6, "the venue client against a public endpoint", Status.PASS,
+            "the venue answered — reaching it is not the same as being "
+            "authorised, which the Connections panel checks separately",
+            "", (time.perf_counter() - t0) * 1000)
 
     # -- interpretation --------------------------------------------------
 
@@ -471,5 +471,5 @@ class NetworkDiagnostic:
         return d
 
 
-async def diagnose(base_url: str = "https://api.binance.com") -> Diagnosis:
+async def diagnose(base_url: str = "https://paper-api.alpaca.markets") -> Diagnosis:
     return await NetworkDiagnostic(base_url).run()

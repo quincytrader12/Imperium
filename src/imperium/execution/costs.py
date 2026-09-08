@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
 
-from imperium.venues.registry import FeeSchedule, VenueSpec
+from imperium.venues.assets import AssetClass, AssetClassSpec, CostModel, spec_for
 
 #: The share of the half-spread a passive fill gives up to adverse selection.
 #: This is an assumption, not a measurement. It is stated here, once, so that it
@@ -50,6 +50,7 @@ class CostEstimate:
 
     symbol: str
     style: Style
+    asset_class: str
     fee_bps: Decimal
     spread_bps: Decimal
     #: What the crossing actually costs over a round trip, in bps.
@@ -69,8 +70,9 @@ class CostEstimate:
         fee_note = " (ASSUMED tier)" if self.fees_are_assumed else ""
         spread_note = " (ASSUMED)" if self.spread_is_assumed else ""
         return (
-            f"{self.symbol}: {self.fee_bps}bp {self.style} fee{fee_note}, "
-            f"{self.spread_bps}bp spread{spread_note} — a round trip must clear "
+            f"{self.symbol} [{self.asset_class}]: {self.fee_bps}bp {self.style} "
+            f"commission{fee_note}, {self.spread_bps}bp spread{spread_note}, "
+            f"{self.sell_side_bps}bp sell-side fee — a round trip must clear "
             f"about {self.round_trip_bps:.1f}bp before this symbol trades."
         )
 
@@ -78,10 +80,11 @@ class CostEstimate:
 def round_trip_cost_bps(
     *,
     symbol: str,
-    fees: FeeSchedule,
+    fees: CostModel,
     spread_bps: Decimal | float | str,
     style: Style = "taker",
     spread_is_assumed: bool = False,
+    asset_class: AssetClass | str = AssetClass.US_EQUITY,
 ) -> CostEstimate:
     """Cost of a full round trip in basis points.
 
@@ -105,21 +108,26 @@ def round_trip_cost_bps(
             f"quote. Live book data replaces it as soon as it arrives."
         )
 
+    fee_bps = fees.commission_bps
     if style == "taker":
-        fee_bps = fees.taker_bps
         # Two crossings, each paying half the spread == one full spread.
         crossing = half_spread * 2
     else:
-        fee_bps = fees.maker_bps
         # A passive fill pays no spread, but is selected against.
         crossing = half_spread * ADVERSE_SELECTION_FRACTION * 2
 
-    # The fee is paid on both legs; the sell-side fee only on the sell leg.
+    # The commission is paid on both legs; the regulatory fee only on the sell
+    # leg. For US equities the commission is zero and the sell-side fee is the
+    # whole of the non-spread cost, which inverts where the money goes compared
+    # with a crypto venue -- the spread is almost the entire cost of an equity
+    # round trip, and a cost model built for a fee-heavy venue would badly
+    # misprice it.
     round_trip = fee_bps * 2 + crossing + fees.sell_side_bps
 
     return CostEstimate(
         symbol=symbol,
         style=style,
+        asset_class=AssetClass(asset_class).value,
         fee_bps=fee_bps,
         spread_bps=spread,
         crossing_bps=crossing,
@@ -133,7 +141,7 @@ def round_trip_cost_bps(
 
 def one_way_cost_bps(
     *,
-    fees: FeeSchedule,
+    fees: CostModel,
     spread_bps: Decimal | float | str,
     style: Style = "taker",
 ) -> Decimal:
@@ -150,8 +158,8 @@ def one_way_cost_bps(
         spread = Decimal("0")
     half = spread / 2
     if style == "taker":
-        return fees.taker_bps + half
-    return fees.maker_bps + half * ADVERSE_SELECTION_FRACTION
+        return fees.commission_bps + half
+    return fees.commission_bps + half * ADVERSE_SELECTION_FRACTION
 
 
 @dataclass(frozen=True)
@@ -215,21 +223,32 @@ def spread_bps_from_book(bid: float, ask: float) -> Decimal | None:
 
 def estimate_for_symbol(
     symbol: str,
-    spec: VenueSpec,
+    asset_class: AssetClass | str | None = None,
     *,
     bid: float | None = None,
     ask: float | None = None,
     style: Style = "taker",
-    default_spread_bps: Decimal | float | str = "2.0",
+    cost_model: CostModel | None = None,
 ) -> CostEstimate:
-    """Convenience wrapper: measured spread where available, assumed otherwise."""
-    measured = spread_bps_from_book(bid, ask) if bid is not None and ask is not None else None
+    """Price one symbol using its own asset class's cost model.
+
+    The asset class is inferred from the symbol when not supplied, because
+    pricing an equity with the crypto model -- 25bp of commission where there is
+    none -- would refuse essentially every equity the scanner ever sees.
+    """
+    from imperium.venues.assets import classify_symbol
+
+    resolved = AssetClass(asset_class) if asset_class else classify_symbol(symbol)
+    model = cost_model or spec_for(resolved).cost_model
+
+    measured = (spread_bps_from_book(bid, ask)
+                if bid is not None and ask is not None else None)
     if measured is None:
         return round_trip_cost_bps(
-            symbol=symbol, fees=spec.fees, spread_bps=default_spread_bps,
-            style=style, spread_is_assumed=True,
+            symbol=symbol, fees=model, spread_bps=model.default_spread_bps,
+            style=style, spread_is_assumed=True, asset_class=resolved,
         )
     return round_trip_cost_bps(
-        symbol=symbol, fees=spec.fees, spread_bps=measured, style=style,
-        spread_is_assumed=False,
+        symbol=symbol, fees=model, spread_bps=measured, style=style,
+        spread_is_assumed=False, asset_class=resolved,
     )

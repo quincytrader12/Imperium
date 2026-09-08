@@ -1,122 +1,105 @@
-"""A fake Binance Spot that verifies signatures the way the real one does.
+"""A fake Alpaca that answers the way the real one does.
 
-A mock that accepts any signature tests nothing about signing. This one
-recomputes the HMAC over the exact query string it received and rejects with
-`-1022` on a mismatch, which is what makes the byte-exactness tests in
-``test_client_signing.py`` meaningful: if the client re-encodes params after
-signing, this mock fails it, just as the venue would.
+Alpaca has no request signing, so the thing the previous mock existed to verify
+-- byte-exact HMAC -- is gone. What replaces it is subtler and easier to get
+wrong: the API is split across two hosts and three data namespaces, and an
+environment mismatch (a paper key against the live host) returns a bare 401 that
+looks exactly like a bad key.
+
+This mock therefore enforces:
+
+* the two auth headers, and which *environment* the key belongs to;
+* equities and crypto served from different paths with different response
+  shapes -- the equity snapshot map is top level, the crypto one is nested;
+* client_order_id lookup, so the ambiguous-submission path is testable.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
+import datetime as dt
 import json
 import time
-import urllib.parse
 from typing import Any, Callable
 
 import httpx
 
-API_KEY = "PK" + "A" * 62
-SECRET = "S" * 64
+KEY = "PKTEST" + "A" * 14
+SECRET = "s3cr3t" + "z" * 34
+LIVE_KEY = "AKLIVE" + "B" * 14
 
-EXCHANGE_INFO = {
-    "symbols": [
-        {
-            "symbol": "BTCUSDT", "status": "TRADING",
-            "baseAsset": "BTC", "quoteAsset": "USDT",
-            "baseAssetPrecision": 8, "quoteAssetPrecision": 8,
-            "permissions": ["SPOT"],
-            "filters": [
-                {"filterType": "PRICE_FILTER", "tickSize": "0.01000000"},
-                {"filterType": "LOT_SIZE", "stepSize": "0.00001000",
-                 "minQty": "0.00001000", "maxQty": "9000.00000000"},
-                {"filterType": "NOTIONAL", "minNotional": "5.00000000",
-                 "applyMinToMarket": True},
-            ],
-        },
-        {
-            "symbol": "ETHUSDT", "status": "TRADING",
-            "baseAsset": "ETH", "quoteAsset": "USDT",
-            "baseAssetPrecision": 8, "quoteAssetPrecision": 8,
-            "permissions": ["SPOT"],
-            "filters": [
-                {"filterType": "PRICE_FILTER", "tickSize": "0.01000000"},
-                {"filterType": "LOT_SIZE", "stepSize": "0.00010000",
-                 "minQty": "0.00010000", "maxQty": "9000.00000000"},
-                # The older filter name, so the parser is exercised on both.
-                {"filterType": "MIN_NOTIONAL", "minNotional": "10.00000000",
-                 "applyToMarket": False},
-            ],
-        },
-        {
-            "symbol": "DEADUSDT", "status": "BREAK",
-            "baseAsset": "DEAD", "quoteAsset": "USDT",
-            "permissions": ["SPOT"],
-            "filters": [
-                {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
-                {"filterType": "LOT_SIZE", "stepSize": "1", "minQty": "1",
-                 "maxQty": "100"},
-                {"filterType": "NOTIONAL", "minNotional": "5"},
-            ],
-        },
-    ]
-}
+EQUITY_ASSETS = [
+    {"symbol": "AAPL", "name": "Apple Inc", "class": "us_equity",
+     "exchange": "NASDAQ", "tradable": True, "shortable": True,
+     "easy_to_borrow": True, "fractionable": True, "status": "active"},
+    {"symbol": "SPY", "name": "SPDR S&P 500", "class": "us_equity",
+     "exchange": "ARCA", "tradable": True, "shortable": True,
+     "easy_to_borrow": True, "fractionable": True, "status": "active"},
+    {"symbol": "HARD", "name": "Hard To Borrow Co", "class": "us_equity",
+     "exchange": "NASDAQ", "tradable": True, "shortable": True,
+     "easy_to_borrow": False, "fractionable": False, "status": "active"},
+    {"symbol": "HALTED", "name": "Halted Co", "class": "us_equity",
+     "exchange": "NASDAQ", "tradable": False, "shortable": False,
+     "easy_to_borrow": False, "fractionable": False, "status": "active"},
+]
+
+CRYPTO_ASSETS = [
+    {"symbol": "BTC/USD", "name": "Bitcoin", "class": "crypto",
+     "exchange": "CRYPTO", "tradable": True, "shortable": False,
+     "easy_to_borrow": False, "fractionable": True, "status": "active",
+     "min_order_size": "0.0001", "min_trade_increment": "0.0001"},
+    {"symbol": "ETH/USD", "name": "Ethereum", "class": "crypto",
+     "exchange": "CRYPTO", "tradable": True, "shortable": False,
+     "easy_to_borrow": False, "fractionable": True, "status": "active",
+     "min_order_size": "0.001", "min_trade_increment": "0.001"},
+]
 
 
 class MockVenue:
-    """Configurable fake venue.
+    """Configurable fake Alpaca.
 
     Set ``fail_next`` to make the next call fail in a specific way, and inspect
     ``requests`` to assert on what actually went on the wire.
     """
 
-    def __init__(self, *, api_key: str = API_KEY, secret: str = SECRET) -> None:
-        self.api_key = api_key
-        self.secret = secret.encode()
+    def __init__(self, *, key: str = KEY, secret: str = SECRET,
+                 paper: bool = True) -> None:
+        self.key = key
+        self.secret = secret
+        self.paper = paper
         self.requests: list[httpx.Request] = []
         self.orders: dict[str, dict[str, Any]] = {}
         self.order_seq = 1000
-        #: A queue of canned failures; each entry is consumed by one request.
         self.fail_next: list[Callable[[httpx.Request], httpx.Response] | Exception] = []
-        self.clock_skew_ms = 0
-        self.used_weight = 1
-        self.signature_failures = 0
+        self.market_open = True
+        self.equity = 100_000.0
+        self.daytrade_count = 0
+        self.rate_remaining = 200
+        self.auth_failures = 0
 
     # -- helpers ---------------------------------------------------------
 
     def _json(self, payload: Any, status: int = 200) -> httpx.Response:
         return httpx.Response(
             status, json=payload,
-            headers={"x-mbx-used-weight-1m": str(self.used_weight),
-                     "content-type": "application/json"},
-        )
+            headers={"x-ratelimit-remaining": str(self.rate_remaining),
+                     "x-ratelimit-limit": "200",
+                     "content-type": "application/json"})
 
-    def _error(self, code: int, msg: str, status: int = 400) -> httpx.Response:
-        return self._json({"code": code, "msg": msg}, status)
+    def _error(self, status: int, code: int, message: str) -> httpx.Response:
+        return self._json({"code": code, "message": message}, status)
 
-    def _verify(self, request: httpx.Request) -> httpx.Response | None:
-        """Reject exactly as the venue would, on the exact received bytes."""
-        raw_query = request.url.query.decode()
-        if "signature=" not in raw_query:
-            return self._error(-1102, "Mandatory parameter 'signature' was not sent.")
-        if request.headers.get("X-MBX-APIKEY") != self.api_key:
-            return self._error(-2015, "Invalid API-key, IP, or permissions for action.",
-                               401)
-        payload, _, signature = raw_query.rpartition("&signature=")
-        expected = hmac.new(self.secret, payload.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            self.signature_failures += 1
-            return self._error(-1022, "Signature for this request is not valid.")
-        params = dict(urllib.parse.parse_qsl(payload, keep_blank_values=True))
-        ts = int(params.get("timestamp", 0))
-        recv = int(params.get("recvWindow", 5000))
-        now = int(time.time() * 1000) + self.clock_skew_ms
-        if abs(now - ts) > recv:
-            return self._error(
-                -1021,
-                "Timestamp for this request is outside of the recvWindow.")
+    def _check_auth(self, request: httpx.Request) -> httpx.Response | None:
+        key = request.headers.get("APCA-API-KEY-ID")
+        secret = request.headers.get("APCA-API-SECRET-KEY")
+        if key != self.key or secret != self.secret:
+            self.auth_failures += 1
+            return self._error(401, 40110000, "access key verification failed")
+        # A live key against the paper host, or the reverse, is the single most
+        # common real-world failure and is indistinguishable from a bad key.
+        looks_live = key.startswith("AK")
+        if looks_live == self.paper:
+            self.auth_failures += 1
+            return self._error(401, 40110000, "access key verification failed")
         return None
 
     # -- transport -------------------------------------------------------
@@ -130,104 +113,122 @@ class MockVenue:
             return nxt(request)
 
         path = request.url.path
-        params = dict(urllib.parse.parse_qsl(request.url.query.decode()))
+        params = dict(request.url.params)
 
-        if path == "/api/v3/ping":
-            return self._json({})
-        if path == "/api/v3/time":
-            return self._json({"serverTime": int(time.time() * 1000) + self.clock_skew_ms})
-        if path == "/api/v3/exchangeInfo":
-            return self._json(EXCHANGE_INFO)
-        if path == "/api/v3/ticker/24hr":
-            return self._json([
-                {"symbol": "BTCUSDT", "lastPrice": "60000.00",
-                 "priceChangePercent": "1.5", "quoteVolume": "900000000"},
-                {"symbol": "ETHUSDT", "lastPrice": "3000.00",
-                 "priceChangePercent": "-0.8", "quoteVolume": "400000000"},
-            ])
-        if path == "/api/v3/klines":
-            n = int(params.get("limit", 500))
-            out = []
-            base = 60000.0
-            t = int(time.time() * 1000) - n * 60_000
-            for i in range(n):
-                px = base + i * 0.5
-                out.append([t + i * 60_000, f"{px:.2f}", f"{px + 5:.2f}",
-                            f"{px - 5:.2f}", f"{px + 1:.2f}", "12.5",
-                            t + i * 60_000 + 59_999, "750000.0", 400,
-                            "6.0", "360000.0", "0"])
-            return self._json(out)
+        bad = self._check_auth(request)
+        if bad is not None:
+            return bad
 
-        if path in ("/api/v3/account", "/api/v3/order", "/api/v3/openOrders",
-                    "/api/v3/account/commission"):
-            bad = self._verify(request)
-            if bad is not None:
-                return bad
-
-        if path == "/api/v3/account":
+        if path == "/v2/clock":
+            now = dt.datetime.now(dt.timezone.utc)
             return self._json({
-                "makerCommission": 10, "takerCommission": 10,
-                "canTrade": True, "accountType": "SPOT",
-                "balances": [
-                    {"asset": "USDT", "free": "10000.00000000", "locked": "0.00000000"},
-                    {"asset": "BTC", "free": "0.05000000", "locked": "0.00000000"},
-                    {"asset": "XRP", "free": "0.00000000", "locked": "0.00000000"},
-                ],
+                "timestamp": now.isoformat(),
+                "is_open": self.market_open,
+                "next_open": (now + dt.timedelta(hours=8)).isoformat(),
+                "next_close": (now + dt.timedelta(hours=4)).isoformat(),
             })
-        if path == "/api/v3/account/commission":
+        if path == "/v2/account":
             return self._json({
-                "symbol": params.get("symbol", "BTCUSDT"),
-                "standardCommission": {"maker": "0.00100000", "taker": "0.00100000"},
+                "status": "ACTIVE", "currency": "USD",
+                "cash": f"{self.equity:.2f}", "equity": f"{self.equity:.2f}",
+                "buying_power": f"{self.equity * 2:.2f}",
+                "daytrade_count": self.daytrade_count,
+                "pattern_day_trader": False,
             })
-        if path == "/api/v3/openOrders":
+        if path == "/v2/positions":
+            return self._json([])
+        if path == "/v2/assets":
+            wanted = params.get("asset_class", "us_equity")
+            return self._json(EQUITY_ASSETS if wanted == "us_equity"
+                              else CRYPTO_ASSETS)
+
+        # -- market data --------------------------------------------------
+        if path.endswith("/bars"):
+            symbols = [s for s in params.get("symbols", "").split(",") if s]
+            limit = int(params.get("limit", 100))
+            bars = {}
+            for i, symbol in enumerate(symbols):
+                base = 100.0 * (i + 1)
+                rows = []
+                t = dt.datetime(2026, 1, 5, 14, 30, tzinfo=dt.timezone.utc)
+                for k in range(limit):
+                    px = base * (1 + 0.0004 * k)
+                    rows.append({"t": (t + dt.timedelta(minutes=k)).isoformat(),
+                                 "o": px, "h": px * 1.001, "l": px * 0.999,
+                                 "c": px, "v": 10_000, "n": 50, "vw": px})
+                bars[symbol] = rows
+            return self._json({"bars": bars, "next_page_token": None})
+
+        if path.endswith("/snapshots"):
+            symbols = [s for s in params.get("symbols", "").split(",") if s]
+            snaps = {}
+            for i, symbol in enumerate(symbols):
+                px = 100.0 * (i + 1)
+                snaps[symbol] = {
+                    "latestTrade": {"p": px, "s": 100},
+                    "latestQuote": {"bp": px * 0.9999, "ap": px * 1.0001,
+                                    "bs": 2, "as": 2},
+                    "dailyBar": {"o": px * 0.99, "h": px * 1.02,
+                                 "l": px * 0.98, "c": px, "v": 5_000_000},
+                }
+            # Equities return the map at the top level; crypto nests it. A
+            # client that handles only one shape silently yields no prices.
+            if "crypto" in path:
+                return self._json({"snapshots": snaps})
+            return self._json(snaps)
+
+        # -- orders --------------------------------------------------------
+        if path == "/v2/orders" and request.method == "POST":
+            return self._place(json.loads(request.content or b"{}"))
+        if path == "/v2/orders" and request.method == "GET":
             return self._json([o for o in self.orders.values()
-                               if o["status"] == "NEW"])
-
-        if path == "/api/v3/order" and request.method == "POST":
-            return self._place(params)
-        if path == "/api/v3/order" and request.method == "GET":
-            coid = params.get("origClientOrderId")
-            order = self.orders.get(coid) if coid else None
+                               if o["status"] in ("new", "accepted")])
+        if path == "/v2/orders:by_client_order_id":
+            coid = params.get("client_order_id", "")
+            order = self.orders.get(coid)
             if order is None:
-                for o in self.orders.values():
-                    if str(o["orderId"]) == params.get("orderId"):
-                        order = o
-                        break
-            if order is None:
-                return self._error(-2013, "Order does not exist.")
+                return self._error(404, 40410000, "order not found")
             return self._json(order)
-        if path == "/api/v3/order" and request.method == "DELETE":
-            coid = params.get("origClientOrderId")
-            order = self.orders.get(coid) if coid else None
-            if order is None:
-                return self._error(-2011, "Unknown order sent.")
-            order["status"] = "CANCELED"
-            return self._json(order)
+        if path.startswith("/v2/positions/") and request.method == "DELETE":
+            return self._json({"symbol": path.rsplit("/", 1)[-1],
+                               "status": "closed"})
 
-        return self._error(-1121, "Invalid symbol.", 400)
+        return self._error(404, 40410000, "endpoint not found")
 
-    def _place(self, params: dict[str, str]) -> httpx.Response:
-        symbol = params.get("symbol", "")
-        if symbol not in {s["symbol"] for s in EXCHANGE_INFO["symbols"]}:
-            return self._error(-1121, "Invalid symbol.")
-        if params.get("type") == "LIMIT_MAKER" and "timeInForce" in params:
-            return self._error(-1106, "Parameter 'timeInForce' sent when not required.")
-        qty_text = params.get("quantity", "0")
-        if "e" in qty_text.lower():
-            return self._error(-1100, "Illegal characters found in parameter 'quantity'.")
+    def _place(self, body: dict[str, Any]) -> httpx.Response:
+        symbol = body.get("symbol", "")
+        known = {a["symbol"] for a in EQUITY_ASSETS + CRYPTO_ASSETS}
+        if symbol not in known:
+            return self._error(404, 40410000, f"asset {symbol} not found")
+        asset = next(a for a in EQUITY_ASSETS + CRYPTO_ASSETS
+                     if a["symbol"] == symbol)
+        if not asset["tradable"]:
+            return self._error(403, 40310000, f"{symbol} is not tradable")
+        qty = body.get("qty")
+        if qty is not None and not asset["fractionable"]:
+            if float(qty) != int(float(qty)):
+                return self._error(
+                    422, 42210000,
+                    f"{symbol} does not support fractional quantities")
+        if body.get("extended_hours") and body.get("type") != "limit":
+            return self._error(422, 42210000,
+                               "extended hours orders must be limit orders")
         self.order_seq += 1
-        coid = params.get("newClientOrderId", f"auto{self.order_seq}")
-        price = params.get("price") or "60000.00"
+        coid = body.get("client_order_id", f"auto{self.order_seq}")
+        price = 100.0
         order = {
-            "symbol": symbol, "orderId": self.order_seq, "clientOrderId": coid,
-            "transactTime": int(time.time() * 1000), "price": price,
-            "origQty": qty_text, "executedQty": qty_text,
-            "cummulativeQuoteQty": f"{float(qty_text) * float(price):.8f}",
-            "status": "FILLED" if params.get("type") == "MARKET" else "NEW",
-            "type": params.get("type"), "side": params.get("side"),
-            "fills": ([{"price": price, "qty": qty_text, "commission": "0.001",
-                        "commissionAsset": "USDT"}]
-                      if params.get("type") == "MARKET" else []),
+            "id": f"ord-{self.order_seq}",
+            "client_order_id": coid,
+            "symbol": symbol,
+            "side": body.get("side"),
+            "qty": str(qty) if qty is not None else None,
+            "notional": body.get("notional"),
+            "filled_qty": str(qty) if qty is not None else "0",
+            "filled_avg_price": f"{price:.2f}",
+            "type": body.get("type"),
+            "time_in_force": body.get("time_in_force"),
+            "status": "filled",
+            "submitted_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         self.orders[coid] = order
         return self._json(order)
@@ -244,5 +245,4 @@ def html_block_page(request: httpx.Request) -> httpx.Response:
         text="<!DOCTYPE html>\n<html><head><title>Access Denied</title></head>"
              "<body><h1>Access Denied</h1><p>Blocked by policy.</p>"
              "<hr><center>nginx/1.24.0</center></body></html>",
-        headers={"content-type": "text/html"},
-    )
+        headers={"content-type": "text/html"})

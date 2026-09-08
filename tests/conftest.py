@@ -30,8 +30,8 @@ def venue():
 
 @pytest.fixture
 def client(venue):
-    from imperium.venues.binance.client import BinanceSpotClient
-    from mock_venue import API_KEY, SECRET
+    from imperium.venues.alpaca.client import AlpacaClient
+    from mock_venue import KEY, SECRET
 
-    return BinanceSpotClient(API_KEY, SECRET, transport=venue.transport,
-                             max_retries=0)
+    return AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport,
+                        max_retries=0)

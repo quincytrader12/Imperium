@@ -64,11 +64,30 @@ class Sample:
 
     @classmethod
     def collect(cls, gen: Generator, trials: int, window: int,
-                rng: np.random.Generator) -> "Sample":
+                rng: np.random.Generator,
+                drop_session_gaps: int = 0) -> "Sample":
+        """Measure the statistics exactly as the engine computes them.
+
+        ``drop_session_gaps`` is the session length in bars. When set, the
+        return spanning each session boundary is dropped before any statistic
+        is computed -- which is what the engine does for equities. Calibrating
+        on gap-included returns and then running on gap-excluded ones would fit
+        the thresholds to a distribution the classifier never actually sees, and
+        every error rate measured here would describe a different program.
+        """
         vr, z, hurst, adf = [], [], [], []
         for _ in range(trials):
             prices = gen(window, rng)
             rets = st.log_returns(prices)
+            if drop_session_gaps:
+                # The return at index i spans bars i and i+1, so the seam after
+                # bar k*session is the return at index k*session - 1.
+                keep = np.ones(rets.size, dtype=bool)
+                for boundary in range(drop_session_gaps, window, drop_session_gaps):
+                    idx = boundary - 1
+                    if 0 <= idx < keep.size:
+                        keep[idx] = False
+                rets = rets[keep]
             v = st.variance_ratio(rets)
             if not v.valid:
                 continue
@@ -244,6 +263,83 @@ def _power_curve(thresholds: dict, trials: int, window: int,
     return curve
 
 
+#: Which generators stand in for each asset class. Crypto is an unbroken walk;
+#: equities are sessions separated by overnight gaps, with a U-shaped intraday
+#: volatility profile held out to check the fit generalises to structure it was
+#: not fitted on.
+CLASS_NULLS: dict[str, Generator] = {
+    "crypto": st.random_walk,
+    "us_equity": lambda n, r: st.equity_session_walk(n, r, bars_per_session=100),
+}
+
+CLASS_HELD_OUT: dict[str, dict[str, Generator]] = {
+    "crypto": {
+        "garch_1_1": st.garch_process,
+        "student_t4": st.fat_tail_process,
+        "high_vol_walk": lambda n, r: st.random_walk(n, r, sigma=0.04),
+        "low_vol_walk": lambda n, r: st.random_walk(n, r, sigma=0.002),
+    },
+    "us_equity": {
+        "intraday_u_shape": lambda n, r: st.intraday_u_shape_walk(
+            n, r, bars_per_session=100),
+        "garch_1_1": st.garch_process,
+        "student_t4": st.fat_tail_process,
+        "wide_gap_sessions": lambda n, r: st.equity_session_walk(
+            n, r, bars_per_session=100, gap_sigma=0.015),
+    },
+}
+
+
+#: Bars per session used when fitting the equity class. A 250-bar window is
+#: less than one 390-bar cash session, so a shorter session is used to make the
+#: window straddle a seam -- which is the case the gap handling exists for and
+#: the one a fit must therefore cover.
+EQUITY_SESSION_BARS = 100
+
+
+def run_for_class(asset_class: str, trials: int, seed: int, window: int) -> dict:
+    """Fit and score the classifier for one asset class."""
+    rng = np.random.default_rng(seed)
+    null_gen = CLASS_NULLS[asset_class]
+    drop = EQUITY_SESSION_BARS if asset_class == "us_equity" else 0
+    null = Sample.collect(null_gen, trials, window, rng, drop_session_gaps=drop)
+    thresholds = build_thresholds(null)
+
+    report: dict = {
+        "asset_class": asset_class,
+        "seed": seed,
+        "trials": trials,
+        "window": window,
+        "null_generator": getattr(null_gen, "__name__", str(null_gen)),
+        "thresholds": thresholds,
+        "null_distribution": {
+            stat: dict(zip(("p2.5", "p50", "p97.5"),
+                           _q(getattr(null, stat), 0.025, 0.5, 0.975)))
+            for stat in ("vr", "z", "hurst", "adf")
+        },
+    }
+    report["session_bars_dropped"] = drop
+    report["false_positive_rate"] = {
+        asset_class + "_null": _classify_counts(null, thresholds)
+    }
+    report["power"] = {}
+    for name, gen in (("ou_mean_reverting", st.ou_process),
+                      ("momentum_ar1", st.momentum_process)):
+        report["power"][name] = _classify_counts(
+            Sample.collect(gen, trials, window, rng, drop_session_gaps=drop),
+            thresholds)
+    report["held_out_false_positive_rate"] = {
+        name: _classify_counts(
+            Sample.collect(gen, trials, window, rng, drop_session_gaps=drop),
+            thresholds)
+        for name, gen in CLASS_HELD_OUT[asset_class].items()
+    }
+    sub = _sub_threshold_information(thresholds, max(200, trials // 2), window, rng)
+    report["sub_threshold_evidence"] = sub
+    thresholds["sub_threshold"] = sub
+    return report
+
+
 def run(trials: int = 1000, seed: int = 20240517, window: int = 250) -> dict:
     rng = np.random.default_rng(seed)
 
@@ -301,6 +397,19 @@ def run(trials: int = 1000, seed: int = 20240517, window: int = 250) -> dict:
     # arbitrary parameter value says almost nothing: it is a point on a curve
     # whose shape is the actual answer.
     report["power_curve"] = _power_curve(thresholds, max(300, trials // 3), window, rng)
+
+    # Per-class calibrations. The crypto entry reuses the fit above; equities
+    # get their own, fitted on a session-and-gap null, because a threshold
+    # fitted on an unbroken walk does not describe an equity minute series.
+    report["by_asset_class"] = {
+        "crypto": {"thresholds": thresholds,
+                   "null_generator": "random_walk",
+                   "false_positive_rate": report["false_positive_rate"],
+                   "held_out_false_positive_rate":
+                       report["held_out_false_positive_rate"],
+                   "sub_threshold_evidence": sub},
+        "us_equity": run_for_class("us_equity", trials, seed + 101, window),
+    }
     return report
 
 
@@ -373,6 +482,25 @@ def main(trials: int = 1000, seed: int = 20240517, window: int = 250) -> int:
     if not sub["usable"]:
         print("  -> the classifier will apply NO tilt from sub-threshold evidence,")
         print("     because it was measured not to carry information.")
+    print()
+    print("PER-ASSET-CLASS THRESHOLDS — the reason one strategy cannot serve both")
+    for name, block in report["by_asset_class"].items():
+        th = block["thresholds"]
+        z, h = th["vr_z"], th["hurst"]
+        print(f"  {name}")
+        print(f"    variance-ratio z: trending above {z['reject_trend_above']:+.3f}, "
+              f"reverting below {z['reject_revert_below']:+.3f}")
+        print(f"    hurst null median {h['null_median']:.3f}, "
+              f"corroborates trend above {h['trend_above']:.3f}")
+        print(f"    adf stationary below {th['adf']['stationary_below']:+.3f}")
+        wrong = block["held_out_false_positive_rate"]
+        worst = max((v.get("trending", 0) + v.get("mean_reverting", 0)
+                     for v in wrong.values()), default=0.0)
+        print(f"    worst held-out false-regime rate {_pct(worst)}")
+    ce = report["by_asset_class"]["crypto"]["thresholds"]["vr_z"]
+    ee = report["by_asset_class"]["us_equity"]["thresholds"]["vr_z"]
+    print(f"  the equity trending bar sits {ee['reject_trend_above'] - ce['reject_trend_above']:+.3f} "
+          f"from crypto's; using one for the other changes the error rate directly")
     print()
     path = save(report)
     print(f"written to {path}")

@@ -98,3 +98,44 @@ class BarSeries:
 
     def closed_count(self) -> int:
         return sum(1 for b in self._bars if b.closed)
+
+    def open_times(self, n: int | None = None) -> np.ndarray:
+        arr = np.asarray([b.open_time for b in self._bars if b.closed], dtype=float)
+        return arr if n is None else arr[-n:]
+
+    def log_returns(self, n: int | None = None, *,
+                    exclude_session_gaps: bool = False) -> np.ndarray:
+        """Log returns, optionally dropping the ones that span a session gap.
+
+        This is the single most important difference between an equity series
+        and a crypto one. Consecutive *bars* are not consecutive *minutes* for
+        an equity: between 16:00 and 09:30 the next day there is a seam, and
+        across a weekend a much larger one. Treating close-to-open as a
+        one-minute return does two things, both bad:
+
+        * it inflates the volatility estimate, because a gap is typically many
+          times a one-minute move -- and volatility is the denominator of the
+          position sizer, so the whole book is then sized too small;
+        * it corrupts the variance ratio, because a handful of huge
+          pseudo-returns dominate both the numerator and the denominator and
+          push the statistic toward the null regardless of what the market did.
+
+        A gap is any interval longer than 1.5 bars, which separates a real
+        missing-bar seam from ordinary jitter in bar timestamps.
+        """
+        closes = self.closes(n)
+        if closes.size < 2:
+            return np.zeros(0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rets = np.diff(np.log(closes))
+        finite = np.isfinite(rets)
+        if not exclude_session_gaps:
+            return rets[finite]
+
+        times = self.open_times(n)
+        if times.size != closes.size:
+            return rets[finite]
+        gaps_ms = np.diff(times)
+        contiguous = gaps_ms <= (self.bar_seconds * 1000 * 1.5)
+        keep = finite & contiguous
+        return rets[keep]

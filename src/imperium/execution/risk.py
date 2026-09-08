@@ -37,6 +37,16 @@ class RiskLimits:
     daily_loss_halt: float = 0.04
     #: ATR multiple used for the stop distance.
     atr_stop_multiple: float = 2.5
+    #: Equity below which US pattern-day-trader limits apply. Set by
+    #: regulation, not by preference, which is why it is here rather than in a
+    #: tunable: an account under this that makes a fourth day trade in five
+    #: business days is restricted for ninety days.
+    pdt_equity_floor: float = 25_000.0
+    #: Day trades permitted in the rolling window below that floor. The rule
+    #: allows three; stopping at two leaves room for the exit leg of a position
+    #: opened earlier in the day, which would otherwise be the trade that trips
+    #: it.
+    pdt_max_day_trades: int = 2
 
     def __post_init__(self) -> None:
         if not 0 < self.max_position_weight <= 1:

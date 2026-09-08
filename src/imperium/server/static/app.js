@@ -72,6 +72,11 @@
     $('h-gross').textContent = (s.gross_exposure * 100).toFixed(1) + '% / ' +
                                (s.gross_ceiling * 100).toFixed(0) + '%';
 
+    var market = s.market || {};
+    var mk = $('h-market');
+    mk.textContent = market.describe || '-';
+    mk.className = 'v ' + (market.is_open ? 'up' : market.crypto_only ? '' : 'muted');
+
     var trading = s.watchlist.filter(function (w) { return w.verdict === 'trading'; }).length;
     $('h-trading').textContent = trading + ' / ' + s.watchlist.length;
 
@@ -91,6 +96,14 @@
     var messages = [];
     if (s.calibration_error) messages.push(['bad', s.calibration_error]);
     if (s.store_error) messages.push(['bad', 'Credentials: ' + s.store_error]);
+    if (s.limits && s.limits.pdt_blocked) {
+      messages.push(['warn', 'Pattern day trader: ' + s.limits.pdt_blocked +
+        '. Exits still pass; no new equity exposure is opened.']);
+    }
+    if (market && !market.is_open && !market.crypto_only) {
+      messages.push(['warn', 'Equity market is closed (' + (market.describe || '') +
+        '). Crypto continues; equities take no new exposure.']);
+    }
     if (s.halted) messages.push(['bad', 'BOOK HALTED — ' + s.halt_reason]);
     if (s.venue_error) messages.push(['warn', s.venue_error]);
     if (!messages.length) { banner.hidden = true; banner.textContent = ''; return; }
@@ -123,13 +136,14 @@
   function makeRow(symbol) {
     var tr = document.createElement('tr');
     var cells = {};
-    ['sym', 'price', 'chg', 'verdict'].forEach(function (k) {
+    ['sym', 'cls', 'price', 'chg', 'verdict'].forEach(function (k) {
       var td = document.createElement('td');
       if (k === 'price' || k === 'chg') td.className = 'num';
       cells[k] = td;
       tr.appendChild(td);
     });
     cells.sym.textContent = symbol;
+    cells.cls.className = 'cls-tag';
     var chip = document.createElement('span');
     chip.className = 'v-chip';
     cells.verdict.appendChild(chip);
@@ -155,6 +169,15 @@
       // Mutate text, never rebuild innerHTML: rebuilding drops scroll position
       // and any text the operator has selected.
       var c = entry.cells;
+      /* The asset class drives the calendar, the costs and the calibration, so
+       * it is shown rather than left for the reader to infer from the ticker. */
+      var cls = (row.decision && row.decision.asset_class) || '';
+      var short = cls === 'crypto' ? 'CR' : cls === 'us_equity' ? 'EQ'
+                : cls === 'us_option' ? 'OP' : '';
+      if (c.cls.textContent !== short) {
+        c.cls.textContent = short;
+        c.cls.className = 'cls-tag cls-' + (cls || 'none');
+      }
       var price = fmtPrice(row.price);
       if (c.price.textContent !== price) c.price.textContent = price;
       var chg = fmtPct(row.change_pct);
@@ -428,7 +451,10 @@
            '', (L.buying_power_reserve * 100).toFixed(0) + '% held') +
       cell('risk / trade', (L.risk_per_trade * 100).toFixed(2) + '%') +
       cell('target vol', (L.target_volatility * 100).toFixed(0) + '%') +
-      cell('ATR stop', L.atr_stop_multiple + 'x');
+      cell('ATR stop', L.atr_stop_multiple + 'x') +
+      cell('day trades', L.day_trade_count + ' / ' + L.pdt_max_day_trades,
+           L.pdt_blocked ? 'bad' : '',
+           s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit');
 
     $('risk-note').textContent = s.halted ? 'HALTED' : 'live bounds';
     var btn = $('btn-halt');
@@ -477,11 +503,23 @@
   function renderCosts(s) {
     var c = s.costs;
     var feeTone = c.fees_assumed ? 'warn' : 'good';
-    $('cost-grid').innerHTML =
-      cell('taker fee', c.taker_bps.toFixed(1) + 'bp', feeTone,
-           c.fees_assumed ? 'assumed' : 'confirmed') +
-      cell('maker fee', c.maker_bps.toFixed(1) + 'bp', feeTone) +
-      cell('median RT', c.median_round_trip_bps.toFixed(1) + 'bp') +
+    /* Reported per asset class, because the two are not comparable: an equity
+     * round trip is almost all spread, a crypto one almost all commission. A
+     * blended figure would describe neither. */
+    var byClass = c.by_asset_class || {};
+    var perClass = '';
+    ['us_equity', 'crypto'].forEach(function (k) {
+      var b = byClass[k];
+      if (!b) return;
+      perClass += cell(b.display_name + ' RT',
+                       b.median_round_trip_bps.toFixed(1) + 'bp', '',
+                       b.symbols + ' sym');
+      perClass += cell(b.display_name + ' fees',
+                       b.commission_bps.toFixed(1) + '+' +
+                       b.sell_side_bps.toFixed(1) + 'bp', feeTone,
+                       b.assumed ? 'assumed' : 'confirmed');
+    });
+    $('cost-grid').innerHTML = perClass +
       cell('safety multiple', c.safety_multiple + 'x') +
       cell('adv. selection', c.adverse_selection_fraction.toFixed(2),
            'warn', 'assumed') +
@@ -554,14 +592,13 @@
 
   function renderFooter(s) {
     var v = s.venue_budget || {};
-    $('foot-venue').textContent = s.venue + ' · ' + s.mode;
+    $('foot-venue').textContent = s.venue + ' ' + (s.environment || '') +
+      ' · ' + s.mode + ' · ' + ((s.market && s.market.feed) || '');
     $('foot-weight').textContent = v.limit
-      ? 'weight ' + v.used_weight + '/' + v.limit +
+      ? 'requests ' + v.used_weight + '/' + v.limit +
         ' (' + (v.utilisation * 100).toFixed(0) + '%)'
-      : 'weight —';
-    $('foot-clock').textContent = v.clock_measured
-      ? 'clock ' + (v.clock_offset_ms >= 0 ? '+' : '') + v.clock_offset_ms + 'ms'
-      : 'clock unmeasured';
+      : 'requests -';
+    $('foot-clock').textContent = (s.universe_scan && s.universe_scan.note) || '';
     var c = s.counters || {};
     $('foot-work').textContent =
       fmtCount(c.scan || 0) + ' scans · ' + fmtCount(c.decision || 0) +

@@ -62,21 +62,28 @@ def test_crypto_volatility_is_annualised_over_a_market_that_never_closes():
     assert crypto == pytest.approx(0.01 * math.sqrt(CRYPTO_YEAR / 60), rel=0.1)
 
 
-def test_the_venue_registry_itself_declares_a_market_that_never_closes():
-    """Prevents: the registry shipping an equity calendar for a crypto venue.
+def test_each_asset_class_declares_its_own_trading_calendar():
+    """Prevents one calendar being applied to both classes.
 
-    A mutation test found this gap: the annualisation test above uses its own
-    constants, so it kept passing when the registry's seconds_per_year was
-    changed to an equity calendar. The value that actually reaches the sizer is
-    the one on the spec, so that is what this asserts."""
-    from imperium.venues.registry import VENUES
+    A mutation test found the earlier version of this gap: the annualisation
+    test below uses its own constants, so it kept passing when the shipped
+    calendar changed. The value that actually reaches the sizer is the one on
+    the asset-class spec, so that is what this asserts -- and it asserts that
+    the two classes differ, because a single figure cannot be right for a
+    market that closes and one that does not.
+    """
+    from imperium.venues.assets import AssetClass, spec_for
 
-    for venue_id, spec in VENUES.items():
-        assert spec.seconds_per_year == CRYPTO_YEAR, (
-            f"{venue_id} annualises over {spec.seconds_per_year}s; a crypto "
-            f"market never closes, and an equity calendar understates its "
-            f"volatility by ~2.3x"
-        )
+    crypto = spec_for(AssetClass.CRYPTO)
+    equity = spec_for(AssetClass.US_EQUITY)
+
+    assert crypto.seconds_per_year == CRYPTO_YEAR, (
+        "crypto never closes, so a year is every second of it"
+    )
+    assert equity.seconds_per_year == EQUITY_YEAR, (
+        "equities trade 252 days of 6.5 hours"
+    )
+    assert crypto.seconds_per_year > equity.seconds_per_year * 5
 
 
 def test_a_short_on_a_long_only_venue_is_clamped_to_flat_not_to_a_small_long():

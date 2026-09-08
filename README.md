@@ -1,6 +1,7 @@
 # IMPERIUM
 
-A self-contained algorithmic crypto trading terminal for **Binance Spot**, with a
+A self-contained algorithmic trading terminal for **Alpaca** — US equities and
+crypto — with a
 live instrument-panel UI, packaged as a double-clickable Windows executable.
 
 Python 3.11+, `uv` for dependencies, FastAPI and a websocket for the UI, plain
@@ -36,17 +37,67 @@ The terminal is at <http://127.0.0.1:8787/> and the diagnostics at
 
 ### No ccxt, and no multi-venue abstraction
 
-`src/imperium/venues/binance/` is a direct REST client against the documented
-HTTP API. A library covering a hundred venues must flatten each venue's error
-vocabulary into a common one, and that flattening discards precisely what an
-operator needs: whether `-2015` was the key's IP allow-list, its trading
-permission, or the key itself. Every documented code is translated into a
-remedy in `errors.py`.
+`src/imperium/venues/alpaca/` is a direct REST client against the documented
+API. A library covering a hundred venues must flatten each venue's error
+vocabulary into a common one, and that flattening discards what an operator
+needs. Alpaca's most common real failure is a good example: a **paper key
+against the live host** (or the reverse) returns a bare `401` that is
+indistinguishable from an invalid key. The client names the environment in the
+remedy, so you don't regenerate a key that was fine.
 
-The seam for a second venue is `venues/registry.py`, which holds what differs
-between venues **as data**. A second venue would be a new entry there — and a
-separate pool of money, with its own book, equity and risk limits, because two
-accounts cannot fund each other.
+There is no request signing here — authentication is two headers — so the entire
+class of signature failures does not exist. What replaces it is the market
+clock: equities trade 6.5 hours a day, so the venue's own clock is a first-class
+part of the client rather than a local calendar guess.
+
+### Asset classes are where the strategy actually splits
+
+Crypto and equities are not the same instrument wearing different tickers.
+`venues/assets.py` holds every difference that changes the arithmetic:
+
+| | US equity | Crypto |
+|---|---|---|
+| trading seconds/year | `252 × 6.5 × 3600` = 5,896,800 | `365 × 24 × 3600` = 31,536,000 |
+| session gaps in the series | yes — dropped before any statistic | none |
+| shorting | if shortable **and** easy to borrow | not at all |
+| commission | none | ~25bp per leg |
+| regulatory fee | ~1bp, **sell leg only** | none |
+| measured round trip | ~2bp (almost all spread) | ~51bp (almost all commission) |
+| regime calibration | fitted on session-and-gap nulls | fitted on unbroken walks |
+
+Three of these are load-bearing:
+
+- **The calendar.** Annualising an equity over the crypto figure overstates its
+  volatility by **2.31×**, and since volatility is the denominator of the
+  volatility-target sizer, every position lands at ~43% of target.
+- **Overnight gaps.** A close-to-open move is not a one-minute return. Measured
+  on a three-session series, leaving gaps in inflates per-bar volatility by
+  **1.57×** and lets a handful of pseudo-returns dominate the variance ratio.
+- **Cost shape.** An equity round trip is almost entirely spread; a crypto one
+  is almost entirely commission. The same 20bp edge is *admitted* for AAPL and
+  *refused* for BTC/USD. One cost model would get one of those wrong.
+
+**Options are recognised but not traded.** An option's return is a non-linear
+function of the underlying's, so the variance-ratio regime test and the
+volatility-target sizer — both of which assume returns are the thing being
+forecast — do not carry over. The class exists so an option position is never
+silently sized as though it were its underlying. Trading them needs a different
+model, not a different threshold.
+
+### Pattern-day-trader limits
+
+A US margin account under $25,000 may make three day trades in five rolling
+business days; the fourth restricts it for ninety days. An autonomous book hits
+that in a morning. The day-trade count is read from the venue on each tick —
+counting locally cannot survive a restart or trades made elsewhere — and new
+exposure stops at two. Exits always pass.
+
+### The universe is scanned, not hardcoded
+
+The seed list is a starting point. On start the session asks the venue what it
+lists, drops anything not tradable *right now*, and ranks the rest by traded
+value. Anything currently held is kept regardless of rank, because dropping a
+symbol that holds a position leaves the position with nothing managing it.
 
 ### Every threshold is measured
 
@@ -254,7 +305,7 @@ that a success, so the binary itself is checked.
 
 ## Known limits
 
-- **The live network path is unverified from the development sandbox.** Binance
+- **The live network path is unverified from the development sandbox.** Alpaca
   is blocked there by a TLS-intercepting proxy, which `imperium diagnose`
   correctly identifies. Every authenticated path is tested against a mock venue
   that recomputes the HMAC over the exact query string it receives, so signing is

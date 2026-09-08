@@ -76,8 +76,37 @@ class PortfolioAllocator:
         self.cash: float = 0.0
         self.halted: bool = False
         self.halt_reason: str = ""
+        #: Day trades already used in the rolling five-business-day window, as
+        #: the venue counts them. Believing the venue rather than counting
+        #: locally is the only way to be right across restarts.
+        self.day_trade_count: int = 0
+        self.flagged_pattern_day_trader: bool = False
+        #: Set when the market is closed, so the book stops taking exposure it
+        #: cannot actually get filled on.
+        self.market_open: bool = True
+        self.market_note: str = ""
 
     # -- budgets ---------------------------------------------------------
+
+    def pdt_blocked(self) -> str:
+        """Why a new position would breach pattern-day-trader limits, if it would.
+
+        A US margin account under $25,000 equity may make three day trades in
+        five rolling business days; the fourth flags the account and restricts
+        it for ninety days. An autonomous book will hit that within a morning if
+        nothing stops it, and being restricted is far more expensive than any
+        trade it would have made.
+
+        This blocks *opening* exposure only. Closing is always allowed -- a
+        limit that traps a position is worse than the limit it enforces.
+        """
+        if self.equity <= 0 or self.equity >= self.limits.pdt_equity_floor:
+            return ""
+        if self.day_trade_count >= self.limits.pdt_max_day_trades:
+            return (f"pattern-day-trader limit: {self.day_trade_count} day trades "
+                    f"used and equity is {self.equity:,.0f}, below the "
+                    f"{self.limits.pdt_equity_floor:,.0f} floor")
+        return ""
 
     @property
     def per_symbol_budget(self) -> float:
@@ -195,6 +224,18 @@ class PortfolioAllocator:
         if abs(desired_weight) <= abs(current):
             return ClampResult(desired_weight, "none",
                                "a reduction is never clamped", reduced=False)
+
+        # Beyond this point the request increases exposure, so the two
+        # market-state guards apply. Both are deliberately placed after the
+        # reduction check above: neither may ever block an exit.
+        if not self.market_open:
+            return ClampResult(current, "market closed",
+                               self.market_note or "the market is closed, so no "
+                               "new exposure is taken", reduced=True)
+
+        pdt = self.pdt_blocked()
+        if pdt:
+            return ClampResult(current, "pattern day trader", pdt, reduced=True)
 
         if not state.admitted:
             return ClampResult(

@@ -1,4 +1,4 @@
-"""Symbol filters, rounding and decimal formatting.
+"""Quantity and price formatting, and per-asset rounding.
 
 Two failure modes live here, and both are silent until the venue rejects an
 order:
@@ -86,7 +86,7 @@ def round_price(value: Any, tick: Any, side: str) -> Decimal:
 
 @dataclass(frozen=True)
 class SymbolFilters:
-    """The subset of ``/api/v3/exchangeInfo`` that constrains an order."""
+    """The subset of the venue's asset record that constrains an order."""
 
     symbol: str
     base_asset: str
@@ -155,7 +155,7 @@ def _filter_value(filters: Iterable[dict[str, Any]], ftype: str, key: str,
 def parse_symbol(entry: dict[str, Any]) -> SymbolFilters:
     """Build :class:`SymbolFilters` from one exchangeInfo symbol entry.
 
-    Binance has used two names for the notional filter -- ``MIN_NOTIONAL`` and
+    Venues have used two names for the notional filter -- ``MIN_NOTIONAL`` and
     the newer ``NOTIONAL`` -- and which one a symbol carries varies. Reading
     only one of them silently yields a zero minimum, which disables the check
     that stops dust orders being sent.

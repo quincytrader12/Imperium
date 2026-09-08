@@ -35,6 +35,7 @@ from imperium.strategy.signals import (
     BlendedSignal, StrategyParams, blend, mean_reversion_signal, momentum_signal,
 )
 from imperium.telemetry.streams import TelemetryHub
+from imperium.venues.assets import AssetClass, AssetClassSpec, classify_symbol, spec_for
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.engine")
@@ -69,6 +70,7 @@ class Decision:
     sizing_reason: str = ""
     cost_warnings: tuple[str, ...] = ()
     price: float = 0.0
+    asset_class: str = ""
 
     @property
     def warming_up(self) -> bool:
@@ -120,6 +122,7 @@ class Decision:
             "sizing_reason": self.sizing_reason,
             "cost_warnings": list(self.cost_warnings),
             "price": self.price,
+            "asset_class": self.asset_class,
             "distance": round(self.distance_to_trading, 4),
         }
 
@@ -139,6 +142,10 @@ class SymbolEngine:
     ) -> None:
         self.symbol = symbol
         self.spec = spec
+        #: Everything that differs between asset classes: the calendar the
+        #: sizer annualises over, whether the series has session seams, whether
+        #: shorting exists, the cost model, and which calibration to use.
+        self.asset: AssetClassSpec = spec_for(classify_symbol(symbol))
         self.limits = limits
         #: Required. See the module docstring: an optional clamp is not a clamp.
         self.allocator = allocator
@@ -146,6 +153,10 @@ class SymbolEngine:
         self.params = params or StrategyParams()
         self.thresholds = thresholds
         self.series = BarSeries(symbol, bar_seconds=spec.bar_seconds)
+        #: Set from the venue's own asset record when available: shortability
+        #: and borrow are per-symbol facts, not class-wide ones.
+        self.can_short: bool = self.asset.shortable
+        self.tradable: bool = self.asset.tradeable
         self.decision = Decision(symbol=symbol, warmup_bars=self.params.warmup_bars)
         self.bid: float | None = None
         self.ask: float | None = None
@@ -163,15 +174,24 @@ class SymbolEngine:
     def _thresholds(self) -> dict:
         if self.thresholds is not None:
             return self.thresholds
-        return regime_mod.load_calibration()["thresholds"]
+        return regime_mod.thresholds_for(self.asset.calibration_key)
 
     def evaluate(self) -> Decision:
         """Evaluate one closed bar. Emits a pulse for work actually done."""
         closes = self.series.closes()
         bars_seen = int(closes.size)
         d = Decision(symbol=self.symbol, bars_seen=bars_seen,
-                     warmup_bars=self.params.warmup_bars)
+                     warmup_bars=self.params.warmup_bars,
+                     asset_class=self.asset.asset_class.value)
         d.price = float(closes[-1]) if bars_seen else 0.0
+
+        if not self.tradable:
+            d.verdict = Verdict.REJECTED
+            d.reason = (f"{self.asset.display_name} is not traded by this "
+                        f"program: {self.asset.note or 'unsupported asset class'}")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", d.reason, intensity=0.1)
+            return d
 
         if bars_seen < self.params.warmup_bars:
             d.verdict = Verdict.REJECTED
@@ -183,10 +203,17 @@ class SymbolEngine:
                                  intensity=bars_seen / max(1, self.params.warmup_bars))
             return d
 
-        rets = np.diff(np.log(closes[closes > 0]))
-        bar_vol = float(np.std(rets[-self.params.zscore_window:], ddof=1)) if rets.size > 8 else float("nan")
+        # For an equity these drop the returns that span an overnight or
+        # weekend seam. A close-to-open move is not a one-minute return, and
+        # leaving it in inflates the volatility that sizes every position and
+        # swamps the variance ratio that picks the strategy.
+        rets = self.series.log_returns(
+            exclude_session_gaps=self.asset.excludes_session_gaps)
+        bar_vol = (float(np.std(rets[-self.params.zscore_window:], ddof=1))
+                   if rets.size > 8 else float("nan"))
 
-        verdict = regime_mod.classify(closes[-250:], self._thresholds())
+        verdict = regime_mod.classify(closes[-250:], self._thresholds(),
+                                      returns=rets[-250:])
         d.regime = verdict.regime.value
         d.regime_reason = verdict.reason
 
@@ -196,7 +223,8 @@ class SymbolEngine:
         d.conviction = signal.value
 
         estimate = costs.estimate_for_symbol(
-            self.symbol, self.spec, bid=self.bid, ask=self.ask, style="taker",
+            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
+            style="taker",
         )
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
         d.spread_bps = float(estimate.spread_bps)
@@ -223,8 +251,16 @@ class SymbolEngine:
                                  closes, self.params.atr_window)
         sized: SizingResult = size_position(
             signal=signal.value, returns=rets, price=d.price, atr=atr,
-            limits=self.limits, seconds_per_year=self.spec.seconds_per_year,
-            bar_seconds=self.spec.bar_seconds, allows_short=self.spec.allows_short,
+            limits=self.limits,
+            # The class's own calendar. Annualising an equity over the crypto
+            # figure overstates its volatility by 2.31x and sizes every
+            # position at 43% of target.
+            seconds_per_year=self.asset.seconds_per_year,
+            bar_seconds=self.spec.bar_seconds,
+            # Class permission AND the venue's per-symbol borrow. A name that
+            # is shortable but hard to borrow accepts the order and then fails
+            # to locate.
+            allows_short=self.asset.shortable and self.can_short,
         )
         d.raw_weight = sized.weight
         d.sizing_reason = sized.reason

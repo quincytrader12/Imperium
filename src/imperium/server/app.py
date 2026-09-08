@@ -34,7 +34,7 @@ from imperium.security.credentials import CredentialError, CredentialStore
 from imperium.session import TradingSession
 from imperium.telemetry.streams import Level
 from imperium.venues import registry
-from imperium.venues.binance.client import VenueError
+from imperium.venues.alpaca.client import VenueError
 
 log = logging.getLogger("imperium.server")
 
@@ -95,7 +95,7 @@ def validate_bind_host(host: str) -> str:
 
 class AddKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
-    venue: str = "binance_spot"
+    venue: str = "alpaca"
     api_key: str = Field(min_length=8, max_length=256)
     secret: str = Field(min_length=8, max_length=256)
     note: str = ""

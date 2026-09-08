@@ -46,10 +46,10 @@ def test_per_symbol_budget_divides_by_max_concurrency_not_the_live_count():
     engine's budget whenever an unrelated symbol is admitted."""
     a = make_allocator(max_gross_exposure=0.80, max_concurrent_positions=5,
                        max_position_weight=0.50)
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
     budget_alone = a.per_symbol_budget
-    first = a.clamp("BTCUSDT", 0.80)
+    first = a.clamp("AAPL", 0.80)
     assert first.weight == pytest.approx(0.16), "one symbol must not claim the book"
 
     for i in range(4):
@@ -66,20 +66,20 @@ def test_a_buying_power_reserve_is_never_allocated():
     including an exit."""
     a = make_allocator(buying_power_reserve=0.15, max_gross_exposure=1.0,
                        max_position_weight=1.0, max_concurrent_positions=1)
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
     assert a.buying_power() == pytest.approx(85_000.0)
-    assert a.clamp("BTCUSDT", 1.0).weight <= 0.85 + 1e-9
+    assert a.clamp("AAPL", 1.0).weight <= 0.85 + 1e-9
 
 
 def test_every_limit_only_ever_reduces():
     """Prevents: a 'clamp' that raises a target. A limit that can increase
     exposure is not a limit."""
     a = make_allocator()
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
     for desired in (0.0, 0.01, 0.05, 0.16, 0.5, 1.0):
-        assert a.clamp("BTCUSDT", desired).weight <= desired + 1e-12
+        assert a.clamp("AAPL", desired).weight <= desired + 1e-12
 
 
 def test_no_limit_can_block_an_exit():
@@ -87,25 +87,25 @@ def test_no_limit_can_block_an_exit():
     is a bound on *taking* exposure; a reduction must pass through all of them,
     including a halt, a full book, and exhausted buying power."""
     a = make_allocator()
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
-    a.observe("BTCUSDT").current_weight = 0.16
+    a.observe("AAPL").current_weight = 0.16
     a.cash = 0.0                      # no buying power at all
     a.set_halt(True, "daily loss limit")
     for other in range(4):            # book completely full
         a.observe(f"F{other}").current_weight = 0.16
-    assert a.clamp("BTCUSDT", 0.0).weight == 0.0
-    assert a.clamp("BTCUSDT", 0.08).weight == pytest.approx(0.08)
+    assert a.clamp("AAPL", 0.0).weight == 0.0
+    assert a.clamp("AAPL", 0.08).weight == pytest.approx(0.08)
 
 
 def test_a_halt_still_blocks_new_exposure():
     """Prevents: the exit exemption above swallowing the halt entirely."""
     a = make_allocator()
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
-    a.observe("BTCUSDT").current_weight = 0.05
+    a.observe("AAPL").current_weight = 0.05
     a.set_halt(True, "daily loss limit")
-    assert a.clamp("BTCUSDT", 0.16).weight == pytest.approx(0.05)
+    assert a.clamp("AAPL", 0.16).weight == pytest.approx(0.05)
 
 
 def test_not_admitted_is_distinguished_from_rejected():
@@ -196,7 +196,7 @@ def test_the_real_engine_class_requires_an_allocator():
         "allocator must be required; an optional clamp is not a clamp"
     )
     with pytest.raises(TypeError):
-        SymbolEngine("BTCUSDT", get("binance_spot"), RiskLimits())  # type: ignore[call-arg]
+        SymbolEngine("AAPL", get("alpaca"), RiskLimits())  # type: ignore[call-arg]
 
 
 def test_the_real_engine_class_applies_the_portfolio_clamp():
@@ -211,9 +211,9 @@ def test_the_real_engine_class_applies_the_portfolio_clamp():
     a = make_allocator(max_gross_exposure=0.80, max_concurrent_positions=16,
                        max_position_weight=0.50)
     hub = TelemetryHub()
-    spec = get("binance_spot")
+    spec = get("alpaca")
     params = StrategyParams(warmup_bars=150)
-    engine = SymbolEngine("BTCUSDT", spec, a.limits, a, hub, params)
+    engine = SymbolEngine("AAPL", spec, a.limits, a, hub, params)
 
     # A strongly trending, low-volatility series: sizing wants far more than the
     # allocator will allow, so the clamp must be the binding constraint.
@@ -229,7 +229,7 @@ def test_the_real_engine_class_applies_the_portfolio_clamp():
                  for r in rows] + [[t, f"{price}", f"{price}", f"{price}",
                                     f"{price}", "10.0"]])
     engine.set_book(price * 0.99995, price * 1.00005)
-    a.set_scan("BTCUSDT", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
     a.rebalance_admissions()
 
     decision = engine.evaluate()
@@ -243,3 +243,75 @@ def test_the_real_engine_class_applies_the_portfolio_clamp():
         f"budget of {a.per_symbol_budget}"
     )
     assert decision.clamp_binding == "per-symbol budget"
+
+
+def test_the_pattern_day_trader_limit_blocks_new_exposure_below_the_floor():
+    """Prevents an autonomous book getting the account restricted.
+
+    A US margin account under $25,000 equity may make three day trades in five
+    rolling business days; the fourth flags it and restricts it for ninety
+    days. A bot scanning a live market will reach that within a morning, and
+    the restriction costs far more than any trade it would have made.
+    """
+    a = make_allocator()
+    a.equity = 10_000.0
+    a.cash = 10_000.0
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.rebalance_admissions()
+    a.observe("AAPL").current_weight = 0.05
+
+    a.day_trade_count = 0
+    assert a.clamp("AAPL", 0.15).binding != "pattern day trader"
+
+    a.day_trade_count = a.limits.pdt_max_day_trades
+    blocked = a.clamp("AAPL", 0.15)
+    assert blocked.binding == "pattern day trader"
+    assert blocked.weight == pytest.approx(0.05), "exposure must not increase"
+    assert "25,000" in blocked.reason
+
+
+def test_the_pattern_day_trader_limit_does_not_apply_above_the_floor():
+    """Prevents throttling an account the rule does not cover."""
+    a = make_allocator()
+    a.equity = 50_000.0
+    a.cash = 50_000.0
+    a.day_trade_count = 10
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.rebalance_admissions()
+    assert a.pdt_blocked() == ""
+    assert a.clamp("AAPL", 0.15).binding != "pattern day trader"
+
+
+def test_neither_market_hours_nor_pdt_can_block_an_exit():
+    """Prevents a guard trapping a position.
+
+    Both new guards bound *taking* exposure. A limit that can stop a reduction
+    is worse than the limit it enforces -- it holds a losing position through a
+    closed market or a day-trade cap.
+    """
+    a = make_allocator()
+    a.equity = 5_000.0
+    a.cash = 0.0
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.rebalance_admissions()
+    a.observe("AAPL").current_weight = 0.16
+    a.day_trade_count = 99
+    a.market_open = False
+    a.market_note = "market closed"
+
+    assert a.clamp("AAPL", 0.0).weight == 0.0
+    assert a.clamp("AAPL", 0.08).weight == pytest.approx(0.08)
+
+
+def test_a_closed_market_stops_new_exposure():
+    """Prevents queueing orders into a market that is not open. Equities trade
+    6.5 hours a day; the rest of the time an order is a guess about the open."""
+    a = make_allocator()
+    a.set_scan("AAPL", score=1.0, turnover=1e9, tradeable=True, reason="ok")
+    a.rebalance_admissions()
+    a.market_open = False
+    a.market_note = "market closed, opens Mon 14:30 UTC"
+    result = a.clamp("AAPL", 0.15)
+    assert result.binding == "market closed"
+    assert result.weight == 0.0
+    assert "opens" in result.reason

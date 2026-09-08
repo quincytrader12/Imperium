@@ -26,8 +26,9 @@ from enum import Enum
 from typing import Any, Protocol
 
 from imperium.execution.costs import one_way_cost_bps
-from imperium.venues.binance.client import BinanceSpotClient, VenueError
-from imperium.venues.binance.filters import format_decimal, to_decimal
+from imperium.venues.alpaca.client import AlpacaClient, VenueError
+from imperium.venues.alpaca.filters import format_decimal, to_decimal
+from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.broker")
@@ -225,10 +226,6 @@ class PaperBroker(_BaseBroker):
     mode = Mode.PAPER
     simulated = True
 
-    #: Spread assumed for simulated fills when no live book is available.
-    #: Labelled as an assumption, like every other assumed spread.
-    assumed_spread_bps: Decimal = Decimal("2.0")
-
     def __init__(self, spec: VenueSpec, starting_cash: Decimal = Decimal("10000")) -> None:
         super().__init__(spec)
         self.cash = starting_cash
@@ -238,30 +235,33 @@ class PaperBroker(_BaseBroker):
         delta = self._delta_quantity(symbol, target_weight, price, equity)
         if delta == 0:
             return None
-        # Charged through the one cost module, never recomputed here.
+        # Charged through the one cost module, using this symbol's own asset
+        # class -- an equity fill charged crypto commission would show a paper
+        # book far worse than the real one, and the reverse is worse still.
+        model = spec_for(classify_symbol(symbol)).cost_model
         slip = one_way_cost_bps(
-            fees=self.spec.fees, spread_bps=self.assumed_spread_bps, style="taker",
+            fees=model, spread_bps=model.default_spread_bps, style="taker",
         ) / Decimal("10000")
         fill_price = to_decimal(price) * (1 + slip if delta > 0 else 1 - slip)
-        coid = BinanceSpotClient.new_client_order_id("paper")
+        coid = AlpacaClient.new_client_order_id("paper")
         return self._record(symbol, delta, fill_price, coid,
                             note="simulated fill, charged taker cost",
                             reference_price=to_decimal(price))
 
 
 class LiveBroker(_BaseBroker):
-    """Real orders against a real account.
+    """Real orders against a real Alpaca account.
 
     Constructing this class is not enough to trade -- :meth:`arm` must be called
     with the exact confirmation phrase, and the credential must itself be marked
-    tradeable. Two independent gates, because either one alone is a single
-    mistake away from a real order.
+    tradeable. Two independent gates, because either alone is a single mistake
+    away from a real order.
     """
 
     mode = Mode.LIVE
     simulated = False
 
-    def __init__(self, spec: VenueSpec, client: BinanceSpotClient,
+    def __init__(self, spec: VenueSpec, client: AlpacaClient,
                  credential_name: str) -> None:
         super().__init__(spec)
         self.client = client
@@ -292,61 +292,92 @@ class LiveBroker(_BaseBroker):
         self._armed = False
 
     async def sync(self) -> None:
-        """Read real balances so the book starts from the account, not from zero."""
+        """Read the real account so the book starts from it, not from zero."""
         account = await self.client.account()
+        try:
+            self.cash = to_decimal(account.get("cash", 0))
+        except Exception:
+            self.cash = Decimal("0")
         self.positions.clear()
-        for bal in account.get("balances", []):
-            asset = bal["asset"]
-            total = to_decimal(bal.get("free", 0)) + to_decimal(bal.get("locked", 0))
-            if total <= 0:
+        for pos in await self.client.positions():
+            symbol = pos.get("symbol")
+            if not symbol:
                 continue
-            if asset in self.spec.quote_assets:
-                self.cash = total
-                continue
-            for quote in self.spec.quote_assets:
-                symbol = f"{asset}{quote}"
-                self.positions[symbol] = Position(symbol, total, Decimal("0"))
-                break
+            qty = to_decimal(pos.get("qty", 0))
+            avg = to_decimal(pos.get("avg_entry_price", 0))
+            if qty != 0:
+                self.positions[symbol] = Position(symbol, qty, avg)
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
                            equity: float) -> Fill | None:
         if not self._armed:
             raise ModeSwitchRefused(
-                "the live broker is not armed; no order will be sent"
-            )
+                "the live broker is not armed; no order will be sent")
         delta = self._delta_quantity(symbol, target_weight, price, equity)
         if delta == 0:
             return None
 
-        filters = await self.client.filters_for(symbol)
-        qty = filters.quantize_qty(abs(delta))
+        asset_class = classify_symbol(symbol)
+        try:
+            asset = await self.client.asset(symbol)
+        except VenueError:
+            asset = None
+
+        qty = abs(delta)
+        if asset is not None:
+            if not asset.tradable:
+                log.info("not sending an order for %s: the venue lists it as "
+                         "not tradable (status %s)", symbol, asset.status)
+                return None
+            if not asset.fractionable:
+                # A fractional quantity on a non-fractionable name is rejected,
+                # so it is floored here rather than discovered at the venue.
+                qty = qty.to_integral_value(rounding="ROUND_DOWN")
+            if asset.min_order_size and qty < asset.min_order_size:
+                log.info("not sending an order for %s: %s is below the venue "
+                         "minimum %s", symbol, qty, asset.min_order_size)
+                return None
         if qty <= 0:
             return None
-        side = "BUY" if delta > 0 else "SELL"
-        if side == "SELL":
-            # Never try to sell more than is actually held: that is -2010, and
-            # rounding is the usual cause.
-            qty = min(qty, filters.quantize_qty(self.position(symbol).quantity))
+
+        side = "buy" if delta > 0 else "sell"
+        if side == "sell":
+            held = self.position(symbol).quantity
+            if held > 0:
+                # Never try to sell more than is held; that is a rejection, and
+                # rounding is the usual cause.
+                qty = min(qty, held)
             if qty <= 0:
                 return None
-        problem = filters.check_order(qty, to_decimal(price),
-                                      is_market=True)
-        if problem:
-            log.info("not sending an order for %s: %s", symbol, problem)
-            return None
 
-        coid = self.client.new_client_order_id("gda")
+        coid = self.client.new_client_order_id("imp")
         result = await self.client.place_order(
-            symbol, side, quantity=qty, order_type="MARKET", client_order_id=coid,
+            symbol, side, qty=qty, order_type="market", client_order_id=coid,
         )
-        executed = to_decimal(result.get("executedQty", qty))
-        quote = to_decimal(result.get("cummulativeQuoteQty", 0))
-        fill_price = (quote / executed) if executed > 0 else to_decimal(price)
-        signed = executed if side == "BUY" else -executed
+        filled = to_decimal(result.get("filled_qty") or 0)
+        avg = to_decimal(result.get("filled_avg_price") or 0)
+        # A market order can be accepted but not yet filled; the fill price is
+        # then unknown and the last trade is the best available estimate.
+        executed = filled if filled > 0 else qty
+        fill_price = avg if avg > 0 else to_decimal(price)
+        signed = executed if side == "buy" else -executed
         return self._record(symbol, signed, fill_price,
-                            result.get("clientOrderId", coid),
-                            note=f"venue order {result.get('orderId')}",
+                            result.get("client_order_id", coid),
+                            note=f"venue order {result.get('id')} "
+                                 f"[{asset_class.value}]",
                             reference_price=to_decimal(price))
+
+    async def flatten_symbol(self, symbol: str) -> None:
+        """Close a position at the venue rather than from our own quantity.
+
+        Retirement and mode switches must not depend on the book's belief about
+        what is held; the venue knows.
+        """
+        try:
+            await self.client.close_position(symbol)
+        except VenueError as exc:
+            if exc.status != 404:
+                raise
 
 
 async def switch_mode(

@@ -388,3 +388,13 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 900px) {
   footer .foot-sep, footer #foot-work, footer #foot-clock { display: none; }
 }
+
+
+/* Asset-class tag in the watchlist. The class decides the calendar, the cost
+   model and the calibration, so it is shown rather than inferred from the
+   ticker's shape. */
+.cls-tag { font-size: 9px; letter-spacing: .6px; color: var(--dimmer);
+           padding: 0 3px; border-radius: 2px; border: 1px solid transparent; }
+.cls-us_equity { color: var(--accent-2); border-color: #1d4460; }
+.cls-crypto    { color: var(--hot); border-color: #3d2350; }
+.cls-us_option { color: var(--warn); border-color: #4a3a12; }
