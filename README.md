@@ -84,6 +84,76 @@ forecast — do not carry over. The class exists so an option position is never
 silently sized as though it were its underlying. Trading them needs a different
 model, not a different threshold.
 
+### The overnight drift strategy
+
+US equities have historically earned most of their return while the market is
+shut. The literature is consistent about the effect and equally consistent
+about how hard it is to keep:
+
+| source | finding |
+|---|---|
+| Cooper, Cliff & Gulen (2008) | S&P 500 constituents 1993–2006: **night 2.82–4.76bp**, day **−2.85 to +0.22bp** |
+| Lou, Polk & Skouras (JFE 2019) | a "tug of war" — for large stocks momentum accrues overnight, for small stocks intraday |
+| Berkman et al. (JFQA 2012) | the reversal concentrates in high-retail-attention, hard-to-value names; selling into an inflated open is the favourable side |
+| practitioner replications | at **$0.01/share** the strategy's Sharpe falls to ~**0.31** |
+| NSPY / NIWM ETFs | launched 2022 specifically to harvest it; **both closed within a year** |
+
+The honest summary is that the drift is real, is a few basis points a night,
+and is the same order of magnitude as one round trip. So the strategy is built
+around that fact rather than around the headline:
+
+- **Same cost gate as everything else.** A US equity round trip is ~2–4bp
+  against a drift of ~4bp. Most nights it does not clear, and the refusal says
+  so in those words — that is the correct answer, not a fault. Exempting this
+  trade from the gate would produce a strategy that trades every night and
+  loses slowly, which is precisely what the replications describe.
+- **Pooled estimation, not per-symbol.** A 4bp effect against an ~80bp nightly
+  standard deviation gives a standard error of ~8.4bp on one symbol's year of
+  history: t ≈ 0.1, invisible. Pooled across 40 symbols × 89 nights = 3,560
+  symbol-nights, t ≈ 6.5. Across forty symbols *somebody* always looks
+  significant on their own data — that is selection on noise, and
+  `tests/test_overnight.py` pins both halves of it.
+- **Shrinkage toward the market.** A symbol that measured +13.6bp on its own
+  history is traded as ~+4.6bp, by inverse-variance weighting. Its own data
+  carries almost no information at this effect size.
+- **Auction orders, not market orders.** Entry is **market-on-close** (`cls`),
+  exit is **market-on-open** (`opg`). The trade is defined by being paid the
+  close-to-open move; a market order at 15:45 takes intraday risk it is not
+  paid for, and a market order after the bell has already missed the print.
+  Alpaca refuses an MOC inside the last 10 minutes and an MOO inside the last
+  2 before the open, so the entry and exit windows close before the venue's do.
+- **Sized on gap risk, with no stop.** A gap opens *through* a stop without
+  touching it, so there is no ATR stop behind this position. Size is bounded by
+  the risk budget against a 3-sigma overnight move, using the **overnight**
+  volatility — a different, fatter-tailed distribution than the intraday one.
+- **Event risk is refused.** Alpaca's basic plan publishes no earnings
+  calendar, so a last gap beyond 3 sigma of the symbol's own overnight
+  volatility is treated as news rather than premium. This is a statistical
+  stand-in and is labelled as one.
+- **It is not a day trade.** Entering on one close and exiting on the next open
+  does not touch the PDT counter. This is a genuine structural advantage on a
+  sub-$25,000 account: the intraday strategy stops at two day trades, the
+  overnight one can run every night. The exemption is in
+  `PortfolioAllocator.clamp` and is the only thing that bypasses that ceiling.
+
+#### Why options do not carry this
+
+Options are not used for the overnight trade, and the reason is arithmetic
+rather than caution. `scripts/overnight_option_arithmetic.py` computes the
+overnight drift an at-the-money option needs simply to break even on one
+night's time decay:
+
+| days to expiry | 1 | 2 | 7 | 30 | 90 | 365 |
+|---|---|---|---|---|---|---|
+| breakeven overnight drift | 52.7bp | 37.4bp | 20.2bp | 10.0bp | 5.9bp | 3.0bp |
+
+Against a measured drift of ~4bp, every tenor that has enough leverage to be
+worth the spread loses to theta by an order of magnitude, and the only tenors
+that break even are so long-dated that delta is small and the position is a
+worse-priced stock substitute. Deep-in-the-money options are stock substitutes
+with a wider spread. There is no version of this that works, so the program
+does not pretend otherwise.
+
 ### Pattern-day-trader limits
 
 A US margin account under $25,000 may make three day trades in five rolling
@@ -91,6 +161,10 @@ business days; the fourth restricts it for ninety days. An autonomous book hits
 that in a morning. The day-trade count is read from the venue on each tick —
 counting locally cannot survive a restart or trades made elsewhere — and new
 exposure stops at two. Exits always pass.
+
+The overnight drift trade is the one exception, and it is not a loosened limit:
+buying on one session's close and selling on the next session's open is not a
+day trade under the rule at all.
 
 ### The universe is scanned, not hardcoded
 

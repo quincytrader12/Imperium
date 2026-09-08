@@ -79,6 +79,16 @@
       <h2>Regime census <span class="note" id="census-note">—</span></h2>
       <div class="census" id="census"></div>
     </section>
+
+    <!-- The overnight drift strategy. Kept apart from the intraday panels
+         because it is a different trade: a different holding period, no stop
+         behind it, and its own order types. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Overnight drift <span class="note" id="on-note">—</span></h2>
+      <div class="phase-track" id="on-phase"></div>
+      <div class="limit-grid" id="on-grid"></div>
+      <div class="dimmer" id="on-verdict" style="padding:0 9px 8px"></div>
+    </section>
   </div>
 
   <!-- ---------------- neural cluster ---------------- -->

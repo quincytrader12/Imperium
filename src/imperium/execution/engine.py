@@ -25,12 +25,16 @@ from typing import Any
 import numpy as np
 
 from imperium.execution import costs
-from imperium.execution.bars import BarSeries
+from imperium.execution.bars import Bar, BarSeries
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution.risk import RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
 from imperium.strategy import regime as regime_mod
 from imperium.strategy.regime import Regime, RegimeVerdict
+from imperium.strategy import overnight as overnight_mod
+from imperium.strategy.overnight import (
+    OvernightSignal, PooledDrift, SessionPhase,
+)
 from imperium.strategy.signals import (
     BlendedSignal, StrategyParams, blend, mean_reversion_signal, momentum_signal,
 )
@@ -71,6 +75,15 @@ class Decision:
     cost_warnings: tuple[str, ...] = ()
     price: float = 0.0
     asset_class: str = ""
+    #: Which strategy produced this decision. The overnight trade has a
+    #: different holding period, a different risk profile and different order
+    #: types from the intraday blend, so they are never merged into one number.
+    strategy: str = "intraday"
+    session_phase: str = ""
+    overnight_bps: float = 0.0
+    overnight_nights: int = 0
+    #: Market-on-close / market-on-open, when the overnight trade is live.
+    entry_order: str = ""
 
     @property
     def warming_up(self) -> bool:
@@ -123,6 +136,11 @@ class Decision:
             "cost_warnings": list(self.cost_warnings),
             "price": self.price,
             "asset_class": self.asset_class,
+            "strategy": self.strategy,
+            "session_phase": self.session_phase,
+            "overnight_bps": round(self.overnight_bps, 2),
+            "overnight_nights": self.overnight_nights,
+            "entry_order": self.entry_order,
             "distance": round(self.distance_to_trading, 4),
         }
 
@@ -160,6 +178,14 @@ class SymbolEngine:
         self.decision = Decision(symbol=symbol, warmup_bars=self.params.warmup_bars)
         self.bid: float | None = None
         self.ask: float | None = None
+        #: Daily bars, which is what the overnight decomposition needs: a
+        #: bounded intraday ring holds only a few sessions, far too few to
+        #: resolve a 3-5bp effect.
+        self.daily_bars: list[Bar] = []
+        #: The market-wide overnight estimate, set by the session. A symbol's
+        #: own history cannot resolve this effect alone.
+        self.pooled_drift: PooledDrift | None = None
+        self.session_phase: SessionPhase = SessionPhase.CLOSED
 
     # -- market data -----------------------------------------------------
 
@@ -211,6 +237,16 @@ class SymbolEngine:
             exclude_session_gaps=self.asset.excludes_session_gaps)
         bar_vol = (float(np.std(rets[-self.params.zscore_window:], ddof=1))
                    if rets.size > 8 else float("nan"))
+
+        d.session_phase = self.session_phase.value
+
+        # The overnight trade is a different trade, not a variant of the
+        # intraday one: a different holding period, no intraday stop, and its
+        # own order types. It is evaluated in its own window and never blended
+        # with the intraday signal, which would double-count the same capital.
+        if (self.session_phase is SessionPhase.CLOSING
+                and self.asset.asset_class is AssetClass.US_EQUITY):
+            return self._decide_overnight(d, closes, rets)
 
         verdict = regime_mod.classify(closes[-250:], self._thresholds(),
                                       returns=rets[-250:])
@@ -297,6 +333,121 @@ class SymbolEngine:
             d.reason = f"{signal.reason}; {sized.reason}"
             self.telemetry.pulse(self.symbol, "decision", d.reason,
                                  intensity=min(1.0, 0.4 + abs(signal.value) * 0.6))
+        self.decision = d
+        return d
+
+    def _decide_overnight(self, d: Decision, closes: np.ndarray,
+                          rets: np.ndarray) -> Decision:
+        """Decide whether to carry this symbol through the close.
+
+        Everything here differs from the intraday path, and each difference is
+        a property of holding a position while the market is shut:
+
+        * The edge is the pooled overnight drift, shrunk by this symbol's own
+          history -- not a serial-correlation signal.
+        * The cost gate is the same gate, which is the point: at 3-5bp the
+          drift is the same order of magnitude as a round trip, and the
+          published replications show costs erasing it. Most symbols are
+          refused here, correctly.
+        * Sizing uses **overnight** volatility, not the intraday estimate. The
+          two are different distributions, and the overnight one has the fatter
+          tail.
+        * There is no ATR stop. A gap opens through a stop without touching it,
+          so risk is bounded by size alone.
+        """
+        d.strategy = "overnight"
+        signal: OvernightSignal = overnight_mod.evaluate(
+            self.daily_bars, pooled=self.pooled_drift)
+        d.overnight_bps = signal.shrunk_bps or signal.mean_overnight_bps
+        d.overnight_nights = signal.nights
+        d.regime = "overnight_drift"
+        d.regime_reason = signal.reason
+        d.conviction = signal.value
+
+        estimate = costs.estimate_for_symbol(
+            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
+            style="taker")
+        d.round_trip_cost_bps = float(estimate.round_trip_bps)
+        d.spread_bps = float(estimate.spread_bps)
+        d.spread_assumed = estimate.spread_is_assumed
+        d.cost_warnings = estimate.warnings
+        d.expected_edge_bps = signal.expected_edge_bps
+
+        if not signal.eligible:
+            d.verdict = Verdict.REJECTED
+            d.reason = signal.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", signal.reason,
+                                 intensity=0.2)
+            return d
+
+        gate = costs.gate(
+            expected_edge_bps=Decimal(str(round(signal.expected_edge_bps, 6))),
+            estimate=estimate,
+            safety_multiple=Decimal(str(self.params.safety_multiple)))
+        d.required_bps = float(gate.required_bps)
+        if not gate.admitted:
+            d.verdict = Verdict.REJECTED
+            # The most common and most important refusal in this strategy: the
+            # drift is real and smaller than the cost of capturing it.
+            d.reason = (f"overnight drift {signal.expected_edge_bps:.2f}bp does "
+                        f"not clear {gate.required_bps:.2f}bp of cost — this is "
+                        f"the reason the anomaly is hard to trade, not a fault")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", d.reason, intensity=0.3)
+            return d
+
+        # Size on the overnight distribution, annualised over 252 nights.
+        overnight_sd = signal.overnight_vol_bps / 10_000.0
+        if overnight_sd <= 0:
+            d.verdict = Verdict.REJECTED
+            d.reason = "overnight volatility is not estimable for this symbol"
+            self.decision = d
+            return d
+        annual_vol = overnight_sd * math.sqrt(252.0)
+        weight = (self.limits.target_volatility / annual_vol) * signal.value
+        weight = min(weight, self.limits.max_position_weight)
+        # A gap cannot be stopped out of, so the loss that matters is the tail
+        # of the overnight move rather than an ATR stop distance.
+        tail = overnight_sd * 3.0
+        if tail > 0:
+            weight = min(weight, self.limits.risk_per_trade / tail)
+        d.raw_weight = max(0.0, weight)
+        d.sizing_reason = (
+            f"{self.limits.target_volatility:.0%} target against "
+            f"{annual_vol:.0%} annualised overnight volatility, capped by a "
+            f"{self.limits.risk_per_trade:.2%} risk budget on a 3-sigma gap "
+            f"({tail * 100:.1f}%) — there is no stop behind an overnight hold")
+
+        if d.raw_weight <= 0:
+            d.verdict = Verdict.REJECTED
+            d.reason = d.sizing_reason
+            self.decision = d
+            return d
+
+        # Entered on this close and exited on the next open, which is not a day
+        # trade. The PDT ceiling therefore does not apply to it -- see
+        # PortfolioAllocator.clamp.
+        clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
+        d.target_weight = clamped.weight
+        d.clamp_binding = clamped.binding
+        d.clamp_reason = clamped.reason
+
+        state = self.allocator.observe(self.symbol)
+        if not state.admitted:
+            d.verdict = Verdict.NOT_ADMITTED
+            d.reason = state.reason or clamped.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "cap", d.reason, intensity=0.3)
+            return d
+
+        d.verdict = Verdict.TRADING
+        # Entering on the close and exiting on the open is what the strategy
+        # is; a mid-session market order takes intraday risk it is not paid for.
+        d.entry_order = "market-on-close"
+        d.reason = (f"{signal.reason}; {d.sizing_reason}")
+        self.telemetry.pulse(self.symbol, "decision", d.reason,
+                             intensity=min(1.0, 0.5 + signal.value * 0.5))
         self.decision = d
         return d
 

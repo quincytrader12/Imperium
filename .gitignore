@@ -11,3 +11,4 @@ dist/
 /*.spec
 .imperium/
 *.log
+uv.lock

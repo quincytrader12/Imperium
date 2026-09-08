@@ -12,6 +12,7 @@ a traceback.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import math
 import time
@@ -21,13 +22,16 @@ from typing import Any
 
 from imperium.execution.bars import Bar
 from imperium.execution.broker import (
-    Broker, DryRunBroker, Fill, LiveBroker, Mode, ModeSwitchRefused, PaperBroker,
+    MARKET_ON_CLOSE, MARKET_ON_OPEN, Broker, DryRunBroker, Fill, LiveBroker,
+    Mode, ModeSwitchRefused, PaperBroker,
 )
 from imperium.execution.engine import Decision, SymbolEngine
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
+from imperium.strategy import overnight as overnight_mod
+from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.strategy.signals import StrategyParams
@@ -49,6 +53,17 @@ def _bar_ms(value: Any) -> int:
 
 #: A quote older than this is stale enough that acting on it is guessing.
 STALE_AFTER_SECONDS = 20.0
+
+#: Calendar days of daily bars pulled for the overnight decomposition. Roughly
+#: a year of sessions. The effect being measured is 3-5bp against an overnight
+#: standard deviation two orders of magnitude larger, so the estimate lives or
+#: dies on observation count -- see PooledDrift for the measurement that showed
+#: a single symbol's history cannot resolve it at all.
+OVERNIGHT_HISTORY_DAYS = 400
+
+#: How often the daily history is re-pulled. Daily bars change once a day, so
+#: anything faster spends request budget to learn nothing.
+OVERNIGHT_REFRESH_SECONDS = 6 * 3600
 
 
 @dataclass
@@ -81,7 +96,7 @@ class TradingSession:
         self.feed = MarketFeed(self.spec, self.telemetry, feed=self.spec.default_feed)
         self.feed.on_bar(self._on_bar)
         self.broker: Broker = DryRunBroker(self.spec)
-        self.client: BinanceSpotClient | None = None
+        self.client: AlpacaClient | None = None
         self.credential: Credential | None = None
         self.lamps = Lamps()
         self.running = False
@@ -104,6 +119,18 @@ class TradingSession:
         self._loop_task: asyncio.Task | None = None
         self._pending_bars: asyncio.Queue[tuple[str, Bar]] = asyncio.Queue(maxsize=4096)
         self._thresholds: dict | None = None
+        #: The market-wide overnight drift, estimated across the whole universe
+        #: at once. Held on the session rather than per engine because it is one
+        #: measurement of one market, and every engine reads the same one.
+        self.pooled_drift: PooledDrift | None = None
+        self.session_phase: SessionPhase = SessionPhase.CLOSED
+        self.overnight_note: str = "not yet measured"
+        #: Symbols this strategy carried through a close, and the night it
+        #: entered them. Tracked explicitly rather than inferred from "holds an
+        #: equity while shut", so an intraday position that failed to flatten is
+        #: never silently adopted and exited as though it were planned.
+        self.overnight_holdings: dict[str, float] = {}
+        self._daily_loaded_at: float = 0.0
         self._equity_curve: list[tuple[float, float]] = []
         self._account_checked_at: float = 0.0
 
@@ -146,7 +173,11 @@ class TradingSession:
         if name is None:
             self.credential = None
             self.lamps.key = "off"
-            self.client = BinanceSpotClient(base_url=self.spec.base_url)
+            # No key: an unauthenticated client still serves the clock and the
+            # public data endpoints, which is what the scanner renders from.
+            self.client = AlpacaClient("", "", paper=self.paper_endpoint,
+                                       data_url=self.spec.data_url,
+                                       feed=self.spec.default_feed)
             return
         cred = store.require(name)
         self.credential = cred
@@ -331,6 +362,133 @@ class TradingSession:
                     continue
                 engine.series.add(bar)
 
+    async def refresh_daily_history(self, *, force: bool = False) -> None:
+        """Pull daily bars and re-estimate the market-wide overnight drift.
+
+        Daily bars, not the minute ring: the ring holds a few sessions, and the
+        first attempt at this measured 14 nights where it should have seen 80.
+        One daily row carries exactly the open and close the decomposition
+        needs, so a year of nights costs a few hundred rows per symbol.
+
+        Equities only. Crypto never closes, so it has no overnight session to
+        decompose, and options are not traded by this program at all -- the
+        drift is a few basis points and the cheapest option time decay that
+        could carry it costs an order of magnitude more (see
+        ``scripts/overnight_option_arithmetic.py``).
+        """
+        if self.client is None:
+            return
+        if not force and time.time() - self._daily_loaded_at < OVERNIGHT_REFRESH_SECONDS:
+            return
+        equities = [s for s in self.universe
+                    if classify_symbol(s) is AssetClass.US_EQUITY]
+        if not equities:
+            self.overnight_note = ("no equities in the universe, so there is no "
+                                   "overnight session to measure")
+            self.pooled_drift = None
+            return
+
+        start = (dt.datetime.now(tz=dt.timezone.utc)
+                 - dt.timedelta(days=OVERNIGHT_HISTORY_DAYS))
+        try:
+            batches = await self.client.bars(equities, timeframe="1Day",
+                                             limit=OVERNIGHT_HISTORY_DAYS,
+                                             start=start)
+        except VenueError as exc:
+            self.overnight_note = f"daily history unavailable: {exc.message}"
+            self.telemetry.event(Level.WARN, "overnight", self.overnight_note,
+                                 detail=exc.remedy)
+            return
+        self._daily_loaded_at = time.time()
+
+        splits: dict[str, Any] = {}
+        for symbol in equities:
+            rows = batches.get(symbol) or []
+            bars: list[Bar] = []
+            for row in rows:
+                try:
+                    bars.append(Bar(
+                        open_time=_bar_ms(row.get("t")),
+                        open=float(row["o"]), high=float(row["h"]),
+                        low=float(row["l"]), close=float(row["c"]),
+                        volume=float(row.get("v", 0.0)), closed=True))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            engine = self.engine(symbol)
+            engine.daily_bars = bars
+            split = overnight_mod.split_daily(bars)
+            if split.nights:
+                splits[symbol] = split
+
+        pooled = overnight_mod.pool(splits) if splits else None
+        self.pooled_drift = pooled
+        # Every engine reads the same market estimate. Assigned rather than
+        # looked up so an engine created later in the session cannot quietly
+        # run against no prior and refuse everything for the wrong reason.
+        for engine in self.engines.values():
+            engine.pooled_drift = pooled
+
+        if pooled is None:
+            self.overnight_note = "no daily history returned for any equity"
+        else:
+            self.overnight_note = pooled.describe()
+        self.telemetry.event(
+            Level.INFO if (pooled and pooled.credible) else Level.WARN,
+            "overnight", f"overnight drift: {self.overnight_note}")
+
+    def _update_session_phase(self) -> SessionPhase:
+        """Where the clock is, relative to the two auction windows.
+
+        Read on every tick rather than latched, because a phase held across a
+        halt or an early close is a phase that lodges an auction order the venue
+        has already stopped accepting.
+        """
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        self.session_phase = overnight_mod.phase_from_clock(
+            now, self.market_clock.next_close, self.market_clock.is_open,
+            next_open=self.market_clock.next_open)
+        for engine in self.engines.values():
+            engine.session_phase = self.session_phase
+        return self.session_phase
+
+    async def _exit_overnight_holdings(self) -> None:
+        """Sell every overnight hold on the opening auction.
+
+        The strategy is paid the close-to-open move and nothing after it, so the
+        exit is a market-on-open order lodged before the bell. Waiting for the
+        open and then sending a market order gives back the part of the drift
+        that has already printed, which at 3-5bp is most of it.
+        """
+        for symbol in list(self.overnight_holdings):
+            position = self.broker.positions.get(symbol)
+            if position is None or position.is_flat:
+                self.overnight_holdings.pop(symbol, None)
+                continue
+            price = self.feed.quote(symbol).last or float(position.avg_price)
+            if price <= 0:
+                self.telemetry.event(
+                    Level.ERROR, "overnight",
+                    f"{symbol} is held overnight but has no price, so no exit "
+                    f"order could be sized. The position is still open.")
+                continue
+            try:
+                fill = await self.broker.apply_target(
+                    symbol, 0.0, price, self.equity(), order=MARKET_ON_OPEN)
+            except (VenueError, ModeSwitchRefused) as exc:
+                self.telemetry.event(
+                    Level.ERROR, "overnight",
+                    f"could not lodge the opening exit for {symbol}: {exc}")
+                continue
+            self.overnight_holdings.pop(symbol, None)
+            self.allocator.observe(symbol).current_weight = 0.0
+            if fill:
+                self.telemetry.pulse(symbol, "order",
+                                     "overnight exit on the opening auction", 1.0)
+                self.telemetry.event(
+                    Level.INFO, "overnight",
+                    f"{symbol}: market-on-open exit lodged, closing the "
+                    f"overnight hold")
+
     async def refresh_universe(self) -> None:
         """Re-price and re-admit. Failures demote a symbol, never crash."""
         if not self.client:
@@ -464,7 +622,8 @@ class TradingSession:
             return
         try:
             fill = await self.broker.apply_target(
-                decision.symbol, decision.target_weight, price, self.equity())
+                decision.symbol, decision.target_weight, price, self.equity(),
+                order=decision.entry_order)
         except ModeSwitchRefused as exc:
             self.telemetry.event(Level.ERROR, "order", str(exc))
             return
@@ -475,6 +634,11 @@ class TradingSession:
                                  detail=exc.remedy)
             self.telemetry.pulse(decision.symbol, "refused", exc.message, 0.9)
             return
+        if decision.entry_order == MARKET_ON_CLOSE and decision.target_weight > 0:
+            # Recorded on submission, not on fill: the closing auction has not
+            # happened yet, and a hold that is forgotten because the fill was
+            # still pending is a hold with no exit order behind it.
+            self.overnight_holdings[decision.symbol] = decision.target_weight
         if fill:
             self.allocator.observe(decision.symbol).current_weight = \
                 self.broker.weight_of(decision.symbol, price, self.equity())
@@ -488,7 +652,10 @@ class TradingSession:
                 + (" (simulated)" if fill.simulated else ""))
 
     async def _tick(self) -> None:
+        phase = self._update_session_phase()
         await self._drain_bars()
+        if phase is SessionPhase.PREOPEN:
+            await self._exit_overnight_holdings()
         await self._refresh_account_limits()
         equity = self.equity()
         self.allocator.equity = equity
@@ -531,6 +698,8 @@ class TradingSession:
                 await self._tick()
                 if time.time() - last_universe > 60:
                     await self.refresh_universe()
+                    # Cheap: it returns immediately unless a day has passed.
+                    await self.refresh_daily_history()
                     last_universe = time.time()
             except asyncio.CancelledError:
                 raise
@@ -557,6 +726,7 @@ class TradingSession:
         await self.refresh_clock()
         await self.scan_universe()
         await self.seed_history()
+        await self.refresh_daily_history(force=True)
         await self.refresh_universe()
         await self.feed.start(self.universe)
         self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
@@ -677,6 +847,7 @@ class TradingSession:
                 "crypto_only": self._crypto_only(),
                 "feed": self.spec.default_feed,
             },
+            "overnight": self._overnight_block(),
             "universe_scan": {
                 "note": self.scan_note,
                 "scanned_at": self.universe_scanned_at,
@@ -713,6 +884,46 @@ class TradingSession:
                 "last_error": self.feed.last_error,
             },
             "equity_curve": self._equity_curve[-240:],
+        }
+
+    def _overnight_block(self) -> dict[str, Any]:
+        """The overnight drift strategy's whole state, published in full.
+
+        The headline number is deliberately shown next to the cost that has to
+        be cleared, because the honest summary of this anomaly is that it is
+        real and roughly the size of a round trip. A panel that showed only the
+        drift would read as free money; showing both shows why the strategy
+        refuses most nights, which is the correct behaviour rather than a fault.
+        """
+        pooled = self.pooled_drift
+        candidates = [e.decision for e in self.engines.values()
+                      if e.decision.strategy == "overnight"]
+        eligible = [d for d in candidates if d.verdict is Verdict.TRADING]
+        held = [{"symbol": s, "weight": w}
+                for s, w in sorted(self.overnight_holdings.items())]
+        return {
+            "phase": self.session_phase.value,
+            "note": self.overnight_note,
+            "measured": pooled is not None,
+            "credible": bool(pooled and pooled.credible),
+            "mean_bps": pooled.mean_bps if pooled else 0.0,
+            "intraday_bps": pooled.intraday_bps if pooled else 0.0,
+            "t_stat": pooled.t_stat if pooled else 0.0,
+            "observations": pooled.observations if pooled else 0,
+            "symbols": pooled.symbols if pooled else 0,
+            "vol_bps": pooled.vol_bps if pooled else 0.0,
+            "candidates": len(candidates),
+            "eligible": len(eligible),
+            "holdings": held,
+            "entry_order": MARKET_ON_CLOSE,
+            "exit_order": MARKET_ON_OPEN,
+            # The single most useful fact about this strategy on a small
+            # account, and the one nothing else on screen would tell you.
+            "exempt_from_pdt": True,
+            "options_note": (
+                "options are not used for this: an at-the-money option needs "
+                "roughly 53bp of overnight drift at one day to expiry, and 10bp "
+                "at thirty, against a measured drift of a few bp"),
         }
 
     def _limits_block(self) -> dict[str, Any]:
@@ -857,23 +1068,25 @@ class TradingSession:
         }
 
     def _venue_budget(self) -> dict[str, Any]:
-        """The venue's own view of request weight, plus measured clock drift.
+        """The venue's own view of the request budget, as it reports it.
 
-        A repeated rate-limit ban lengthens each time, so utilisation is worth
-        watching before it becomes a ban rather than after.
+        Alpaca publishes a remaining-requests count per minute in response
+        headers, so this is read rather than counted locally: a local count
+        cannot see requests the same key made elsewhere, and being wrong here
+        means a 429 in the middle of an exit.
         """
         client = self.client
         if client is None:
-            return {"used_weight": 0, "limit": 0, "utilisation": 0.0,
-                    "clock_offset_ms": 0, "clock_measured": False,
-                    "order_count_10s": 0}
+            return {"remaining": 0, "limit": 0, "utilisation": 0.0,
+                    "retry_after": 0.0, "throttled": False}
+        budget = client.budget
+        pause = budget.pause_needed()
         return {
-            "used_weight": client.budget.used_weight,
-            "limit": client.budget.limit,
-            "utilisation": client.budget.utilisation,
-            "order_count_10s": client.budget.order_count_10s,
-            "clock_offset_ms": client.time_offset_ms,
-            "clock_measured": client.time_offset_measured,
+            "remaining": budget.remaining,
+            "limit": budget.limit,
+            "utilisation": budget.utilisation,
+            "retry_after": round(pause, 2),
+            "throttled": pause > 0,
         }
 
     def _health_score(self) -> dict[str, Any]:

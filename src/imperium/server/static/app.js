@@ -498,6 +498,62 @@
       : total + ' evaluated';
   }
 
+  /* ---------- overnight drift ---------- */
+
+  /* The four windows the strategy moves through, in clock order. The two that
+   * matter are the ones where an order is actually lodged; the strategy does
+   * nothing at all in the other two, and showing that is the point. */
+  var PHASES = [
+    { k: 'closed',   label: 'closed',   hint: 'market shut, nothing to lodge' },
+    { k: 'preopen',  label: 'pre-open', hint: 'market-on-open exits go in here' },
+    { k: 'intraday', label: 'intraday', hint: 'the intraday blend has the book' },
+    { k: 'closing',  label: 'closing',  hint: 'market-on-close entries go in here' }
+  ];
+
+  function renderOvernight(s) {
+    var o = s.overnight;
+    if (!o) return;
+
+    $('on-phase').innerHTML = PHASES.map(function (p) {
+      var on = o.phase === p.k;
+      return '<span class="phase' + (on ? ' on' : '') + '" title="' +
+        esc(p.hint) + '">' + esc(p.label) + '</span>';
+    }).join('');
+
+    /* The drift is shown against the cost of capturing it, never alone. On its
+     * own a few basis points a night reads as free money; next to a round trip
+     * of the same order it reads as what it is. */
+    var equity = (s.costs.by_asset_class || {}).us_equity;
+    var rt = equity ? equity.median_round_trip_bps : 0;
+    var driftTone = !o.credible ? '' : (o.mean_bps > rt ? 'good' : 'warn');
+    var tTone = Math.abs(o.t_stat) >= 2 ? 'good' : '';
+
+    $('on-grid').innerHTML =
+      cell('drift / night', o.mean_bps.toFixed(2) + 'bp', driftTone,
+           rt ? 'cost ' + rt.toFixed(1) + 'bp' : 'cost unknown') +
+      cell('intraday', o.intraday_bps.toFixed(2) + 'bp', '', 'same sessions') +
+      cell('t-stat', (o.t_stat >= 0 ? '+' : '') + o.t_stat.toFixed(2), tTone,
+           o.credible ? 'credible' : 'not yet') +
+      cell('sample', fmtNum(o.observations, 0), '',
+           o.symbols + ' symbols') +
+      cell('eligible', o.eligible + ' / ' + o.candidates, '', 'this close') +
+      cell('held overnight', String(o.holdings.length), '',
+           o.exempt_from_pdt ? 'not day trades' : '');
+
+    var v = $('on-verdict');
+    if (!o.measured) {
+      v.textContent = o.note;
+    } else if (!o.credible) {
+      v.textContent = o.note + ' — too little to act on, so nothing is traded on it';
+    } else if (o.mean_bps <= rt) {
+      /* The honest headline for this anomaly, and the most common state. */
+      v.textContent = 'the drift is real and smaller than the ' + rt.toFixed(1) +
+        'bp it costs to capture — refusing is the correct answer, not a fault';
+    } else {
+      v.textContent = o.note;
+    }
+  }
+
   /* ---------- execution and costs ---------- */
 
   function renderCosts(s) {
@@ -594,10 +650,12 @@
     var v = s.venue_budget || {};
     $('foot-venue').textContent = s.venue + ' ' + (s.environment || '') +
       ' · ' + s.mode + ' · ' + ((s.market && s.market.feed) || '');
+    /* Alpaca reports what is left, not what was spent. Shown that way round
+     * rather than converted, so it matches the header it came from. */
     $('foot-weight').textContent = v.limit
-      ? 'requests ' + v.used_weight + '/' + v.limit +
-        ' (' + (v.utilisation * 100).toFixed(0) + '%)'
-      : 'requests -';
+      ? 'requests ' + v.remaining + '/' + v.limit + ' left' +
+        (v.throttled ? ' · throttled ' + v.retry_after.toFixed(1) + 's' : '')
+      : 'requests —';
     $('foot-clock').textContent = (s.universe_scan && s.universe_scan.note) || '';
     var c = s.counters || {};
     $('foot-work').textContent =
@@ -645,6 +703,7 @@
     renderPnl(s);
     renderRisk(s);
     renderCensus(s);
+    renderOvernight(s);
     renderCosts(s);
     renderStats(s);
     renderExecution(s);

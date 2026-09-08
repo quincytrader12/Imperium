@@ -398,3 +398,31 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cls-us_equity { color: var(--accent-2); border-color: #1d4460; }
 .cls-crypto    { color: var(--hot); border-color: #3d2350; }
 .cls-us_option { color: var(--warn); border-color: #4a3a12; }
+
+/* ---------- overnight drift: the session phase track ---------- */
+/* Four windows in clock order. Only two of them lodge an order, and the panel
+   is meant to make it obvious which one the book is in right now. */
+.phase-track {
+  display: flex;
+  gap: 4px;
+  padding: 2px 9px 8px;
+}
+.phase {
+  flex: 1 1 0;
+  text-align: center;
+  padding: 4px 2px;
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: rgba(255, 255, 255, .025);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: help;
+}
+.phase.on {
+  color: #04121d;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}

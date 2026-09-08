@@ -47,6 +47,19 @@ class ModeSwitchRefused(Exception):
     """A mode switch was refused, with the reason the operator needs."""
 
 
+#: How an order is to reach the market. The overnight strategy is defined by
+#: its fills happening at the closing and opening prints, so the order type is
+#: part of the strategy rather than an execution detail: a market order sent
+#: mid-session instead pays for intraday risk the strategy is not taking.
+MARKET = ""
+MARKET_ON_CLOSE = "market-on-close"
+MARKET_ON_OPEN = "market-on-open"
+
+#: Alpaca's time-in-force codes for the two auction orders. Both are equity
+#: only, and both are rejected outright on a crypto symbol.
+_AUCTION_TIF = {MARKET_ON_CLOSE: "cls", MARKET_ON_OPEN: "opg"}
+
+
 @dataclass
 class Position:
     symbol: str
@@ -102,7 +115,8 @@ class Broker(Protocol):
 
     async def sync(self) -> None: ...
     async def apply_target(self, symbol: str, target_weight: float,
-                           price: float, equity: float) -> Fill | None: ...
+                           price: float, equity: float, *,
+                           order: str = MARKET) -> Fill | None: ...
     async def flatten_all(self, prices: dict[str, float]) -> list[Fill]: ...
 
 
@@ -211,7 +225,7 @@ class DryRunBroker(_BaseBroker):
     simulated = True
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float) -> Fill | None:
+                           equity: float, *, order: str = MARKET) -> Fill | None:
         return None
 
 
@@ -231,7 +245,7 @@ class PaperBroker(_BaseBroker):
         self.cash = starting_cash
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float) -> Fill | None:
+                           equity: float, *, order: str = MARKET) -> Fill | None:
         delta = self._delta_quantity(symbol, target_weight, price, equity)
         if delta == 0:
             return None
@@ -244,8 +258,15 @@ class PaperBroker(_BaseBroker):
         ) / Decimal("10000")
         fill_price = to_decimal(price) * (1 + slip if delta > 0 else 1 - slip)
         coid = AlpacaClient.new_client_order_id("paper")
-        return self._record(symbol, delta, fill_price, coid,
-                            note="simulated fill, charged taker cost",
+        note = "simulated fill, charged taker cost"
+        if order:
+            # An auction fill is simulated at the last price like any other,
+            # which flatters it: the closing and opening prints are their own
+            # auctions and neither is the last trade. Said here so the paper
+            # book is not read as evidence the overnight strategy works.
+            note += (f"; {order} simulated at the last trade, which is not the "
+                     f"auction price")
+        return self._record(symbol, delta, fill_price, coid, note=note,
                             reference_price=to_decimal(price))
 
 
@@ -309,7 +330,7 @@ class LiveBroker(_BaseBroker):
                 self.positions[symbol] = Position(symbol, qty, avg)
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float) -> Fill | None:
+                           equity: float, *, order: str = MARKET) -> Fill | None:
         if not self._armed:
             raise ModeSwitchRefused(
                 "the live broker is not armed; no order will be sent")
@@ -350,21 +371,44 @@ class LiveBroker(_BaseBroker):
             if qty <= 0:
                 return None
 
+        tif = _AUCTION_TIF.get(order)
+        if tif is not None:
+            if asset_class is not AssetClass.US_EQUITY:
+                # Not a degraded fill -- a rejection. Refusing here keeps the
+                # error where it can be read rather than in a venue response.
+                log.info("not sending a %s order for %s: auction orders exist "
+                         "only for US equities", order, symbol)
+                return None
+            if not qty == qty.to_integral_value():
+                # Auction orders take whole shares only. Rounding down is the
+                # only safe direction: rounding up buys more than was sized.
+                qty = qty.to_integral_value(rounding="ROUND_DOWN")
+                if qty <= 0:
+                    log.info("not sending a %s order for %s: it sizes to less "
+                             "than one whole share, and auctions do not take "
+                             "fractions", order, symbol)
+                    return None
+
         coid = self.client.new_client_order_id("imp")
         result = await self.client.place_order(
             symbol, side, qty=qty, order_type="market", client_order_id=coid,
+            time_in_force=tif,
         )
         filled = to_decimal(result.get("filled_qty") or 0)
         avg = to_decimal(result.get("filled_avg_price") or 0)
         # A market order can be accepted but not yet filled; the fill price is
-        # then unknown and the last trade is the best available estimate.
+        # then unknown and the last trade is the best available estimate. An
+        # auction order is *always* in that state when it is accepted -- the
+        # auction has not happened yet -- so its recorded price is provisional
+        # until the next account sync overwrites it.
         executed = filled if filled > 0 else qty
         fill_price = avg if avg > 0 else to_decimal(price)
         signed = executed if side == "buy" else -executed
         return self._record(symbol, signed, fill_price,
                             result.get("client_order_id", coid),
                             note=f"venue order {result.get('id')} "
-                                 f"[{asset_class.value}]",
+                                 f"[{asset_class.value}"
+                                 + (f", {order}]" if order else "]"),
                             reference_price=to_decimal(price))
 
     async def flatten_symbol(self, symbol: str) -> None:

@@ -199,13 +199,23 @@ class PortfolioAllocator:
 
     # -- clamping --------------------------------------------------------
 
-    def clamp(self, symbol: str, desired_weight: float) -> ClampResult:
+    def clamp(self, symbol: str, desired_weight: float, *,
+              overnight: bool = False) -> ClampResult:
         """Reduce a desired weight to what the book can afford.
 
         Never increases it, and never blocks a reduction. An exit is a reduction
         by definition, so it passes through every branch below untouched -- which
         is checked by a test, because a cap that can block an exit is a cap that
         traps you in a losing position.
+
+        ``overnight`` marks a position that is entered on one session's close and
+        exited on the next session's open. That is not a day trade under the
+        pattern-day-trader rule, which counts a purchase and a sale of the same
+        security *within one session*, so the PDT guard below does not apply to
+        it. This is a genuine structural advantage of the overnight strategy on
+        a small account rather than a loosened limit: an account under $25,000
+        can hold overnight positions every night of the week without ever
+        approaching the three-day-trade ceiling.
         """
         state = self.observe(symbol)
         current = state.current_weight
@@ -233,7 +243,7 @@ class PortfolioAllocator:
                                self.market_note or "the market is closed, so no "
                                "new exposure is taken", reduced=True)
 
-        pdt = self.pdt_blocked()
+        pdt = "" if overnight else self.pdt_blocked()
         if pdt:
             return ClampResult(current, "pattern day trader", pdt, reduced=True)
 

@@ -146,17 +146,10 @@ class MockVenue:
         if path.endswith("/bars"):
             symbols = [s for s in params.get("symbols", "").split(",") if s]
             limit = int(params.get("limit", 100))
+            timeframe = params.get("timeframe", "1Min")
             bars = {}
             for i, symbol in enumerate(symbols):
-                base = 100.0 * (i + 1)
-                rows = []
-                t = dt.datetime(2026, 1, 5, 14, 30, tzinfo=dt.timezone.utc)
-                for k in range(limit):
-                    px = base * (1 + 0.0004 * k)
-                    rows.append({"t": (t + dt.timedelta(minutes=k)).isoformat(),
-                                 "o": px, "h": px * 1.001, "l": px * 0.999,
-                                 "c": px, "v": 10_000, "n": 50, "vw": px})
-                bars[symbol] = rows
+                bars[symbol] = self._bar_rows(i, limit, timeframe)
             return self._json({"bars": bars, "next_page_token": None})
 
         if path.endswith("/snapshots"):
@@ -195,6 +188,45 @@ class MockVenue:
 
         return self._error(404, 40410000, "endpoint not found")
 
+    #: Overnight and intraday drift, in basis points, baked into the daily bars
+    #: this mock serves. Separate values because a fixture where they are equal
+    #: cannot catch a decomposition that reads one session's return as the
+    #: other's -- which is the one error the overnight split must not make.
+    daily_overnight_bps = 5.0
+    daily_intraday_bps = -3.0
+
+    def _bar_rows(self, index: int, limit: int,
+                  timeframe: str) -> list[dict[str, Any]]:
+        """Bars whose spacing and shape actually follow the requested timeframe.
+
+        A mock that serves minute-spaced rows for a ``1Day`` request would let a
+        caller that asks for daily history and silently receives minutes pass
+        every test, and the overnight decomposition is exactly the caller that
+        cannot survive that: it would read one-minute seams as overnight gaps.
+        """
+        base = 100.0 * (index + 1)
+        rows: list[dict[str, Any]] = []
+        start = dt.datetime(2026, 1, 5, 14, 30, tzinfo=dt.timezone.utc)
+
+        if timeframe == "1Day":
+            close = base
+            for k in range(limit):
+                open_px = close * (1 + self.daily_overnight_bps / 10_000)
+                close = open_px * (1 + self.daily_intraday_bps / 10_000)
+                rows.append({
+                    "t": (start + dt.timedelta(days=k)).isoformat(),
+                    "o": open_px, "h": max(open_px, close) * 1.004,
+                    "l": min(open_px, close) * 0.996, "c": close,
+                    "v": 5_000_000, "n": 40_000, "vw": (open_px + close) / 2})
+            return rows
+
+        for k in range(limit):
+            px = base * (1 + 0.0004 * k)
+            rows.append({"t": (start + dt.timedelta(minutes=k)).isoformat(),
+                         "o": px, "h": px * 1.001, "l": px * 0.999,
+                         "c": px, "v": 10_000, "n": 50, "vw": px})
+        return rows
+
     def _place(self, body: dict[str, Any]) -> httpx.Response:
         symbol = body.get("symbol", "")
         known = {a["symbol"] for a in EQUITY_ASSETS + CRYPTO_ASSETS}
@@ -210,6 +242,12 @@ class MockVenue:
                 return self._error(
                     422, 42210000,
                     f"{symbol} does not support fractional quantities")
+        if body.get("time_in_force") in ("cls", "opg") and (
+                asset.get("class") == "crypto" or "/" in symbol):
+            return self._error(
+                422, 42210000,
+                "market-on-close and market-on-open orders are available for "
+                "US equities only")
         if body.get("extended_hours") and body.get("type") != "limit":
             return self._error(422, 42210000,
                                "extended hours orders must be limit orders")
