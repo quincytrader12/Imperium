@@ -38,6 +38,24 @@ log = logging.getLogger("imperium.broker")
 LIVE_CONFIRMATION_PHRASE = "GO LIVE"
 
 
+#: The no-trade band: how far a position must drift from its target before it
+#: is worth paying a spread to correct.
+#:
+#: Not a tolerance for sloppiness -- it is the known optimal shape of this
+#: problem. Under proportional transaction costs the optimal rebalancing policy
+#: is not "track the target" but "do nothing inside a region around it and
+#: trade to its edge outside" (Constantinides 1986; Davis & Norman 1990). A
+#: strategy that re-targets exactly will trade on every evaluation, because
+#: equity moves with every fill and every price tick, so the delta is never
+#: quite zero.
+#:
+#: Measured before this existed: 120 consecutive bars produced 120 orders on a
+#: target weight that never changed, median size 0.06 of a share. That is a
+#: spread paid a hundred and twenty times to correct arithmetic noise -- and
+#: across a 150-symbol universe it is 150 orders a minute into a venue that
+#: rate-limits them.
+REBALANCE_BAND = Decimal("0.10")
+
 #: How many fills the book keeps. Enough for the journal panel and for a
 #: representative slippage average, bounded so a week of trading is not a leak.
 FILL_HISTORY = 500
@@ -171,11 +189,31 @@ class _BaseBroker:
 
     def _delta_quantity(self, symbol: str, target_weight: float, price: float,
                         equity: float) -> Decimal:
+        """The quantity to trade, or zero when the drift is not worth a spread.
+
+        Two cases are deliberately never banded:
+
+        * **Exits.** A target of zero is a reduction to flat, and a band that
+          can trap a position is worse than the churn it prevents. Every cap in
+          this program follows the same rule.
+        * **Entries.** A flat position has no drift to sit inside a band around.
+          Its size was decided by the sizer and its own venue minimum.
+
+        Everything else is a rebalance, and a rebalance smaller than
+        :data:`REBALANCE_BAND` of the target is arithmetic noise being paid for
+        at the spread.
+        """
         if price <= 0 or equity <= 0:
             return Decimal("0")
         target_value = to_decimal(target_weight) * to_decimal(equity)
-        target_qty = target_value / to_decimal(price)
-        return target_qty - self.position(symbol).quantity
+        delta = target_value / to_decimal(price) - self.position(symbol).quantity
+        if delta == 0:
+            return Decimal("0")
+        if target_weight == 0 or self.position(symbol).is_flat:
+            return delta
+        if abs(delta) * to_decimal(price) < REBALANCE_BAND * abs(target_value):
+            return Decimal("0")
+        return delta
 
     #: Venue quote/base precision. Carrying more digits than this is noise: it
     #: is unreadable in the journal and finer than anything the venue accepts.

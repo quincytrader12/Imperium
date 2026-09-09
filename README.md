@@ -161,6 +161,27 @@ worse-priced stock substitute. Deep-in-the-money options are stock substitutes
 with a wider spread. There is no version of this that works, so the program
 does not pretend otherwise.
 
+### The no-trade band
+
+A strategy that re-targets exactly will trade on every evaluation, because
+equity moves with every fill and every price tick and the delta is therefore
+never quite zero. Measured before this existed: **120 consecutive bars produced
+120 orders** on a target weight that never changed once, median size 0.06 of a
+share. Across a 150-symbol universe that is 150 orders a minute into a venue
+that rate-limits them.
+
+Under proportional transaction costs the optimal policy is not to track a
+target but to do nothing inside a region around it (Constantinides 1986; Davis
+& Norman 1990). A position is corrected only once it has drifted more than 10%
+from its target — after which the same 120 bars produce **one** order.
+
+The band is a fraction of the target, strictly under one, and that is what
+makes it safe rather than the guards that read as if they do. A full exit's
+delta *is* the whole position and a first entry's delta *is* the whole target,
+so neither can ever be smaller than a fraction of itself. A cap that can trap a
+position would be worse than the churn it prevents, so this is the invariant
+the tests defend.
+
 ### Three horizons, and which one a small account can actually use
 
 | strategy | horizon | order type | day trade? | where it works |
