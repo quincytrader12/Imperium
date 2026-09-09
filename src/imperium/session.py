@@ -79,6 +79,12 @@ OVERNIGHT_REFRESH_SECONDS = 6 * 3600
 #: of two hundred a minute, and it is the number the operator watches.
 ACCOUNT_REFRESH_SECONDS = 15
 
+#: How often a live book is checked against the venue's own positions. Often
+#: enough that a rejected or partly filled order is caught within a minute,
+#: rarely enough that it costs two requests a minute against a budget of two
+#: hundred.
+RECONCILE_SECONDS = 30
+
 #: How many symbols carry an engine and a bar ring -- the set actually reasoned
 #: about bar by bar. The scan ranks the entire tradable listing; this bounds
 #: what is kept from it. The bound is memory, measured rather than guessed: a
@@ -230,6 +236,11 @@ class TradingSession:
         #: rather than hidden: a terminal that quietly restarts itself all night
         #: is a terminal with a problem worth seeing.
         self.restarts: int = 0
+        #: How many times the venue disagreed with this book. Published rather
+        #: than hidden: a book that keeps needing correction is a book whose
+        #: orders are not doing what it thinks.
+        self.reconciliations: int = 0
+        self._reconciled_at: float = 0.0
         #: Asked for while a session runs, handed back when it stops. A book
         #: holding an overnight position through a suspended laptop is a book
         #: whose opening exit never gets lodged.
@@ -1068,6 +1079,7 @@ class TradingSession:
             await self._exit_overnight_holdings()
             self._report_unmanaged_equity()
         await self._refresh_account_limits()
+        await self._reconcile_book()
         equity = self.equity()
         self.allocator.equity = equity
         self.allocator.cash = float(self.broker.cash)
@@ -1165,6 +1177,43 @@ class TradingSession:
         if released:
             self.telemetry.pulse("BOOK", "decision",
                                  "daily-loss halt released with the new day", 0.8)
+
+    async def _reconcile_book(self) -> None:
+        """Check the live book against the venue, and report any difference.
+
+        Only in live mode: a simulated book has no venue to disagree with. A
+        difference is not tidied away quietly -- it means an order did not do
+        what this program was told it did, and that is the single most
+        important thing an operator can be shown.
+        """
+        broker = self.broker
+        if getattr(broker, "simulated", True) or not hasattr(broker, "reconcile"):
+            return
+        if time.time() - self._reconciled_at < RECONCILE_SECONDS:
+            return
+        try:
+            drift = await broker.reconcile()
+        except VenueError as exc:
+            self.telemetry.event(Level.WARN, "order",
+                                 "could not reconcile the book with the venue",
+                                 detail=exc.message)
+            return
+        self._reconciled_at = time.time()
+        for symbol, local, actual in drift:
+            self.reconciliations += 1
+            self.allocator.observe(symbol).current_weight = self.broker.weight_of(
+                symbol, self.feed.quote(symbol).last, self.equity())
+            self.telemetry.event(
+                Level.ERROR, "order",
+                f"{symbol}: this book held {format_decimal(local)} and the "
+                f"venue holds {format_decimal(actual)} — corrected to the "
+                f"venue",
+                detail=("An accepted order can still be rejected, partly "
+                        "filled, or filled at an auction hours later. Every "
+                        "decision taken between then and now was sized against "
+                        "the wrong number."))
+            self.telemetry.pulse(symbol, "refused",
+                                 "book corrected against the venue", 0.9)
 
     async def _refresh_account_limits(self) -> None:
         """Read the account the venue actually holds.
@@ -1501,6 +1550,7 @@ class TradingSession:
             "running": self.running,
             "uptime": (time.time() - self.started_at) if self.started_at else 0.0,
             "restarts": self.restarts,
+            "reconciliations": self.reconciliations,
             "keep_awake": self.keep_awake.as_dict(),
             "loop_age": (time.time() - self._loop_beat) if self._loop_beat else None,
             "limits": self._limits_block(),

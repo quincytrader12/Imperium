@@ -161,6 +161,31 @@ worse-priced stock substitute. Deep-in-the-money options are stock substitutes
 with a wider spread. There is no version of this that works, so the program
 does not pretend otherwise.
 
+### The live book is reconciled against the venue
+
+Everything the live broker records is optimistic. An order is booked when the
+venue *accepts* it, because that is the only moment a market order yields a
+number — and several things happen afterwards that the book never hears about:
+
+- an accepted order rejected later (buying power, locate failure, halt,
+  wash-trade block);
+- a partial fill whose remainder is cancelled at the close;
+- **every** market-on-close and market-on-open order, accepted now and filled
+  at an auction hours later at a price nobody yet knows;
+- a trade made by hand, or by something else, in the same account.
+
+`sync()` used to run exactly once, on the switch into live. After that the book
+drifted from reality with nothing to correct it, and every decision was sized
+against a fiction while the terminal reported a position it believed in
+completely.
+
+The venue's positions are now read every 30 seconds and the book corrected to
+them. A difference is reported at error level rather than quietly absorbed — it
+means an order did not do what this program was told it did, which is the most
+important thing an operator can be shown. Symbols with an order still open are
+skipped: a market-on-close order holds no position until the auction, and
+"correcting" that would flatten the book and immediately re-submit it.
+
 ### The data plan's subscription cap
 
 The scan ranks the whole market and 150 symbols carry an engine, but the

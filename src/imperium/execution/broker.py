@@ -454,8 +454,10 @@ class LiveBroker(_BaseBroker):
         # A market order can be accepted but not yet filled; the fill price is
         # then unknown and the last trade is the best available estimate. An
         # auction order is *always* in that state when it is accepted -- the
-        # auction has not happened yet -- so its recorded price is provisional
-        # until the next account sync overwrites it.
+        # auction has not happened yet -- so its recorded quantity and price
+        # are provisional. :meth:`reconcile` is what makes that true rather
+        # than a hope: it reads the venue's own positions on a timer and
+        # corrects this book against them.
         executed = filled if filled > 0 else qty
         fill_price = avg if avg > 0 else to_decimal(price)
         signed = executed if side == "buy" else -executed
@@ -465,6 +467,73 @@ class LiveBroker(_BaseBroker):
                                  f"[{asset_class.value}"
                                  + (f", {order}]" if order else "]"),
                             reference_price=to_decimal(price))
+
+    async def reconcile(self) -> list[tuple[str, Decimal, Decimal]]:
+        """Correct the local book from the positions the venue actually holds.
+
+        Everything this broker records is optimistic. An order is booked when
+        the venue *accepts* it, because that is the only moment a market order
+        gives us a number -- and several things can happen afterwards that the
+        book never hears about:
+
+        * an accepted order rejected later, for buying power, a locate failure,
+          a halt, or a wash-trade block;
+        * a partial fill, where the rest is cancelled at the close;
+        * every market-on-close and market-on-open order, which is accepted now
+          and filled at an auction hours later, at a price and possibly a
+          quantity nobody knows yet;
+        * a trade made by the operator, or another program, in the same
+          account.
+
+        Without this the book drifts from reality and every decision after that
+        is sized against a fiction -- while the terminal reports a position it
+        believes in completely. The venue is the truth here; a difference is
+        reported rather than quietly absorbed, because a difference means an
+        order did not do what this program was told it did.
+
+        Symbols with an order still open are skipped: their state is legitimately
+        in flux, and "correcting" a position whose order has not filled yet
+        would flatten the book and then re-submit it.
+        """
+        positions = await self.client.positions()
+        try:
+            open_orders = await self.client.open_orders()
+        except VenueError:
+            # Without the open-order list this cannot tell "not filled yet"
+            # from "did not happen", and guessing would be worse than waiting.
+            return []
+        in_flight = {o.get("symbol") for o in open_orders if o.get("symbol")}
+
+        venue: dict[str, Decimal] = {}
+        avg: dict[str, Decimal] = {}
+        for row in positions:
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+            venue[symbol] = to_decimal(row.get("qty", 0))
+            avg[symbol] = to_decimal(row.get("avg_entry_price", 0))
+
+        drift: list[tuple[str, Decimal, Decimal]] = []
+        for symbol in sorted(set(self.positions) | set(venue)):
+            if symbol in in_flight:
+                continue
+            local = self.position(symbol).quantity
+            actual = venue.get(symbol, Decimal("0"))
+            if local == actual:
+                continue
+            drift.append((symbol, local, actual))
+            position = self.position(symbol)
+            position.quantity = actual
+            position.avg_price = avg.get(symbol, position.avg_price)
+            if actual == 0:
+                position.avg_price = Decimal("0")
+
+        account = await self.client.account()
+        try:
+            self.cash = to_decimal(account.get("cash", self.cash))
+        except Exception:
+            pass
+        return drift
 
     async def flatten_symbol(self, symbol: str) -> None:
         """Close a position at the venue rather than from our own quantity.
