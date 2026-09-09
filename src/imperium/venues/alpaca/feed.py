@@ -96,7 +96,14 @@ class MarketFeed:
         #: snapshot sweep, and still tradeable on the daily-bar strategies --
         #: what they lose is the live minute stream.
         self.dropped: int = 0
-        self._subscribed: list[str] = []
+        #: What each class's socket is actually subscribed to, per class
+        #: rather than shared: equities and crypto are separate connections
+        #: with separate subscriptions, and one list for both meant whichever
+        #: handshake ran last overwrote the other's accounting.
+        self._subscribed: dict[AssetClass, list[str]] = {}
+        #: The live socket per class, so a subscription can be changed on it
+        #: instead of by reconnecting.
+        self._sockets: dict[AssetClass, Any] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
         #: Set when the subscription must be renegotiated, so the socket loop
@@ -134,15 +141,95 @@ class MarketFeed:
         self.symbols = list(symbols)
         self.dropped = max(0, len(self.symbols) - self.symbol_limit)
         self._stop.clear()
-        grouped: dict[AssetClass, list[str]] = {}
+        for asset_class in self._classes():
+            self._tasks.append(asyncio.create_task(
+                self._run(asset_class), name=f"feed-{asset_class.value}"))
+
+    def _classes(self) -> list[AssetClass]:
+        """The asset classes the current symbol set needs a socket for."""
+        seen: list[AssetClass] = []
         for symbol in self.symbols:
             cls = classify_symbol(symbol)
-            if cls is AssetClass.US_OPTION:
+            # Options do not stream on these endpoints.
+            if cls is AssetClass.US_OPTION or cls in seen:
                 continue
-            grouped.setdefault(cls, []).append(symbol)
-        for asset_class, group in grouped.items():
-            self._tasks.append(asyncio.create_task(
-                self._run(asset_class, group), name=f"feed-{asset_class.value}"))
+            seen.append(cls)
+        return seen
+
+    def _group(self, asset_class: AssetClass) -> list[str]:
+        """This class's share of the current symbol set, in priority order.
+
+        Read fresh on every connection attempt rather than captured when the
+        task was created, so a socket that reconnects after the cohort has
+        rotated subscribes to the symbols being reasoned about now -- not to
+        the ones the session happened to start with.
+        """
+        return [s for s in self.symbols if classify_symbol(s) is asset_class]
+
+    async def retarget(self, symbols: list[str]) -> int:
+        """Point the live subscription at a new set of symbols.
+
+        The cohort rotates every twenty seconds and, until this existed,
+        nothing told the socket. ``start`` was called once at session start,
+        so the stream went on feeding the symbols the universe held then --
+        long since retired, with nothing looking at them -- while the symbols
+        actually being reasoned about had no live price at all.
+
+        The sweep meanwhile computes each engine's ``streamed`` flag from the
+        *current* universe, so the terminal reported exactly those symbols as
+        streamed. The one indicator that would have shown the problem stated
+        the opposite of it.
+
+        Changed on the open socket rather than by reconnecting: a reconnect
+        every twenty seconds is a reconnect storm against a venue that allows
+        one concurrent data connection per key, and it would also throw away
+        the subscription cap negotiated on the way in.
+
+        Returns how many subscriptions changed hands.
+        """
+        self.symbols = list(symbols)
+        self.dropped = max(0, len(self.symbols) - self.symbol_limit)
+        if not self._tasks:
+            # Not started yet. ``start`` reads self.symbols, so there is
+            # nothing to renegotiate.
+            return 0
+
+        changed = 0
+        for asset_class in self._classes():
+            wanted = self._group(asset_class)[:self.symbol_limit]
+            current = self._subscribed.get(asset_class, [])
+            added = [s for s in wanted if s not in set(current)]
+            gone = [s for s in current if s not in set(wanted)]
+            if not added and not gone:
+                continue
+            ws = self._sockets.get(asset_class)
+            if ws is None:
+                # No socket for this class yet -- a cohort that has just
+                # brought in its first crypto name, say. Its own loop will
+                # subscribe the current group when it connects.
+                if not any(t.get_name() == f"feed-{asset_class.value}"
+                           and not t.done() for t in self._tasks):
+                    self._tasks.append(asyncio.create_task(
+                        self._run(asset_class),
+                        name=f"feed-{asset_class.value}"))
+                continue
+            try:
+                if gone:
+                    await ws.send(json.dumps({"action": "unsubscribe",
+                                              "bars": gone, "quotes": gone}))
+                if added:
+                    await ws.send(json.dumps({"action": "subscribe",
+                                              "bars": added, "quotes": added}))
+            except Exception as exc:
+                # A send that fails means the socket is on its way out. The
+                # loop reconnects and subscribes the current group, so this
+                # needs no recovery of its own -- only to not raise into the
+                # caller, which is the trading loop.
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                continue
+            self._subscribed[asset_class] = wanted
+            changed += len(added) + len(gone)
+        return changed
 
     @property
     def streamed(self) -> int:
@@ -161,18 +248,25 @@ class MarketFeed:
         self._tasks = []
         self.connected = False
         self._live.clear()
+        self._sockets.clear()
+        self._subscribed.clear()
 
     # -- the loop --------------------------------------------------------
 
-    async def _run(self, asset_class: AssetClass, symbols: list[str]) -> None:
+    async def _run(self, asset_class: AssetClass) -> None:
         backoff = 1.0
         url = self._url(asset_class)
         while not self._stop.is_set():
+            # Read fresh, not captured when the task was created: after a
+            # cohort rotation the symbols worth streaming are not the ones
+            # this task started with.
+            symbols = self._group(asset_class)
             try:
                 async with websockets.connect(url, ping_interval=20,
                                               ping_timeout=20, close_timeout=5,
                                               max_queue=1024) as ws:
                     await self._handshake(ws, asset_class, symbols)
+                    self._sockets[asset_class] = ws
                     self._live[asset_class] = True
                     self.connected = any(self._live.values())
                     self.last_error = ""
@@ -180,9 +274,11 @@ class MarketFeed:
                     self.telemetry.event(
                         Level.GOOD, "feed",
                         f"{asset_class.value} data connected "
-                        f"({len(self._subscribed)} of {len(symbols)} symbols"
-                        + (f", {len(symbols) - len(self._subscribed)} above the "
-                           f"plan's cap" if len(self._subscribed) < len(symbols)
+                        f"({len(self._subscribed.get(asset_class, []))} of "
+                        f"{len(symbols)} symbols"
+                        + (f", {len(symbols) - len(self._subscribed.get(asset_class, []))}"
+                           f" above the plan's cap"
+                           if len(self._subscribed.get(asset_class, [])) < len(symbols)
                            else "") + ")")
                     self._resubscribe.clear()
                     async for raw in ws:
@@ -196,11 +292,14 @@ class MarketFeed:
                             # nothing.
                             self._resubscribe.clear()
                             break
+                self._sockets.pop(asset_class, None)
             except asyncio.CancelledError:
+                self._sockets.pop(asset_class, None)
                 raise
             except Exception as exc:
                 # A dropped socket is an event, not an exception. It must never
                 # kill this loop or reach the UI as a traceback.
+                self._sockets.pop(asset_class, None)
                 self._live[asset_class] = False
                 self.connected = any(self._live.values())
                 self.errors += 1
@@ -249,7 +348,7 @@ class MarketFeed:
                     # all. The terminal would then run with a connected socket
                     # and no data, which looks like a quiet market.
                     wanted = symbols[:self.symbol_limit]
-                    self._subscribed = list(wanted)
+                    self._subscribed[asset_class] = list(wanted)
                     await ws.send(json.dumps({
                         "action": "subscribe",
                         "bars": wanted,
@@ -278,7 +377,9 @@ class MarketFeed:
 
         if code == 405:
             previous = self.symbol_limit
-            self.symbol_limit = max(MIN_STREAM_SYMBOLS, len(self._subscribed) // 2)
+            largest = max((len(v) for v in self._subscribed.values()),
+                          default=self.symbol_limit)
+            self.symbol_limit = max(MIN_STREAM_SYMBOLS, largest // 2)
             self.dropped = max(0, len(self.symbols) - self.symbol_limit)
             self.telemetry.event(
                 Level.WARN, "feed",

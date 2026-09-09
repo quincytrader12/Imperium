@@ -265,3 +265,119 @@ async def test_the_trading_loop_actually_rotates_the_cohort():
             "cohort — the terminal would sit on the first 150 symbols "
             "forever")
         assert set(session.universe) - set(first), "new symbols must arrive"
+
+
+@pytest.mark.asyncio
+async def test_the_live_stream_follows_the_cohort_when_it_rotates(monkeypatch):
+    """The regression the rotation introduced.
+
+    ``feed.start`` is called once, at session start, with the universe as it
+    was then. The cohort then replaces that universe every twenty seconds and
+    nothing tells the socket. So the stream goes on feeding symbols that were
+    retired -- nothing is looking at them -- while the symbols now being
+    reasoned about have no live price at all.
+
+    Worse, the sweep computes each engine's ``streamed`` flag from the
+    *current* universe, so the terminal reports those symbols as streamed. The
+    one indicator that would show the problem states the opposite.
+    """
+    import asyncio as _asyncio
+
+    # The socket itself is not under test; the targeting is. Without this the
+    # feed would spend the test trying to reach Alpaca.
+    async def _no_connect(self, asset_class):
+        await _asyncio.sleep(3600)
+
+    monkeypatch.setattr("imperium.venues.alpaca.feed.MarketFeed._run",
+                        _no_connect)
+
+    async with _session() as (session, _):
+        await session.scan_universe()
+        await session.feed.start(session._stream_priority())
+        streamed_before = set(session.feed.symbols[:session.feed.symbol_limit])
+
+        session._cohort_rotated_at = 0.0
+        await session.rotate_cohort()
+        try:
+            wanted = set(session._stream_priority()[:session.feed.symbol_limit])
+            assert wanted - streamed_before, (
+                "the fixture must actually change who most needs a stream")
+
+            assert set(session.feed.symbols[:session.feed.symbol_limit]) == wanted, (
+                "the cohort rotated and the socket is still subscribed to the "
+                "symbols it was started with — the live stream is feeding "
+                "names nothing is looking at any more")
+        finally:
+            await session.feed.stop()
+
+
+@pytest.mark.asyncio
+async def test_crypto_stays_resident_rather_than_being_walked_past():
+    """The cursor must not retire the only market that is open.
+
+    Crypto is the one class this balance can day-trade -- PDT counts equity
+    round trips and exempts crypto -- and the only one trading while the
+    equity market is shut. Rotating it out leaves the terminal with a cohort
+    of closed-market equities, a stream with nothing to send, and a dark data
+    lamp that is entirely correct and completely useless.
+    """
+    from imperium.venues.assets import AssetClass, classify_symbol
+
+    async with _session(extra_equities=900) as (session, _):
+        await session.scan_universe()
+        crypto = [s for s in session.ranked_universe
+                  if classify_symbol(s) is AssetClass.CRYPTO]
+        assert crypto, "the fixture must list some crypto to pin"
+
+        # Walk far enough that a cursor with no pin would have left them behind.
+        for _ in range(6):
+            session._cohort_rotated_at = 0.0
+            await session.rotate_cohort()
+
+        resident = set(session.universe)
+        assert set(crypto) <= resident, (
+            f"the cursor retired {sorted(set(crypto) - resident)} — the only "
+            f"symbols that trade while the equity market is shut")
+
+
+@pytest.mark.asyncio
+async def test_the_stream_slots_go_to_crypto_before_arbitrary_equities():
+    """The cap is thirty against a cohort of a hundred and fifty, so the order
+    decides who gets a live price. Spending it on whichever equities the cursor
+    stopped on gives each of them a stream for twenty seconds -- too short to
+    warm a minute ring, and outside market hours not a stream at all.
+
+    Built directly rather than driven through a rotation. The cohort is laid
+    out as ``sorted(pinned) + fresh``, and real tickers put "BTC/USD" near the
+    front of that sort, so crypto lands inside the cap by alphabet whatever
+    the rule says. A fixture that cannot fail is not evidence: here the
+    equities all sort *before* the crypto, which is the arrangement the rule
+    exists for and the one where its absence shows.
+    """
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.universe = [f"AAA{i:03d}" for i in range(120)] + ["BTC/USD", "ETH/USD"]
+    limit = session.feed.symbol_limit
+    assert len(session.universe) > limit * 2, "the cap must be contested"
+
+    top = session._stream_priority()[:limit]
+
+    assert {"BTC/USD", "ETH/USD"} <= set(top), (
+        f"both crypto pairs lost their stream slot to equities that sort "
+        f"ahead of them, so the feed is silent whenever the equity market "
+        f"is: {top[:4]}")
+
+
+@pytest.mark.asyncio
+async def test_a_held_position_still_outranks_crypto_for_a_stream_slot():
+    """The one ordering that must not change. A carried position is where a
+    stale price means a stop that does not fire."""
+    async with _session(extra_equities=900) as (session, _):
+        await session.scan_universe()
+        held = next(s for s in session.universe
+                    if "/" not in s)          # an equity, so not crypto itself
+        session.feed.quote(held).last = 10.0
+        await session.broker.apply_target(held, 0.2, 10.0, 70.0)
+        assert not session.broker.positions[held].is_flat
+
+        assert session._stream_priority()[0] == held

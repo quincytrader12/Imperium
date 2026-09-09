@@ -114,6 +114,10 @@
       var el = $('lamp-' + k);
       el.className = 'lamp ' + (s.lamps[k] || 'off');
     });
+    /* A dark lamp is ambiguous on its own: a shut market, a refused
+     * subscription and a socket that never connected all read the same. The
+     * sentence that separates them was already arriving in the payload. */
+    if (s.feed && s.feed.reason) $('lamp-data').title = s.feed.reason;
 
     $('btn-start').disabled = s.running;
     $('btn-stop').disabled = !s.running;
@@ -444,6 +448,24 @@
     $('health-note').textContent = 'score ' + (h.score * 100).toFixed(0) + '%' +
       (state.ecg.length < 240 ? ' · ' + state.ecg.length + 's history' : '');
     $('hz-age').textContent = h.data_age === null ? 'no data' : h.data_age + 's';
+
+    /* Why there is no data, in words. Without it "no data" is a dead end: it
+     * is the same text whether the market is shut, the plan refused the
+     * subscription, or the socket never connected at all. */
+    var fr = $('hz-feed');
+    var f = s.feed || {};
+    if (fr) {
+      fr.textContent = f.reason || '—';
+      var level = '';
+      if (!s.running) level = '';
+      else if (f.connected === false) level = 'bad';
+      else if (h.data_age === null || h.data_age >= 20) {
+        /* Idle because the market is shut is expected, not a fault. */
+        level = (s.market && !s.market.is_open && !s.market.crypto_only) ? '' : 'warn';
+      }
+      fr.className = 'feed-reason ' + level;
+      fr.title = f.last_error || '';
+    }
     $('hz-reconnects').textContent = h.reconnects;
     $('hz-errors').textContent = h.errors;
 

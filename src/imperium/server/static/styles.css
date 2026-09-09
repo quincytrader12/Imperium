@@ -195,6 +195,11 @@ tbody tr:hover { background: #111a27; }
 .health-grid div { color: var(--dimmer); font-size: 9.5px; }
 .health-grid b { display: block; color: var(--text); font-size: 12px; font-weight: 500; }
 
+.feed-reason { margin: 0; padding: 0 8px 6px; font-size: 9.5px; line-height: 1.45;
+               color: var(--dim); border-top: 1px solid #0d121c; padding-top: 5px; }
+.feed-reason.warn { color: var(--warn); }
+.feed-reason.bad  { color: var(--bad); }
+
 /* ---------- log ---------- */
 
 .log-line { padding: 1px 8px; border-bottom: 1px solid #0d121c; display: flex; gap: 7px; }

@@ -27,6 +27,7 @@ from imperium.venues import registry
 from imperium.venues.alpaca.feed import (
     MIN_STREAM_SYMBOLS, STREAM_SYMBOL_LIMIT, MarketFeed,
 )
+from imperium.venues.assets import AssetClass
 
 
 def _feed() -> MarketFeed:
@@ -73,7 +74,7 @@ async def test_a_rejected_subscription_is_reported_not_discarded():
     it carries no symbol, and the handler filtered on symbols."""
     feed = _feed()
     feed.symbols = [f"S{i}" for i in range(150)]
-    feed._subscribed = feed.symbols[:30]
+    feed._subscribed = {AssetClass.US_EQUITY: feed.symbols[:30]}
 
     feed._handle(json.dumps([{"T": "error", "code": 405,
                               "msg": "symbol limit exceeded"}]))
@@ -90,13 +91,13 @@ async def test_the_cap_is_negotiated_down_rather_than_guessed():
     so it is discovered by halving until the venue accepts."""
     feed = _feed()
     feed.symbols = [f"S{i}" for i in range(150)]
-    feed._subscribed = feed.symbols[:30]
+    feed._subscribed = {AssetClass.US_EQUITY: feed.symbols[:30]}
 
     feed._handle(json.dumps([{"T": "error", "code": 405, "msg": "limit"}]))
     assert feed.symbol_limit == 15
     assert feed._resubscribe.is_set()
 
-    feed._subscribed = feed.symbols[:15]
+    feed._subscribed = {AssetClass.US_EQUITY: feed.symbols[:15]}
     feed._handle(json.dumps([{"T": "error", "code": 405, "msg": "limit"}]))
     assert feed.symbol_limit == 7
 
@@ -108,7 +109,7 @@ async def test_negotiation_never_converges_on_nothing():
     feed = _feed()
     feed.symbols = [f"S{i}" for i in range(150)]
     for _ in range(12):
-        feed._subscribed = feed.symbols[:feed.symbol_limit]
+        feed._subscribed = {AssetClass.US_EQUITY: feed.symbols[:feed.symbol_limit]}
         feed._handle(json.dumps([{"T": "error", "code": 405, "msg": "limit"}]))
     assert feed.symbol_limit == MIN_STREAM_SYMBOLS
 
@@ -192,3 +193,73 @@ async def test_the_session_hands_the_feed_the_prioritised_order():
             "merely first in a list nobody passed on")
     finally:
         await session.stop()
+
+
+class _ScriptedSocket:
+    """A socket that authenticates, then closes so the loop reconnects."""
+
+    def __init__(self, recorder: list[list[str]]) -> None:
+        self._recorder = recorder
+        self._auth_sent = False
+
+    async def send(self, raw: str) -> None:
+        msg = json.loads(raw)
+        if msg.get("action") == "subscribe":
+            self._recorder.append(list(msg.get("bars", [])))
+
+    async def recv(self) -> str:
+        return json.dumps([{"T": "success", "msg": "authenticated"}])
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration          # the socket drops immediately
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_socket_subscribes_the_symbols_wanted_now(monkeypatch):
+    """Not the ones its task was created with.
+
+    The cohort rotates every twenty seconds, so by the time a dropped socket
+    comes back the symbols worth streaming have moved on. A task that captured
+    its list at creation reconnects to a set of retired names and stays there
+    for the rest of the session -- a connected, healthy, entirely useless
+    stream.
+    """
+    subscribed: list[list[str]] = []
+
+    def _connect(url, **kwargs):
+        return _ScriptedSocket(subscribed)
+
+    monkeypatch.setattr("imperium.venues.alpaca.feed.websockets.connect", _connect)
+
+    feed = _feed()
+    feed.set_credentials("k", "s")
+    await feed.start(["AAPL", "MSFT"])
+    # Let it connect, drop, and come back at least once.
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if subscribed:
+            break
+    assert subscribed and subscribed[0] == ["AAPL", "MSFT"]
+
+    # The cohort rotates underneath it.
+    feed.symbols = ["TSLA", "NVDA"]
+    before = len(subscribed)
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if len(subscribed) > before:
+            break
+    await feed.stop()
+
+    assert len(subscribed) > before, "the socket never reconnected"
+    assert subscribed[-1] == ["TSLA", "NVDA"], (
+        f"the socket reconnected to {subscribed[-1]} — the list it was "
+        f"created with, not the symbols being reasoned about now")

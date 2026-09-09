@@ -107,6 +107,15 @@ TRADED_UNIVERSE = 150
 #: bounds what is resident, because a full bar ring measures about 286KB and an
 #: engine per listed symbol would be gigabytes.
 COHORT_SIZE = TRADED_UNIVERSE
+#: Crypto pairs kept resident regardless of where the cursor is.
+#:
+#: Crypto is pinned rather than walked past for three reasons that all point
+#: the same way on a small account: PDT counts equity round trips and exempts
+#: crypto, so it is the only class this balance can day-trade; it trades
+#: around the clock, so it is the only thing that can keep a live stream --
+#: and a lit data lamp -- while the equity market is shut; and the listing is
+#: tens of pairs, so residency is bounded by the market rather than by a guess.
+CRYPTO_RESIDENT = 30
 
 #: How often the cohort rotates. One rotation costs a daily-bar request and a
 #: snapshot -- two against a budget of two hundred a minute -- so a twenty
@@ -509,6 +518,10 @@ class TradingSession:
         keep |= {s for s, e in self.engines.items()
                  if e.decision.verdict is Verdict.TRADING}
         keep &= set(self.ranked_universe) | keep      # held names stay regardless
+        # Pinned, not walked past -- see CRYPTO_RESIDENT. Without this the
+        # cursor retires the crypto pairs on its next pass and the only feed
+        # that reports anything outside market hours goes with them.
+        keep |= set(self.crypto_universe()[:CRYPTO_RESIDENT])
 
         size = max(1, COHORT_SIZE - len(keep))
         if self._cohort_cursor >= len(self.ranked_universe):
@@ -525,6 +538,13 @@ class TradingSession:
         self._cohort_rotated_at = time.time()
         self._sweep_cursor = 0
         self._prune(self.universe)
+
+        # The socket has to follow the cohort. Without this the stream stays on
+        # whatever the universe held when the session started -- retired names
+        # nothing is looking at -- while the symbols now being reasoned about
+        # have no live price, and the sweep still marks them streamed because
+        # it reads that flag from the universe rather than the subscription.
+        await self.feed.retarget(self._stream_priority())
 
         # A cohort with no daily bars cannot be reasoned about by the multi-day
         # strategy, which is the only one that works on a symbol with no live
@@ -866,6 +886,11 @@ class TradingSession:
                 detail="flatten it by hand, or halt and let the retirement "
                        "sweep close it")
 
+    def crypto_universe(self) -> list[str]:
+        """The ranked crypto pairs, best first."""
+        return [s for s in self.ranked_universe
+                if classify_symbol(s) is AssetClass.CRYPTO]
+
     def _stream_priority(self) -> list[str]:
         """The universe, ordered by who most needs a live stream.
 
@@ -875,6 +900,15 @@ class TradingSession:
         means a stop that does not fire and an exit sized on a number from
         several minutes ago.
 
+        Crypto comes next, because the slot is worth most where it can be
+        used. The intraday strategy needs a warmed minute ring, and on this
+        balance PDT forbids the equity round trip it would open anyway --
+        while crypto is exempt from PDT and trades around the clock. Handing
+        the cap to whichever equities the cursor happened to stop on gives
+        thirty symbols a stream for twenty seconds each, which is not long
+        enough for any of them to warm up and, outside market hours, is not a
+        stream at all.
+
         Everything below the cap is still scanned, still priced by the
         snapshot sweep every minute, and still tradeable by the daily-bar
         strategies. What it loses is the intraday path, which cannot work on a
@@ -882,7 +916,12 @@ class TradingSession:
         """
         held = [s for s, pos in self.broker.positions.items() if not pos.is_flat]
         ordered = [s for s in held if s in self.universe]
-        ordered += [s for s in self.universe if s not in set(ordered)]
+        seen = set(ordered)
+        crypto = [s for s in self.universe
+                  if classify_symbol(s) is AssetClass.CRYPTO and s not in seen]
+        ordered += crypto
+        seen |= set(crypto)
+        ordered += [s for s in self.universe if s not in seen]
         return ordered
 
     def _trend_observations(self, symbol: str, bars: list[Bar]):
@@ -1851,6 +1890,10 @@ class TradingSession:
                 "errors": self.feed.errors,
                 "age": None if not math.isfinite(age) else round(age, 1),
                 "last_error": self.feed.last_error,
+                # The dark-lamp explanation. Computed here because the reason
+                # depends on the market clock and the session state, neither of
+                # which the feed knows about.
+                "reason": self._feed_reason(),
             },
             "equity_curve": self._equity_curve[-240:],
         }
@@ -2198,6 +2241,51 @@ class TradingSession:
             "retry_after": round(pause, 2),
             "throttled": pause > 0,
         }
+
+    def _feed_reason(self) -> str:
+        """Why the data lamp reads the way it does, in a sentence.
+
+        A dark lamp covers five different situations -- not started, still
+        connecting, refused by the venue, connected with the market shut, or
+        connected with the plan silently refusing the subscription -- and an
+        operator cannot act on a lamp that will not say which. Every fact
+        needed to tell them apart was already being sent to the browser and
+        thrown away there, so the lamp was the only signal and it was
+        ambiguous.
+        """
+        if not self.running:
+            return "the session is not started, so nothing is subscribed"
+        if not self.feed.connected:
+            if self.feed.last_error:
+                return f"the data socket is not connected — {self.feed.last_error}"
+            return "the data socket is connecting"
+
+        streamed = self.feed.streamed
+        age = self.feed.data_age
+        # A subscription of nothing on a connected socket is the failure that
+        # looks most like a quiet market: the plan rejected the request whole
+        # and the socket is sitting there delivering silence.
+        if streamed == 0:
+            return "connected, but nothing is subscribed"
+        if math.isfinite(age) and age < STALE_AFTER_SECONDS:
+            return f"{streamed} symbols streaming live"
+
+        shut = not self.market_clock.is_open and not self._crypto_only()
+        when = ""
+        if shut and self.market_clock.next_open:
+            when = f", which opens {self.market_clock.describe()}"
+        if not math.isfinite(age):
+            if shut:
+                return (f"connected and subscribed to {streamed} symbols; the "
+                        f"equity market is shut{when}, so there are no bars to "
+                        f"send yet — this is not a fault")
+            return (f"connected and subscribed to {streamed} symbols, none of "
+                    f"which has sent anything yet")
+        if shut:
+            return (f"last price {age:.0f}s ago; the equity market is "
+                    f"shut{when}, so the stream is idle by design")
+        return (f"connected to {streamed} symbols but nothing has arrived for "
+                f"{age:.0f}s — the market is open, so this is worth watching")
 
     def _health_score(self) -> dict[str, Any]:
         """A composite 0..1 with the components named.
