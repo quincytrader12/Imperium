@@ -18,6 +18,9 @@
   <div class="stat"><span class="k">Mode</span><span class="v" id="h-mode">—</span></div>
   <div class="stat"><span class="k">Market</span><span class="v" id="h-market">—</span></div>
   <div class="stat"><span class="k">Equity</span><span class="v num" id="h-equity">—</span></div>
+  <!-- The simulated book, shown only when it has diverged from the account.
+       In live mode they are the same number and this stays hidden. -->
+  <div class="stat" hidden><span class="k">Book</span><span class="v num" id="h-book">—</span></div>
   <div class="stat"><span class="k">Realised</span><span class="v num" id="h-realised">—</span></div>
   <div class="stat"><span class="k">Unrealised</span><span class="v num" id="h-unrealised">—</span></div>
   <div class="stat"><span class="k">Gross</span><span class="v num" id="h-gross">—</span></div>
@@ -49,7 +52,7 @@
 <main>
   <!-- ---------------- left column ---------------- -->
   <div id="left-panel">
-    <section class="panel" style="flex:1 1 auto">
+    <section class="panel" id="wl-panel">
       <h2>Watchlist <span class="note" id="wl-note">—</span></h2>
       <div class="scroll">
         <table id="watchlist">
@@ -116,12 +119,14 @@
 
   <!-- ---------------- right column ---------------- -->
   <div id="right-panel">
-    <section class="panel" style="flex:1 1 55%">
+    <!-- The tallest panel on the right by design: it is the one that answers
+         the question the operator actually has. -->
+    <section class="panel" style="flex:1 1 68%; min-height:220px">
       <h2>Reasoning <span class="note">why each symbol is or is not trading</span></h2>
       <div class="scroll" id="reasoning"></div>
     </section>
 
-    <section class="panel" style="flex:0 0 auto">
+    <section class="panel" id="health-panel">
       <h2>Health <span class="note" id="health-note">—</span></h2>
       <canvas id="ecg" width="340" height="46"></canvas>
       <div class="health-grid">

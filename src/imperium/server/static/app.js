@@ -24,8 +24,17 @@
     ws: null,
     retry: 1000,
     ecg: [],
+    /* The event log is a client-side ring now: the stream sends only what is
+     * new, so replacing this from a frame would leave the panel showing the
+     * last second of history instead of the last hour. */
+    events: [],
     pendingMode: null
   };
+
+  var EVENT_RING = 200;
+  var ECG_SAMPLES = 240;
+  /* Bounded by what the stream sends full reasoning for (DETAIL_ROWS). */
+  var REASON_ROWS = 40;
 
   var cluster = new Cluster($('cluster'), $('tooltip'));
 
@@ -62,7 +71,28 @@
     mode.textContent = s.mode === 'live' ? 'LIVE — REAL ORDERS'
       : s.mode === 'paper' ? 'paper (simulated)' : 'dry run (no orders)';
     mode.className = 'v mode-' + s.mode;
-    $('h-equity').textContent = fmtMoney(s.equity);
+    /* The account balance is the headline, not the simulated book's. A
+     * terminal showing a made-up default where the money goes is worse than
+     * showing nothing, and "—" is the honest reading before a key is
+     * attached. The book is still shown next to it whenever the two differ,
+     * because in dry run and paper they are different numbers on purpose. */
+    var acct = s.account || {};
+    var eq = $('h-equity');
+    if (acct.known) {
+      eq.textContent = fmtMoney(acct.equity);
+      eq.title = 'account ' + fmtMoney(acct.equity) + ' · cash ' +
+        fmtMoney(acct.cash) + ' · buying power ' + fmtMoney(acct.buying_power) +
+        (acct.simulated ? '\nsimulated book: ' + fmtMoney(acct.book_equity) : '');
+    } else {
+      eq.textContent = '—';
+      eq.title = acct.error || 'attach a key to read the account balance';
+    }
+    var book = $('h-book');
+    /* Shown only when it says something the headline does not. */
+    var drift = acct.known && acct.simulated &&
+                Math.abs(acct.book_equity - acct.equity) >= 0.01;
+    book.parentNode.hidden = !drift;
+    if (drift) book.textContent = fmtMoney(acct.book_equity);
     var r = $('h-realised');
     r.textContent = fmtMoney(s.realised_pnl);
     r.className = 'v num ' + (s.realised_pnl > 0 ? 'up' : s.realised_pnl < 0 ? 'down' : '');
@@ -153,6 +183,13 @@
 
   function renderWatchlist(s) {
     var body = $('wl-body');
+    var scan = s.universe_scan || {};
+    /* The table is a ranked window on the universe, not the universe. Saying
+     * so beats a row count that quietly contradicts the scanner's own note. */
+    $('wl-note').textContent = scan.omitted
+      ? scan.shown + ' of ' + scan.size + ' shown · ' + scan.omitted +
+        ' more scanned below the line'
+      : (scan.size || s.watchlist.length) + ' symbols';
     var rows = s.watchlist.slice().sort(function (a, b) {
       var va = VERDICT_ORDER[a.verdict] === undefined ? 9 : VERDICT_ORDER[a.verdict];
       var vb = VERDICT_ORDER[b.verdict] === undefined ? 9 : VERDICT_ORDER[b.verdict];
@@ -171,7 +208,7 @@
       var c = entry.cells;
       /* The asset class drives the calendar, the costs and the calibration, so
        * it is shown rather than left for the reader to infer from the ticker. */
-      var cls = (row.decision && row.decision.asset_class) || '';
+      var cls = row.asset_class || (row.decision && row.decision.asset_class) || '';
       var short = cls === 'crypto' ? 'CR' : cls === 'us_equity' ? 'EQ'
                 : cls === 'us_option' ? 'OP' : '';
       if (c.cls.textContent !== short) {
@@ -195,8 +232,6 @@
         body.insertBefore(entry.tr, body.children[i] || null);
       }
     });
-
-    $('wl-note').textContent = rows.length + ' symbols';
   }
 
   /* ---------- reasoning ---------- */
@@ -214,7 +249,7 @@
       html.push('<div class="reason-row halt"><span class="sym">BOOK HALTED</span>' +
         '<span class="why">' + esc(s.halt_reason) + '</span></div>');
     }
-    items.slice(0, 24).forEach(function (d) {
+    items.slice(0, REASON_ROWS).forEach(function (d) {
       var cls = 'reason-row';
       var metrics;
       if (d.verdict === 'unscanned') {
@@ -317,14 +352,63 @@
       'bp vs modelled ' + x.modelled_bps.toFixed(1) + 'bp';
   }
 
+  function absorbEvents(s) {
+    /* A frame that is not a delta is the instruction to start over: a
+     * reconnect, or a client that fell behind the ring and cannot be caught up
+     * by one. Anything else is prepended, newest first, as the server sends. */
+    var incoming = s.events || [];
+    if (!s.delta) {
+      state.events = incoming.slice(0, EVENT_RING);
+      return;
+    }
+    if (!incoming.length) return;
+    state.events = incoming.concat(state.events).slice(0, EVENT_RING);
+  }
+
   function renderLog(s) {
-    $('log').innerHTML = s.events.map(function (e) {
+    absorbEvents(s);
+    /* Rebuilt only when something arrived. innerHTML on a 200-row list every
+     * second is a layout pass the terminal cannot afford, and for most seconds
+     * there is nothing new to show. */
+    if (s.delta && !(s.events || []).length && $('log').childElementCount) return;
+    $('log').innerHTML = state.events.map(function (e) {
       return '<div class="log-line ' + e.level + '">' +
         '<span class="t">' + fmtTime(e.ts) + '</span>' +
         '<span class="m">' + esc(e.message) +
         (e.detail ? ' <span class="d">— ' + esc(e.detail) + '</span>' : '') +
         '</span></div>';
     }).join('');
+  }
+
+  /* ---------- canvas ---------- */
+
+  /* Every canvas here had the same two bugs, so they are fixed in one place.
+   *
+   * The resize check compared only the width, so a panel that changed height
+   * without changing width kept its old backing store and drew a stretched
+   * picture into it -- which is what a flex layout does constantly.
+   *
+   * And setting canvas.width or .height resets the 2D context, transform
+   * included. Any code that sets one without immediately re-applying the
+   * transform draws at the wrong scale on a high-DPI screen, so the two are
+   * done together and nowhere else. */
+  function fitCanvas(c, cssHeight) {
+    var ctx = c.getContext('2d');
+    // A folded panel gives its canvas no box at all. Drawing into it would fit
+    // a 1px backing store that the next unfold would render at the wrong scale.
+    if (!c.clientWidth && !c.offsetParent) return null;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.max(1, c.clientWidth || 300);
+    var h = Math.max(1, cssHeight || c.clientHeight || 150);
+    var bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (c.width !== bw || c.height !== bh) {
+      c.width = bw; c.height = bh;
+    }
+    // Re-applied every frame: cheap, and it cannot drift out of step with a
+    // backing store that something else resized.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return { ctx: ctx, w: w, h: h };
   }
 
   /* ---------- health ECG ---------- */
@@ -338,50 +422,65 @@
     $('hz-errors').textContent = h.errors;
 
     state.ecg.push(h.score);
-    if (state.ecg.length > 240) state.ecg.shift();
+    if (state.ecg.length > ECG_SAMPLES) state.ecg.shift();
 
-    var c = $('ecg'), ctx = c.getContext('2d');
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    var w = c.clientWidth || 320, ht = 46;
-    if (c.width !== Math.floor(w * dpr)) {
-      c.width = Math.floor(w * dpr); c.height = Math.floor(ht * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-    ctx.clearRect(0, 0, w, ht);
+    var fit = fitCanvas($('ecg'), 46);
+    if (!fit) return;
+    var ctx = fit.ctx, w = fit.w, ht = fit.h;
+
     ctx.strokeStyle = '#131c29'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, ht / 2); ctx.lineTo(w, ht / 2); ctx.stroke();
 
-    var col = h.score > 0.75 ? '#35d69b' : h.score > 0.45 ? '#e8b444' : '#ff5c6c';
-    ctx.strokeStyle = col; ctx.lineWidth = 1.4;
-    ctx.shadowBlur = 7; ctx.shadowColor = col;
-    ctx.beginPath();
     var n = state.ecg.length;
-    // While history is short, spread the samples across the full width rather
-    // than anchoring them to the right edge -- five samples pinned to the right
-    // paint a sliver on an otherwise blank panel, which reads as a broken
-    // instrument rather than as one that has just started.
-    var step = n < 240 ? (n > 1 ? w / (n - 1) : w) : (w / 240);
-    for (var i = 0; i < n; i++) {
-      var x = w - (n - 1 - i) * step;
-      // A beat shape rather than a plain line, so a flatline reads as a
-      // flatline at a glance.
-      var beat = Math.sin(i * 1.3) * (0.10 + state.ecg[i] * 0.34);
-      var y = ht - 4 - (state.ecg[i] * 0.55 + beat + 0.2) * (ht - 8);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    if (!n) return;
+    var col = h.score > 0.75 ? '#35d69b' : h.score > 0.45 ? '#e8b444' : '#ff5c6c';
+
+    /* Never plot more points than there are pixels to plot them on. Beyond
+     * that every extra point is sub-pixel detail nobody can see, and a dense
+     * zigzag drawn under a glow is what made this read as a smear rather than
+     * as an instrument. */
+    var stride = Math.max(1, Math.ceil(n / w));
+    var step = n > 1 ? w / (n - 1) : w;
+
+    function pointAt(i) {
+      return { x: w - (n - 1 - i) * step,
+               y: ht - 3 - state.ecg[i] * (ht - 8) };
     }
+
+    /* A soft area under the line instead of shadowBlur. The glow was the most
+     * expensive thing on this canvas -- recomputed over the whole path every
+     * second -- and a fill is close to free. */
+    var grad = ctx.createLinearGradient(0, 0, 0, ht);
+    grad.addColorStop(0, col + '44');
+    grad.addColorStop(1, col + '00');
+    ctx.beginPath();
+    ctx.moveTo(pointAt(0).x, ht);
+    for (var i = 0; i < n; i += stride) { var p = pointAt(i); ctx.lineTo(p.x, p.y); }
+    var last = pointAt(n - 1);
+    ctx.lineTo(last.x, last.y);
+    ctx.lineTo(last.x, ht);
+    ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+
+    ctx.strokeStyle = col; ctx.lineWidth = 1.4;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (var k = 0, first = true; k < n; k += stride, first = false) {
+      var q = pointAt(k);
+      if (first) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+    }
+    ctx.lineTo(last.x, last.y);
     ctx.stroke();
-    ctx.shadowBlur = 0;
+
+    // The live end, so a flatline still reads as something running.
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(last.x - 1, last.y, 1.8, 0, Math.PI * 2); ctx.fill();
   }
 
   function renderPnl(s) {
-    var c = $('pnl'), ctx = c.getContext('2d');
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    var w = c.clientWidth || 300, h = c.clientHeight || 150;
-    if (c.width !== Math.floor(w * dpr)) {
-      c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-    ctx.clearRect(0, 0, w, h);
+    var fit = fitCanvas($('pnl'));
+    if (!fit) return;
+    var ctx = fit.ctx, w = fit.w, h = fit.h;
     var pts = s.equity_curve || [];
     if (pts.length < 2) {
       ctx.fillStyle = '#46536a'; ctx.font = '11px monospace';
@@ -513,6 +612,9 @@
   function renderOvernight(s) {
     var o = s.overnight;
     if (!o) return;
+    $('on-note').textContent = o.credible
+      ? o.mean_bps.toFixed(2) + 'bp/night · t=' + o.t_stat.toFixed(1)
+      : (o.measured ? 'sample too thin to act on' : 'not yet measured');
 
     $('on-phase').innerHTML = PHASES.map(function (p) {
       var on = o.phase === p.k;
@@ -590,15 +692,36 @@
     $('cost-note').textContent = parts.join(' · ') || '—';
 
     // An assumption nobody is told about becomes a fact by default.
+    /* One line, expandable. The warning has to stay -- an assumed fee moves the
+     * trade/no-trade line directly, and an assumption nobody is told about
+     * becomes a fact by default -- but it is a standing condition, not news,
+     * and six permanent lines of it were being paid for out of the reasoning
+     * panel every second of every session. */
     var warn = $('cost-warn');
-    if (c.fees_assumed) {
-      warn.innerHTML = '<div class="notice" style="margin:0 9px 8px"></div>';
-      warn.firstChild.textContent =
-        'Fee tier is ASSUMED, not confirmed for this account (' + c.fee_source +
-        '). It moves the trade/no-trade line directly.';
-    } else {
-      warn.innerHTML = '';
+    if (!c.fees_assumed) { warn.innerHTML = ''; warn.dataset.built = ''; return; }
+    if (warn.dataset.built !== 'yes') {
+      warn.innerHTML =
+        '<div class="notice compact" id="fee-notice" role="button" tabindex="0">' +
+        '<span class="fee-head">fees assumed — affects the trade/no-trade line' +
+        '<i class="chev">\u25be</i></span>' +
+        '<span class="fee-body" id="fee-body" hidden></span></div>';
+      var box = $('fee-notice');
+      var toggle = function () {
+        var body = $('fee-body');
+        body.hidden = !body.hidden;
+        box.querySelector('.chev').textContent = body.hidden ? '\u25be' : '\u25b4';
+      };
+      box.addEventListener('click', toggle);
+      box.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+      warn.dataset.built = 'yes';
     }
+    var body = $('fee-body');
+    var full = 'Not confirmed for this account (' + c.fee_source +
+               '). It moves the trade/no-trade line directly.';
+    if (body.textContent !== full) body.textContent = full;
+    $('fee-notice').title = full;
   }
 
   /* ---------- session statistics ---------- */
@@ -678,6 +801,10 @@
       try { s = JSON.parse(ev.data); } catch (e) { return; }
       if (s.error) return;
       state.snapshot = s;
+      /* Absorbed even while hidden, so the log is complete on return; only the
+       * rendering is skipped. Skipping the absorb instead would silently
+       * discard delta frames the server will never send again. */
+      if (document.hidden) { absorbEvents(s); cluster.ingest(s.pulses); return; }
       try { render(s); } catch (e) {
         // A render failure must not take down the stream; the next snapshot
         // gets another chance.
@@ -723,7 +850,12 @@
   }
 
   function animate(now) {
-    cluster.frame(now);
+    /* The cluster animates continuously, which is the right behaviour for a
+     * panel someone is watching and pure waste for one nobody is. On a machine
+     * left running for days this is the difference between a warm laptop and a
+     * hot one -- and browsers throttle background rAF unevenly, so relying on
+     * them to do it produces stutter on return rather than a clean resume. */
+    if (!document.hidden) cluster.frame(now);
     requestAnimationFrame(animate);
   }
 
@@ -860,5 +992,66 @@
 
   connect();
   requestAnimationFrame(animate);
+  /* ---------- collapsible panels ---------- */
+
+  /* Remembered per panel, because a terminal meant to run for days should not
+   * make the operator re-fold it every time the page reloads. localStorage can
+   * throw outright in a private window or with site data blocked, so every
+   * access is guarded: a layout preference is never worth a dead script. */
+  var FOLD_KEY = 'imperium.folded';
+
+  function foldedSet() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(FOLD_KEY) || '[]'));
+    } catch (e) { return new Set(); }
+  }
+
+  function rememberFolds(set) {
+    try {
+      localStorage.setItem(FOLD_KEY, JSON.stringify(Array.from(set)));
+    } catch (e) { /* nothing to do, and nothing worth breaking over */ }
+  }
+
+  function panelKey(panel, i) {
+    var h = panel.querySelector('h2');
+    return panel.id || (h ? h.textContent.trim().split(' ')[0] : 'p' + i);
+  }
+
+  function initFolding() {
+    var folded = foldedSet();
+    Array.prototype.forEach.call(document.querySelectorAll('.panel'),
+      function (panel, i) {
+        var h2 = panel.querySelector('h2');
+        if (!h2) return;
+        var key = panelKey(panel, i);
+        if (folded.has(key)) panel.classList.add('collapsed');
+        h2.tabIndex = 0;
+        h2.title = 'click to fold this panel';
+        var toggle = function () {
+          panel.classList.toggle('collapsed');
+          var now = foldedSet();
+          if (panel.classList.contains('collapsed')) now.add(key); else now.delete(key);
+          rememberFolds(now);
+          // Canvases inside a panel that just changed size need re-fitting, and
+          // the cluster owns its own backing store.
+          cluster.resize();
+          if (state.snapshot) { try { render(state.snapshot); } catch (e) {} }
+        };
+        h2.addEventListener('click', toggle);
+        h2.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+        });
+      });
+  }
+
+  initFolding();
+
   window.addEventListener('resize', function () { cluster.resize(); });
+  document.addEventListener('visibilitychange', function () {
+    // Repaint on return rather than showing a second of stale panel.
+    if (!document.hidden && state.snapshot) {
+      cluster.resize();
+      try { render(state.snapshot); } catch (e) { console.error(e); }
+    }
+  });
 })();

@@ -41,7 +41,7 @@ from imperium.telemetry.streams import Level, TelemetryHub
 from imperium.venues import registry
 from imperium.venues.alpaca.client import AlpacaClient, MarketClock, VenueError
 from imperium.venues.alpaca.feed import MarketFeed
-from imperium.venues.alpaca.filters import format_decimal
+from imperium.venues.alpaca.filters import format_decimal, to_decimal
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.session")
@@ -66,6 +66,24 @@ OVERNIGHT_HISTORY_DAYS = 400
 #: How often the daily history is re-pulled. Daily bars change once a day, so
 #: anything faster spends request budget to learn nothing.
 OVERNIGHT_REFRESH_SECONDS = 6 * 3600
+
+#: How often the account is re-read. It is one cheap request against a budget
+#: of two hundred a minute, and it is the number the operator watches.
+ACCOUNT_REFRESH_SECONDS = 15
+
+#: How many symbols carry their full reasoning in one frame. The reasoning
+#: panel renders 24; this leaves headroom for the sort to move between frames
+#: without a row blinking out, and bounds the frame no matter how wide the
+#: universe gets.
+DETAIL_ROWS = 48
+
+#: How many symbols reach the watchlist table at all. The engine evaluates the
+#: whole universe; this bounds only what is *streamed*. A table cannot usefully
+#: show a thousand rows -- the DOM alone would be tens of thousands of nodes
+#: rewritten every second -- and the regime census and counters already
+#: summarise every symbol, including the ones below this line. The panel says
+#: how many it is not showing rather than pretending the universe is this size.
+WATCHLIST_ROWS = 120
 
 
 @dataclass
@@ -144,6 +162,20 @@ class TradingSession:
         self._daily_loaded_at: float = 0.0
         self._equity_curve: list[tuple[float, float]] = []
         self._account_checked_at: float = 0.0
+        #: The account as the venue reports it, refreshed on a timer. Held
+        #: separately from the book because in dry run and paper the book is
+        #: simulated and these are not: conflating them is how a terminal ends
+        #: up showing an invented balance.
+        self.account_equity: float = 0.0
+        self.account_cash: float = 0.0
+        self.account_buying_power: float = 0.0
+        self.account_last_equity: float = 0.0
+        self.account_currency: str = "USD"
+        self.account_status: str = ""
+        self.account_number: str = ""
+        self.account_updated_at: float = 0.0
+        self.account_error: str = ""
+        self._seeded_from_account: bool = False
 
     # -- setup -----------------------------------------------------------
 
@@ -204,7 +236,11 @@ class TradingSession:
                                    feed=self.spec.default_feed)
         self.feed.set_credentials(cred.api_key, cred.secret)
         try:
-            await self.client.account()
+            # The key check already costs this request, so the balance arrives
+            # with it rather than up to a refresh interval later. An operator
+            # who has just attached a key expects to see their money now.
+            self.absorb_account(await self.client.account())
+            self._account_checked_at = time.time()
             self.market_clock = await self.client.get_clock()
         except VenueError as exc:
             self.lamps.key = "bad"
@@ -840,27 +876,84 @@ class TradingSession:
             self._equity_curve = self._equity_curve[-2000:]
 
     async def _refresh_account_limits(self) -> None:
-        """Read the venue's own day-trade count and equity.
+        """Read the account the venue actually holds.
 
-        Counting day trades locally cannot survive a restart or trades made
-        elsewhere in the same account, and being wrong here means a
-        ninety-day restriction rather than a missed trade.
+        The day-trade count is read rather than counted locally because a local
+        count cannot survive a restart or trades made elsewhere in the same
+        account, and being wrong means a ninety-day restriction rather than a
+        missed trade.
+
+        Equity and buying power are read for a plainer reason: they are the
+        operator's money, and a terminal that displays a simulated default in
+        the place where the balance goes is a terminal reporting a number it
+        made up.
         """
         if self.client is None or not self.client.authenticated:
             return
-        if time.time() - self._account_checked_at < 30:
+        if time.time() - self._account_checked_at < ACCOUNT_REFRESH_SECONDS:
             return
         try:
             account = await self.client.account()
-        except VenueError:
+        except VenueError as exc:
+            self.account_error = exc.message
             return
         self._account_checked_at = time.time()
+        self.account_error = ""
+        self.absorb_account(account)
+
+    def absorb_account(self, account: dict[str, Any]) -> None:
+        """Take the venue's numbers, field by field, tolerating any of them.
+
+        Alpaca sends these as strings, and a single unparseable one must not
+        discard the rest: an account whose buying power came back malformed
+        still knows its own equity.
+        """
+        def number(key: str) -> float | None:
+            raw = account.get(key)
+            if raw in (None, ""):
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        for key, attr in (("equity", "account_equity"),
+                          ("cash", "account_cash"),
+                          ("buying_power", "account_buying_power"),
+                          ("last_equity", "account_last_equity")):
+            value = number(key)
+            if value is not None:
+                setattr(self, attr, value)
+
+        self.account_currency = str(account.get("currency") or "USD")
+        self.account_status = str(account.get("status") or "")
+        self.account_number = str(account.get("account_number") or "")
+        self.account_updated_at = time.time()
+
         try:
             self.allocator.day_trade_count = int(account.get("daytrade_count", 0) or 0)
             self.allocator.flagged_pattern_day_trader = bool(
                 account.get("pattern_day_trader", False))
         except (TypeError, ValueError):
             pass
+
+        # A simulated book starts from the real balance rather than from a
+        # round number. Sizing against $10,000 when the account holds $700 does
+        # not produce a smaller version of the same decisions -- it produces
+        # different ones, because every limit here is a fraction of equity.
+        # Only before the book has traded: re-seeding a book that already holds
+        # positions would silently rewrite its P&L.
+        if (getattr(self.broker, "simulated", False)
+                and not self._seeded_from_account
+                and self.account_cash > 0
+                and not self.broker.fills):
+            self.broker.cash = to_decimal(self.account_cash)
+            self._seeded_from_account = True
+            self.day_start_equity = self.account_equity or self.account_cash
+            self.telemetry.event(
+                Level.INFO, "account",
+                f"simulated book seeded from the real account: "
+                f"{self.account_cash:,.2f} {self.account_currency}")
 
     async def _run(self) -> None:
         last_universe = 0.0
@@ -956,32 +1049,83 @@ class TradingSession:
 
     # -- the snapshot the UI renders --------------------------------------
 
-    def snapshot(self, pulse_window: int = 240) -> dict[str, Any]:
+    def snapshot(self, pulse_window: int = 240, *, since_pulse: int = 0,
+                 since_event: int = 0, detail: int = DETAIL_ROWS,
+                 rows_limit: int = WATCHLIST_ROWS) -> dict[str, Any]:
+        """The one frame the websocket streams.
+
+        Two things here exist purely to keep this affordable at 1Hz over a wide
+        universe, because the cost of a frame is not what it takes to build --
+        that is milliseconds -- but what the browser must parse and lay out
+        before the next one arrives.
+
+        ``since_pulse``/``since_event`` turn the telemetry rings into deltas.
+        Re-sending a 240-pulse window every second spends almost all of its
+        bandwidth on rows the client already has.
+
+        ``detail`` bounds how many symbols carry their full reasoning. The
+        decision dictionary is the largest thing per row and the reasoning panel
+        reads only a couple of dozen of them, so it is sent for the symbols
+        closest to trading, plus everything actually holding a position -- a
+        position whose reasoning vanished because its symbol fell down a sort
+        order is the one case that would be indefensible.
+        """
         prices = self.prices()
         equity = self.equity()
         age = self.feed.data_age
         self.lamps.data = ("ok" if age < STALE_AFTER_SECONDS
                            else ("stale" if math.isfinite(age) else "off"))
 
+        held = {sym for sym, pos in self.broker.positions.items() if not pos.is_flat}
+        ranked = sorted(
+            self.universe,
+            key=lambda sym: (
+                0.0 if sym in held
+                else (self.engines[sym].decision.distance_to_trading
+                      if sym in self.engines else 9.0)))
+        detailed = set(ranked[:max(0, detail)]) | held
+        # Held symbols are always streamed, wherever they rank. A position that
+        # disappeared from the table because its symbol drifted down a sort
+        # order is the one omission that would be indefensible.
+        shown = ranked[:max(0, rows_limit)]
+        shown_set = set(shown) | held
+        omitted = len(self.universe) - len(shown_set)
+
         rows = []
         for symbol in self.universe:
+            if symbol not in shown_set:
+                continue
             state = self.allocator.observe(symbol)
             q = self.feed.quote(symbol)
             d = self.engines[symbol].decision if symbol in self.engines else Decision(symbol)
-            rows.append({
+            row = {
                 "symbol": symbol,
                 "price": q.last,
                 "change_pct": q.change_pct,
                 "turnover": q.quote_volume,
                 "verdict": state.verdict.value,
-                "reason": (state.reason if state.verdict in
-                           (Verdict.NOT_ADMITTED, Verdict.REJECTED) and state.reason
-                           else d.reason),
                 "weight": state.current_weight,
                 "target": d.target_weight,
                 "age": None if not math.isfinite(q.age) else round(q.age, 1),
-                "decision": d.as_dict(),
-            })
+                # Classified from the symbol rather than read off the
+                # decision, so the tag is right on the first frame. A decision
+                # that has never been evaluated carries no class, which left
+                # every row untagged at startup -- and an untagged row reads as
+                # an unclassified symbol rather than as a field that has not
+                # arrived yet.
+                "asset_class": classify_symbol(symbol).value,
+                "strategy": d.strategy,
+            }
+            if symbol in detailed:
+                row["decision"] = d.as_dict()
+                # The table shows this as a hover tooltip only, so it travels
+                # with the reasoning rather than on every row: a sentence per
+                # symbol per second is most of the frame at a wide universe.
+                row["reason"] = (
+                    state.reason if state.verdict in
+                    (Verdict.NOT_ADMITTED, Verdict.REJECTED) and state.reason
+                    else d.reason)
+            rows.append(row)
 
         health = self._health_score()
         positions = [
@@ -1024,6 +1168,11 @@ class TradingSession:
                 "note": self.scan_note,
                 "scanned_at": self.universe_scanned_at,
                 "size": len(self.universe),
+                # Streamed vs evaluated. Every symbol below the line is still
+                # being scanned and still counted in the census; it is only the
+                # table that stops at the line.
+                "shown": len(rows),
+                "omitted": max(0, omitted),
             },
             "status": self.status_message,
             "venue_error": self.venue_error,
@@ -1031,6 +1180,7 @@ class TradingSession:
             "store_error": self.store_error,
             "lamps": self.lamps.as_dict(),
             "equity": equity,
+            "account": self._account_block(),
             "cash": float(self.broker.cash),
             "realised_pnl": float(self.broker.realised_pnl),
             "unrealised_pnl": sum(p["unrealised"] for p in positions),
@@ -1044,9 +1194,16 @@ class TradingSession:
             "watchlist": rows,
             "positions": positions,
             "fills": [f.as_dict() for f in self.broker.fills[-40:]][::-1],
-            "events": self.telemetry.events(60),
-            "pulses": self.telemetry.pulse_window(pulse_window),
+            "events": self.telemetry.events(60, since=since_event),
+            "pulses": self.telemetry.pulse_window(pulse_window, since=since_pulse),
             "pulse_seq": self.telemetry.latest_pulse_seq,
+            "event_seq": self.telemetry.latest_event_seq,
+            # True when this frame carries only what changed. The client keeps
+            # its own rings in that case instead of replacing them, and a frame
+            # that says False is its instruction to start over -- which is what
+            # a reconnect, or falling behind the ring, needs.
+            "delta": bool(since_pulse or since_event),
+            "detailed": sorted(detailed),
             "health": health,
             "feed": {
                 "connected": self.feed.connected,
@@ -1056,6 +1213,39 @@ class TradingSession:
                 "last_error": self.feed.last_error,
             },
             "equity_curve": self._equity_curve[-240:],
+        }
+
+    def _account_block(self) -> dict[str, Any]:
+        """The real account, kept distinct from the simulated book.
+
+        Both are published because in dry run and paper they are different
+        numbers and the difference is the point: the account is the operator's
+        actual money, the book is what this program has done to a copy of it.
+        Showing one in the other's place is how a terminal comes to report a
+        balance nobody has.
+        """
+        known = self.account_updated_at > 0
+        book = self.equity()
+        return {
+            "known": known,
+            "equity": self.account_equity,
+            "cash": self.account_cash,
+            "buying_power": self.account_buying_power,
+            "last_equity": self.account_last_equity,
+            "currency": self.account_currency,
+            "status": self.account_status,
+            "updated_at": self.account_updated_at,
+            "age": (time.time() - self.account_updated_at) if known else None,
+            "error": self.account_error,
+            "seeded": self._seeded_from_account,
+            "book_equity": book,
+            # In live mode the book *is* the account, so a gap between them is
+            # a reconciliation failure rather than simulated P&L.
+            "simulated": bool(getattr(self.broker, "simulated", True)),
+            #: Day P&L against the venue's own previous close, which is the
+            #: figure the broker's own app shows.
+            "day_pnl": (self.account_equity - self.account_last_equity
+                        if known and self.account_last_equity else 0.0),
         }
 
     def _overnight_block(self) -> dict[str, Any]:

@@ -370,14 +370,31 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         await ws.accept()
         session = get_session()
         session.lamps.link = "ok"
+        # Per connection, not per session: two browsers open on the same
+        # terminal each need their own place in the rings, and a shared cursor
+        # would have them stealing each other's rows.
+        since_pulse = 0
+        since_event = 0
         try:
             while True:
                 start = time.perf_counter()
                 try:
-                    payload = session.snapshot()
+                    # A client whose cursor has fallen behind the ring cannot be
+                    # caught up by a delta -- the rows it missed are gone. It is
+                    # sent the whole window instead, which is what a frame with
+                    # delta=False tells it to expect.
+                    oldest = session.telemetry.oldest_pulse_seq
+                    if since_pulse and oldest and since_pulse < oldest - 1:
+                        since_pulse = since_event = 0
+                    payload = session.snapshot(since_pulse=since_pulse,
+                                               since_event=since_event)
+                    since_pulse = payload.get("pulse_seq") or since_pulse
+                    since_event = payload.get("event_seq") or since_event
                 except Exception as exc:
                     # A snapshot that raises must not close the socket, or the
-                    # UI goes dark for a reason it cannot show.
+                    # UI goes dark for a reason it cannot show. The cursor is
+                    # left where it was so the next frame re-sends what this one
+                    # failed to deliver rather than skipping past it.
                     log.exception("snapshot failed")
                     payload = {"ts": time.time(), "error": str(exc)}
                 await ws.send_json(payload)

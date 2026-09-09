@@ -426,3 +426,78 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   border-color: var(--accent);
   font-weight: 600;
 }
+
+
+/* ---------- the assumed-fee notice, compacted ---------- */
+/* It is a standing condition rather than news, so it costs one line until
+   asked. The detail is one click (or Enter) away and in the tooltip. */
+.notice.compact {
+  margin: 0 9px 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.notice.compact .fee-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: space-between;
+}
+.notice.compact .chev { font-style: normal; opacity: .7; font-size: 9px; }
+.notice.compact .fee-body { display: block; margin-top: 5px; opacity: .85; }
+.notice.compact:focus-visible { outline: 1px solid var(--warn); outline-offset: 1px; }
+
+
+/* ---------- collapsible panels ---------- */
+/* A terminal this dense cannot be laid out for everyone at once: an operator
+   watching the overnight window and one watching intraday costs want different
+   halves of the screen. Rather than guess, every panel folds to its header and
+   the choice is remembered, so the layout is the operator's rather than mine. */
+.panel > h2 { cursor: pointer; user-select: none; }
+.panel > h2::after {
+  content: '\2013';           /* an en dash, rotated to a chevron when folded */
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--dimmer);
+  font-size: 11px;
+  line-height: 1;
+  transition: transform .12s ease;
+}
+.panel.collapsed > h2::after { content: '+'; }
+.panel.collapsed > *:not(h2) { display: none !important; }
+.panel.collapsed { flex: 0 0 auto !important; min-height: 0 !important; }
+.panel > h2:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- room where it is actually needed ---------- */
+/* The watchlist is the scanner. It was being crushed to two visible rows by the
+   fixed-height panels stacked under it, which is the one thing on the left that
+   must never happen: a scanner you cannot see is not scanning as far as the
+   operator knows. */
+#wl-panel { flex: 1 1 auto; min-height: 200px; }
+/* The health trace needs enough height to read as a trace rather than a bar. */
+#health-panel { flex: 0 0 auto; min-height: 92px; }
+/* The overnight verdict is a sentence, not a paragraph. */
+#on-verdict {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+
+/* ---------- density in the left column ---------- */
+/* These panels are read at a glance and were spending their height on padding
+   rather than on information, which the watchlist was paying for. Narrower
+   cells also fit more per row, so the same content occupies fewer rows. */
+#left-panel .limit-grid {
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+  gap: 2px 8px;
+  padding: 4px 9px 6px;
+}
+#left-panel .limit-grid .v { font-size: 11px; }
+#left-panel .gauges { padding: 4px 9px 0; gap: 4px; }
+#left-panel .census { padding-top: 2px; padding-bottom: 4px; }
+#left-panel .census-row { padding: 1px 0; }
+#left-panel .phase-track { padding: 2px 9px 5px; }
+#left-panel .halt-bar { padding-bottom: 6px; }

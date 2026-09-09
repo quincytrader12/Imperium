@@ -123,20 +123,44 @@ class TelemetryHub:
 
     # -- reading ---------------------------------------------------------
 
-    def events(self, limit: int = 120) -> list[dict[str, Any]]:
-        with self._lock:
-            items = list(self._events)[-limit:]
-        return [e.as_dict() for e in reversed(items)]
+    def events(self, limit: int = 120, since: int = 0) -> list[dict[str, Any]]:
+        """The most recent events, newest first.
 
-    def pulse_window(self, limit: int = 240) -> list[dict[str, Any]]:
-        """The most recent pulses, not the whole ring.
-
-        A window with overlap is cheaper than tracking a cursor per socket, and
-        the client's dedupe on ``seq`` makes the overlap free.
+        ``since`` returns only what the caller has not already seen. A stream
+        that re-sends its whole window every second spends nearly all of its
+        bandwidth on rows the client already has, and at 1Hz that is the
+        difference between a terminal that keeps up and one that does not.
         """
         with self._lock:
-            items = list(self._pulses)[-limit:]
+            items = [e for e in self._events if e.seq > since][-limit:]
+        return [e.as_dict() for e in reversed(items)]
+
+    def pulse_window(self, limit: int = 240, since: int = 0) -> list[dict[str, Any]]:
+        """The most recent pulses, oldest first.
+
+        With ``since`` this is a delta. Without it -- a first frame, or a
+        reconnect -- it is the whole window, because a client that has just
+        connected needs the backlog to draw anything at all.
+        """
+        with self._lock:
+            items = [p for p in self._pulses if p.seq > since][-limit:]
         return [p.as_dict() for p in items]
+
+    @property
+    def latest_event_seq(self) -> int:
+        with self._lock:
+            return self._events[-1].seq if self._events else 0
+
+    @property
+    def oldest_pulse_seq(self) -> int:
+        """The oldest pulse still in the ring.
+
+        A client whose cursor is older than this has fallen behind the ring and
+        cannot be caught up by a delta -- it needs the window again. Saying so
+        is the difference between a visible gap and a silent one.
+        """
+        with self._lock:
+            return self._pulses[0].seq if self._pulses else 0
 
     @property
     def kind_counts(self) -> dict[str, int]:
