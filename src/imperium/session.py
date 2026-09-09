@@ -12,6 +12,7 @@ a traceback.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import logging
@@ -23,6 +24,7 @@ from typing import Any
 
 from imperium import config
 from imperium.execution.bars import Bar
+from imperium.keepalive import KeepAwake
 from imperium.execution.broker import (
     MARKET_ON_CLOSE, MARKET_ON_OPEN, Broker, DryRunBroker, Fill, LiveBroker,
     Mode, ModeSwitchRefused, PaperBroker,
@@ -70,6 +72,25 @@ OVERNIGHT_REFRESH_SECONDS = 6 * 3600
 #: How often the account is re-read. It is one cheap request against a budget
 #: of two hundred a minute, and it is the number the operator watches.
 ACCOUNT_REFRESH_SECONDS = 15
+
+#: How many symbols carry an engine and a bar ring -- the set actually reasoned
+#: about bar by bar. The scan ranks the entire tradable listing; this bounds
+#: what is kept from it. The bound is memory, measured rather than guessed: a
+#: full ring costs about 286KB, so this is roughly 45MB of bar history, which a
+#: laptop running the terminal alongside a browser can carry all day. Raising it
+#: costs that much again per hundred and 1,500 symbols would be 430MB.
+TRADED_UNIVERSE = 150
+
+#: How often the whole listing is re-ranked. A full sweep is one request per
+#: two hundred symbols, so re-ranking the US equity market costs around fifty --
+#: affordable on a quarter-hour cycle against a budget of two hundred a minute,
+#: and pointless faster: turnover rankings do not move minute to minute.
+FULL_SCAN_SECONDS = 15 * 60
+
+#: A loop that has not begun an iteration in this long is not running. The loop
+#: sleeps a second between ticks, so this is generous by two orders of
+#: magnitude and will not fire on a slow scan.
+LOOP_STALL_SECONDS = 90
 
 #: How many symbols carry their full reasoning in one frame. The reasoning
 #: panel renders 24; this leaves headroom for the sort to move between frames
@@ -128,6 +149,11 @@ class TradingSession:
         self.paper_endpoint: bool = True
         self.market_clock: MarketClock = MarketClock()
         self.universe_scanned_at: float = 0.0
+        #: How wide the last sweep actually looked, and how much of it carried
+        #: a price. Published so "scanning everything" is a number rather than
+        #: a claim.
+        self.universe_considered: int = 0
+        self.universe_priced: int = 0
         self.scan_note: str = "not yet scanned"
         self.status_message = "idle"
         self.venue_error: str = ""
@@ -176,6 +202,20 @@ class TradingSession:
         self.account_updated_at: float = 0.0
         self.account_error: str = ""
         self._seeded_from_account: bool = False
+        #: The venue's trading date, as an ISO string. Empty until the first
+        #: tick so that startup is not treated as a rollover.
+        self._trading_day: str = ""
+        #: When the trading loop last began an iteration. A loop that stops
+        #: ticking is invisible from every other indicator.
+        self._loop_beat: float = 0.0
+        #: How many times the supervisor has had to restart the loop. Published
+        #: rather than hidden: a terminal that quietly restarts itself all night
+        #: is a terminal with a problem worth seeing.
+        self.restarts: int = 0
+        #: Asked for while a session runs, handed back when it stops. A book
+        #: holding an overnight position through a suspended laptop is a book
+        #: whose opening exit never gets lodged.
+        self.keep_awake = KeepAwake()
 
     # -- setup -----------------------------------------------------------
 
@@ -289,7 +329,7 @@ class TradingSession:
         return bool(admitted) and all(
             classify_symbol(s) is AssetClass.CRYPTO for s in admitted)
 
-    async def scan_universe(self, limit: int = 40) -> None:
+    async def scan_universe(self, limit: int = TRADED_UNIVERSE) -> None:
         """Discover what this account can actually trade, ranked by turnover.
 
         The seed list is a starting point, not the universe. This asks the venue
@@ -313,11 +353,13 @@ class TradingSession:
 
         candidates = [a for a in assets.values()
                       if a.tradable and spec_for(a.asset_class).tradeable]
-        # Rank by traded value, which needs a quote. Snapshots are batched, so
-        # ask about a bounded shortlist rather than every listed symbol.
+        # Every tradable listing, not a shortlist of the first four hundred.
+        # Snapshots are batched by the client, so the whole listing costs one
+        # request per two hundred symbols -- around fifty for the US equity
+        # market -- and that is spent on a slow cycle rather than every minute.
         seeded = [s for s in self.spec.seed_universe if s in assets]
-        others = [a.symbol for a in candidates if a.symbol not in set(seeded)]
-        shortlist = seeded + others[:400]
+        shortlist = seeded + [a.symbol for a in candidates
+                              if a.symbol not in set(seeded)]
 
         snaps = await self.client.snapshots(shortlist)
         ranked: list[tuple[float, str]] = []
@@ -356,12 +398,37 @@ class TradingSession:
 
         self.universe = chosen
         self.universe_scanned_at = time.time()
+        self.universe_considered = len(shortlist)
+        self.universe_priced = len(ranked)
+        self._prune(chosen)
         equities = sum(1 for s in chosen if classify_symbol(s) is AssetClass.US_EQUITY)
         crypto = len(chosen) - equities
-        self.scan_note = (f"{len(chosen)} of {len(shortlist)} scanned "
-                          f"({equities} equity, {crypto} crypto), ranked by "
-                          f"traded value")
+        self.scan_note = (f"{len(chosen)} traded of {len(ranked):,} priced from "
+                          f"{len(shortlist):,} listed ({equities} equity, "
+                          f"{crypto} crypto), ranked by traded value")
         self.telemetry.event(Level.INFO, "universe", f"scanned: {self.scan_note}")
+
+    def _prune(self, keep: list[str]) -> None:
+        """Drop state for symbols that are no longer traded.
+
+        The scan ranks the whole listing, so over a long run this session sees
+        far more symbols than it trades, and each one that keeps an engine keeps
+        a bar ring with it -- measured at around 286KB once full. A terminal
+        meant to run for days cannot accumulate those for every symbol that was
+        briefly interesting on a Tuesday.
+
+        A symbol holding a position is never pruned, whatever it ranks: its
+        engine is the thing managing that position.
+        """
+        held = {sym for sym, pos in self.broker.positions.items() if not pos.is_flat}
+        wanted = set(keep) | held | set(self.overnight_holdings)
+        for symbol in [s for s in self.engines if s not in wanted]:
+            self.engines.pop(symbol, None)
+        # Quotes are small but there is one per symbol ever seen, and the scan
+        # now sees the whole market.
+        for symbol in [s for s in self.feed.quotes if s not in wanted]:
+            self.feed.quotes.pop(symbol, None)
+        self.allocator.forget(set(self.allocator.states) - wanted)
 
     async def detach_client(self) -> None:
         if self.client is not None:
@@ -867,6 +934,7 @@ class TradingSession:
         equity = self.equity()
         self.allocator.equity = equity
         self.allocator.cash = float(self.broker.cash)
+        self._roll_trading_day(equity)
         if self.day_start_equity <= 0:
             self.day_start_equity = equity
         if self.allocator.check_daily_loss(self.day_start_equity) and self.running:
@@ -874,6 +942,42 @@ class TradingSession:
         self._equity_curve.append((time.time(), equity))
         if len(self._equity_curve) > 2000:
             self._equity_curve = self._equity_curve[-2000:]
+
+    def _roll_trading_day(self, equity: float) -> None:
+        """Start a new day when the venue's calendar does.
+
+        This is the single thing most likely to break a terminal left running
+        for a week, and it breaks quietly. The daily-loss reference was taken
+        once at startup and never moved, so by Thursday the "daily" loss was
+        measured against Monday's equity -- and once the halt tripped, it was
+        permanent: nothing cleared it, so the book stopped trading after its
+        first bad afternoon and never started again.
+
+        The day boundary comes from the venue's own clock rather than from
+        local midnight, because the trading day this rule is about is the
+        venue's, and a laptop in another timezone would otherwise roll the book
+        in the middle of a session.
+        """
+        stamp = self.market_clock.timestamp or dt.datetime.now(tz=dt.timezone.utc)
+        today = stamp.astimezone(dt.timezone.utc).date().isoformat()
+        if today == self._trading_day:
+            return
+        first = self._trading_day == ""
+        self._trading_day = today
+        self.day_start_equity = equity if equity > 0 else self.day_start_equity
+        self._seeded_from_account = self._seeded_from_account and not first
+        if first:
+            return
+
+        released = self.allocator.roll_session()
+        self.telemetry.event(
+            Level.INFO, "session",
+            f"new trading day {today}: the daily loss budget resets from "
+            f"{equity:,.2f}" + (" and the daily-loss halt is released"
+                                if released else ""))
+        if released:
+            self.telemetry.pulse("BOOK", "decision",
+                                 "daily-loss halt released with the new day", 0.8)
 
     async def _refresh_account_limits(self) -> None:
         """Read the account the venue actually holds.
@@ -957,14 +1061,24 @@ class TradingSession:
 
     async def _run(self) -> None:
         last_universe = 0.0
+        last_full_scan = time.time()
         while self.running:
+            self._loop_beat = time.time()
             try:
                 await self._tick()
                 if time.time() - last_universe > 60:
+                    # The fast loop re-prices only what is traded: one request.
                     await self.refresh_universe()
                     # Cheap: it returns immediately unless a day has passed.
                     await self.refresh_daily_history()
                     last_universe = time.time()
+                if time.time() - last_full_scan > FULL_SCAN_SECONDS:
+                    # The slow loop re-ranks the whole market. Kept off the
+                    # per-minute path because it is fifty requests, and a
+                    # scanner that spends its budget ranking cannot re-price
+                    # the book it is holding.
+                    last_full_scan = time.time()
+                    await self.scan_universe()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -984,6 +1098,7 @@ class TradingSession:
         self.running = True
         self.started_at = time.time()
         self.lamps.session = "ok"
+        self.keep_awake.acquire()
         self.status_message = f"running in {self.broker.mode.value}"
         self.telemetry.event(Level.GOOD, "session",
                              f"session started in {self.broker.mode.value}")
@@ -996,9 +1111,58 @@ class TradingSession:
         await self.feed.start(self.universe)
         self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
 
+    async def supervise(self) -> None:
+        """Restart the trading loop if it has stopped without being asked to.
+
+        The loop catches everything inside its body, so the way it dies is not
+        an exception -- it is the task itself ending: a cancellation from
+        somewhere unexpected, or a failure in the ``await`` between iterations.
+        The session then reports ``running`` with a live websocket, a green
+        health score, and nothing evaluating a single bar. That is the worst
+        failure mode this program has, because every indicator says it is fine.
+
+        Called from the server's own heartbeat rather than from inside the loop,
+        for the obvious reason that a dead loop cannot restart itself.
+        """
+        if not self.running:
+            return
+        task = self._loop_task
+        alive = task is not None and not task.done()
+        stalled = (self._loop_beat > 0
+                   and time.time() - self._loop_beat > LOOP_STALL_SECONDS)
+        if alive and not stalled:
+            return
+
+        if task is not None and task.done():
+            # Surface why, if it left a reason behind.
+            detail = ""
+            with contextlib.suppress(Exception):
+                exc = task.exception()
+                if exc is not None:
+                    detail = f"{type(exc).__name__}: {exc}"
+            self.telemetry.event(
+                Level.ERROR, "session",
+                "the trading loop had stopped and was restarted",
+                detail=detail or "the task ended without raising")
+        elif stalled:
+            self.telemetry.event(
+                Level.ERROR, "session",
+                f"the trading loop has not ticked for "
+                f"{time.time() - self._loop_beat:.0f}s; restarting it")
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+        self.restarts += 1
+        self._loop_beat = time.time()
+        self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
+
     async def stop(self) -> None:
         self.running = False
         self.lamps.session = "off"
+        # Handed back promptly: a stopped session has no claim on the machine.
+        self.keep_awake.release()
         self.status_message = "stopped"
         if self._loop_task:
             self._loop_task.cancel()
@@ -1142,6 +1306,9 @@ class TradingSession:
             "ts": time.time(),
             "running": self.running,
             "uptime": (time.time() - self.started_at) if self.started_at else 0.0,
+            "restarts": self.restarts,
+            "keep_awake": self.keep_awake.as_dict(),
+            "loop_age": (time.time() - self._loop_beat) if self._loop_beat else None,
             "limits": self._limits_block(),
             "regime_census": self._regime_census(),
             "costs": self._cost_summary(),
@@ -1173,6 +1340,8 @@ class TradingSession:
                 # table that stops at the line.
                 "shown": len(rows),
                 "omitted": max(0, omitted),
+                "considered": self.universe_considered,
+                "priced": self.universe_priced,
             },
             "status": self.status_message,
             "venue_error": self.venue_error,
@@ -1193,7 +1362,8 @@ class TradingSession:
             "trade_enabled": bool(self.credential and self.credential.trade_enabled),
             "watchlist": rows,
             "positions": positions,
-            "fills": [f.as_dict() for f in self.broker.fills[-40:]][::-1],
+            # A deque does not slice; the journal shows the newest first.
+            "fills": [f.as_dict() for f in list(self.broker.fills)[-40:]][::-1],
             "events": self.telemetry.events(60, since=since_event),
             "pulses": self.telemetry.pulse_window(pulse_window, since=since_pulse),
             "pulse_seq": self.telemetry.latest_pulse_seq,
@@ -1418,8 +1588,13 @@ class TradingSession:
                     (e.decision for e in self.engines.values())
                     if d.round_trip_cost_bps > 0]
         return {
-            "count": len(fills),
-            "notional": float(sum(f.notional for f in fills)),
+            # Lifetime, not the length of the ring. The ring is bounded so a
+            # week of trading is not a leak; reporting its length as the fill
+            # count would make the session's own history appear to reset.
+            "count": getattr(self.broker, "fills_total", len(fills)),
+            "window": len(fills),
+            "notional": float(getattr(self.broker, "notional_total", 0)
+                              or sum(f.notional for f in fills)),
             "buys": sum(1 for f in fills if f.side == "BUY"),
             "sells": sum(1 for f in fills if f.side == "SELL"),
             "avg_slippage_bps": sum(slips) / len(slips),

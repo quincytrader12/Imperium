@@ -131,6 +131,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item packaging/Start-IMPERIUM.bat dist/IMPERIUM/ -Force
+          Copy-Item packaging/Run-IMPERIUM-247.bat dist/IMPERIUM/ -Force
           Copy-Item README.md dist/IMPERIUM/README.txt -Force
           Remove-Item dist/IMPERIUM/imperium-startup.log -ErrorAction SilentlyContinue
           Compress-Archive -Path dist/IMPERIUM/* -DestinationPath dist/IMPERIUM-windows.zip -Force
@@ -187,7 +188,9 @@ jobs:
 
           1. Download the **.zip**, right-click it, Properties, tick **Unblock**, OK.
           2. Extract it anywhere (Desktop is fine). Do not run it from inside the zip.
-          3. Double-click **Start-IMPERIUM.bat**.
+          3. Double-click **Start-IMPERIUM.bat** for a single run you watch,
+             or **Run-IMPERIUM-247.bat** to keep it running all day and
+             overnight, restarting it if it ever exits.
 
           Your browser opens at http://127.0.0.1:8787/ . The window stays open and
           shows the URL; close it or press Ctrl+C to stop.

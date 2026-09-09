@@ -173,12 +173,76 @@ The overnight drift trade is the one exception, and it is not a loosened limit:
 buying on one session's close and selling on the next session's open is not a
 day trade under the rule at all.
 
+### Running continuously
+
+The terminal is built to be left on. That takes more than not crashing:
+
+- **The trading day rolls over.** The daily-loss reference used to be taken
+  once at startup and never moved, so by Thursday the "daily" loss was measured
+  against Monday's equity — and the halt it applied was permanent. A terminal
+  left running stopped trading after its first bad afternoon and never started
+  again, while still showing a running session, a live feed and a green health
+  score. The day boundary now comes from the venue's clock, and only the
+  daily-loss halt clears with it. A halt a human applied survives every
+  rollover.
+- **A dead trading loop is restarted.** The loop catches everything inside its
+  body, so it does not die by raising — it dies by the task ending, or by
+  wedging on a request that never returns. Both look healthy from every other
+  indicator. A heartbeat distinguishes running from merely existing, and
+  restarts are counted and shown rather than hidden.
+- **Memory is bounded.** Engines, quotes and allocator states are pruned for
+  symbols that fall out of the universe — the sweep sees the whole market every
+  quarter hour, so without this a symbol that was briefly interesting keeps a
+  ~286KB bar ring forever. The fill journal is a bounded ring with lifetime
+  totals kept separately. Nothing holding a position is ever pruned.
+- **The machine is asked to stay awake** while a session runs (Windows only,
+  system but not display). A book holding an overnight position through a
+  suspended laptop never lodges its opening exit. Closing the lid still
+  suspends; nothing here overrides that.
+- **`Run-IMPERIUM-247.bat`** runs it and restarts it if it exits, backing off
+  after repeated immediate failures rather than spinning on a broken binary.
+  It does not survive a reboot or closing its window.
+
+### The frame the UI renders is bounded
+
+The cost of a frame is not what the server spends building it — that is
+milliseconds — but what the browser must parse and lay out before the next one
+arrives. Measured at 900 symbols, the original design sent ~730KB every second
+and the browser spent most of the second on it.
+
+| | before | after |
+|---|---|---|
+| frame at 40 symbols | 62KB | 30KB |
+| frame at 900 symbols | ~730KB | 57KB |
+| frame at 1,500 symbols | ~1.2MB | 63KB |
+| frame → paint | — | 15ms median |
+
+Three bounds: the telemetry rings are deltas against a per-connection cursor;
+full reasoning travels only for the symbols closest to trading plus everything
+holding a position; and the watchlist streams a ranked window rather than the
+universe, saying how many rows it is not showing. Every symbol below the line
+is still evaluated and still counted in the census.
+
 ### The universe is scanned, not hardcoded
 
 The seed list is a starting point. On start the session asks the venue what it
 lists, drops anything not tradable *right now*, and ranks the rest by traded
 value. Anything currently held is kept regardless of rank, because dropping a
 symbol that holds a position leaves the position with nothing managing it.
+
+The sweep covers the **whole tradable listing**, not a shortlist — batched at
+200 symbols per request, because the symbol list travels in the query string
+and one request for the whole market is a URL that is refused before it reaches
+the venue. That refusal would have surfaced as "the scanner found nothing",
+which reads as a quiet market rather than a broken request.
+
+Scanning everything and *trading* everything are different things. The top 150
+by turnover carry an engine and a bar ring; the rest are ranked and dropped.
+The bound is memory, measured rather than guessed: a full ring costs ~286KB, so
+150 symbols is ~45MB of bar history and 1,500 would be 430MB on a laptop that
+is also running a browser. The scan runs on a quarter-hour cycle (~50 requests
+against a budget of 200/minute); the per-minute loop re-prices only what is
+traded, which is one request.
 
 ### Every threshold is measured
 

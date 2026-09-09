@@ -46,6 +46,12 @@ DATA_BASE_URL = "https://data.alpaca.markets"
 #: Alpaca's basic plan allows 200 requests a minute per key.
 RATE_LIMIT_PER_MINUTE = 200
 
+#: Symbols per market-data request. The list travels in the query string, so
+#: this is bounded by URL length rather than by anything the venue documents;
+#: two hundred five-character tickers is around 1.2KB of query, comfortably
+#: inside every limit in the path.
+SNAPSHOT_BATCH = 200
+
 
 class VenueError(Exception):
     """A venue-level failure carrying an operator-facing remedy."""
@@ -540,9 +546,17 @@ class AlpacaClient:
             grouped.setdefault(classify_symbol(symbol), []).append(symbol)
 
         out: dict[str, list[dict[str, Any]]] = {}
+        chunks: list[tuple[AssetClass, list[str]]] = []
         for asset_class, group in grouped.items():
             if asset_class is AssetClass.US_OPTION:
                 continue
+            size = max(1, SNAPSHOT_BATCH)
+            # Not named `start`: that is this method's date-range parameter, and
+            # shadowing it turned the range into an integer offset.
+            for at in range(0, len(group), size):
+                chunks.append((asset_class, group[at:at + size]))
+
+        for asset_class, group in chunks:
             params: dict[str, Any] = {
                 "symbols": ",".join(group),
                 "timeframe": timeframe,
@@ -568,16 +582,33 @@ class AlpacaClient:
                 out[symbol] = rows or []
         return out
 
-    async def snapshots(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        """Latest trade, quote and daily bar per symbol -- the scanner's input."""
+    async def snapshots(self, symbols: list[str], *,
+                        batch: int = SNAPSHOT_BATCH) -> dict[str, dict[str, Any]]:
+        """Latest trade, quote and daily bar per symbol -- the scanner's input.
+
+        Requested in batches because the symbol list travels in the query
+        string. One request for the whole tradable listing would be a URL of
+        tens of kilobytes, which is refused before it reaches the venue -- and
+        the failure looks like "the scanner found nothing" rather than like a
+        request that was too long.
+
+        A batch that fails is logged and skipped rather than abandoning the
+        sweep: eleven thousand symbols minus two hundred is still a scan.
+        """
         grouped: dict[AssetClass, list[str]] = {}
         for symbol in symbols:
             grouped.setdefault(classify_symbol(symbol), []).append(symbol)
 
         out: dict[str, dict[str, Any]] = {}
+        chunks: list[tuple[AssetClass, list[str]]] = []
         for asset_class, group in grouped.items():
             if asset_class is AssetClass.US_OPTION:
                 continue
+            size = max(1, batch)
+            for start in range(0, len(group), size):
+                chunks.append((asset_class, group[start:start + size]))
+
+        for asset_class, group in chunks:
             params: dict[str, Any] = {"symbols": ",".join(group)}
             if asset_class is AssetClass.US_EQUITY:
                 params["feed"] = self.feed

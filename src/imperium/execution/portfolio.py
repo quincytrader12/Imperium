@@ -85,6 +85,9 @@ class PortfolioAllocator:
         #: cannot actually get filled on.
         self.market_open: bool = True
         self.market_note: str = ""
+        #: Who applied the current halt. See set_halt: a daily-loss halt is
+        #: scoped to its day, an operator's halt is not scoped to anything.
+        self.halt_source: str = ""
 
     # -- budgets ---------------------------------------------------------
 
@@ -132,6 +135,24 @@ class PortfolioAllocator:
         return max(0.0, self.cash * (1.0 - self.limits.buying_power_reserve))
 
     # -- admission -------------------------------------------------------
+
+    def forget(self, symbols: set[str]) -> int:
+        """Drop tracking for symbols that are no longer in the universe.
+
+        The scanner now ranks the whole market, so this allocator would
+        otherwise accumulate one state per symbol ever seen, for as long as the
+        process runs. A symbol carrying weight is never forgotten regardless:
+        its state is what the gross-exposure sum is built from, and dropping it
+        would make the book look emptier than it is.
+        """
+        dropped = 0
+        for symbol in list(symbols):
+            state = self.states.get(symbol)
+            if state is None or state.current_weight:
+                continue
+            self.states.pop(symbol, None)
+            dropped += 1
+        return dropped
 
     def observe(self, symbol: str) -> SymbolState:
         state = self.states.get(symbol)
@@ -289,11 +310,22 @@ class PortfolioAllocator:
 
     # -- halt ------------------------------------------------------------
 
-    def set_halt(self, halted: bool, reason: str = "") -> None:
+    def set_halt(self, halted: bool, reason: str = "",
+                 source: str = "operator") -> None:
+        """Halt or release the book, recording who did it.
+
+        The source matters at a session boundary. A halt the daily-loss rule
+        applied is scoped to that day and must clear when the day does, or a
+        terminal left running all week stops trading after its first bad
+        afternoon and never starts again. A halt the operator applied is not
+        scoped to anything and must survive every rollover: releasing it
+        because midnight passed would be the program overruling a human.
+        """
         self.halted = halted
         self.halt_reason = reason
+        self.halt_source = source if halted else ""
         if halted:
-            log.warning("book halted: %s", reason)
+            log.warning("book halted by %s: %s", source, reason)
 
     def check_daily_loss(self, day_start_equity: float) -> bool:
         """Halt the book if the day's loss breaches the limit."""
@@ -302,5 +334,17 @@ class PortfolioAllocator:
         drawdown = (day_start_equity - self.equity) / day_start_equity
         if drawdown >= self.limits.daily_loss_halt:
             self.set_halt(True, f"daily loss {drawdown:.2%} reached the "
-                                f"{self.limits.daily_loss_halt:.2%} limit")
+                                f"{self.limits.daily_loss_halt:.2%} limit",
+                          source="daily_loss")
         return self.halted
+
+    def roll_session(self) -> bool:
+        """Clear a halt that belonged to the day that has just ended.
+
+        Returns True when a halt was released. Only the daily-loss halt is
+        scoped to a day; anything else stays exactly where it is.
+        """
+        if self.halted and self.halt_source == "daily_loss":
+            self.set_halt(False, "")
+            return True
+        return False

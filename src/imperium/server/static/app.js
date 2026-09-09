@@ -421,6 +421,27 @@
     $('hz-reconnects').textContent = h.reconnects;
     $('hz-errors').textContent = h.errors;
 
+    /* Continuous operation, made visible. A loop that stopped and was restarted
+     * looks identical to one that never stopped from every other indicator on
+     * screen, and a terminal quietly restarting itself all night is a terminal
+     * with a problem worth seeing. */
+    var hz = $('hz-uptime');
+    if (hz) {
+      hz.textContent = s.running ? fmtDuration(s.uptime) : 'stopped';
+      var bits = [];
+      if (s.restarts) bits.push(s.restarts + ' restart' + (s.restarts > 1 ? 's' : ''));
+      var ka = s.keep_awake || {};
+      if (ka.active) bits.push('sleep held off');
+      else if (s.running && ka.supported === false) bits.push('sleep not managed');
+      var note = $('hz-uptime-note');
+      if (note) {
+        note.textContent = bits.join(' · ');
+        note.className = s.restarts ? 'warn' : '';
+      }
+      hz.title = (ka.note || '') + (s.loop_age !== null && s.loop_age !== undefined
+        ? '\nlast loop tick ' + s.loop_age.toFixed(1) + 's ago' : '');
+    }
+
     state.ecg.push(h.score);
     if (state.ecg.length > ECG_SAMPLES) state.ecg.shift();
 

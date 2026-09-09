@@ -12,6 +12,7 @@ untested path to the exchange.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import sys
@@ -398,6 +399,13 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                     log.exception("snapshot failed")
                     payload = {"ts": time.time(), "error": str(exc)}
                 await ws.send_json(payload)
+                # Checked on the frame the operator is already paying for. A
+                # dead trading loop cannot notice itself, and every other
+                # indicator on screen -- session running, feed live, health
+                # green -- keeps saying the terminal is fine while it evaluates
+                # nothing at all.
+                with contextlib.suppress(Exception):
+                    await session.supervise()
                 elapsed = time.perf_counter() - start
                 await asyncio.sleep(max(0.05, (1.0 / SNAPSHOT_HZ) - elapsed))
         except WebSocketDisconnect:

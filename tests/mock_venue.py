@@ -27,6 +27,10 @@ KEY = "PKTEST" + "A" * 14
 SECRET = "s3cr3t" + "z" * 34
 LIVE_KEY = "AKLIVE" + "B" * 14
 
+#: Where a real HTTP stack starts refusing. Servers and proxies vary; this is
+#: the conservative end of the range, and the point is that *some* bound exists.
+MAX_URL_BYTES = 8000
+
 EQUITY_ASSETS = [
     {"symbol": "AAPL", "name": "Apple Inc", "class": "us_equity",
      "exchange": "NASDAQ", "tradable": True, "shortable": True,
@@ -75,6 +79,26 @@ class MockVenue:
         self.daytrade_count = 0
         self.rate_remaining = 200
         self.auth_failures = 0
+        #: Extra listed equities, so a test can ask for a market rather than a
+        #: handful. A five-symbol listing cannot show a request that grew too
+        #: long to send, which is the failure batching exists to prevent.
+        self._filler: list[dict[str, Any]] = []
+        #: Symbols per snapshot request, in order, so a test can assert the
+        #: sweep was batched rather than sent as one enormous URL.
+        self.snapshot_batches: list[int] = []
+
+    def list_extra_equities(self, count: int) -> list[str]:
+        """Add ``count`` plain tradable equities to what /v2/assets returns."""
+        made = []
+        for i in range(count):
+            symbol = f"FILL{i:04d}"
+            self._filler.append({
+                "symbol": symbol, "name": f"Filler {i}", "class": "us_equity",
+                "exchange": "NASDAQ", "tradable": True, "shortable": True,
+                "easy_to_borrow": True, "fractionable": True, "status": "active",
+            })
+            made.append(symbol)
+        return made
 
     # -- helpers ---------------------------------------------------------
 
@@ -139,8 +163,9 @@ class MockVenue:
             return self._json([])
         if path == "/v2/assets":
             wanted = params.get("asset_class", "us_equity")
-            return self._json(EQUITY_ASSETS if wanted == "us_equity"
-                              else CRYPTO_ASSETS)
+            if wanted == "us_equity":
+                return self._json(EQUITY_ASSETS + self._filler)
+            return self._json(CRYPTO_ASSETS)
 
         # -- market data --------------------------------------------------
         if path.endswith("/bars"):
@@ -154,6 +179,12 @@ class MockVenue:
 
         if path.endswith("/snapshots"):
             symbols = [s for s in params.get("symbols", "").split(",") if s]
+            # The real venue rejects a request whose query string is too long.
+            # A mock that accepts any length cannot show the bug that batching
+            # exists to prevent, so it enforces the same bound.
+            if len(str(request.url)) > MAX_URL_BYTES:
+                return self._error(414, 41410000, "request URI too long")
+            self.snapshot_batches.append(len(symbols))
             snaps = {}
             for i, symbol in enumerate(symbols):
                 px = 100.0 * (i + 1)

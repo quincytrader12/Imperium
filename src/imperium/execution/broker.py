@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -35,6 +36,11 @@ log = logging.getLogger("imperium.broker")
 
 #: The operator must type this exactly. Not a checkbox, not a click.
 LIVE_CONFIRMATION_PHRASE = "GO LIVE"
+
+
+#: How many fills the book keeps. Enough for the journal panel and for a
+#: representative slippage average, bounded so a week of trading is not a leak.
+FILL_HISTORY = 500
 
 
 class Mode(str, Enum):
@@ -129,7 +135,16 @@ class _BaseBroker:
     def __init__(self, spec: VenueSpec) -> None:
         self.spec = spec
         self.positions: dict[str, Position] = {}
-        self.fills: list[Fill] = []
+        #: Bounded. The UI reads the last forty and the execution-quality
+        #: panel averages over what is here; an unbounded list is a leak on a
+        #: terminal meant to run for days, and worse, the panel's own cost
+        #: grows with it -- it is recomputed on every frame, so a week of fills
+        #: would be re-averaged once a second.
+        self.fills: deque[Fill] = deque(maxlen=FILL_HISTORY)
+        #: Lifetime totals, kept separately so bounding the ring above does not
+        #: silently reset the session's own count of what it has done.
+        self.fills_total: int = 0
+        self.notional_total: Decimal = Decimal("0")
         self.cash: Decimal = Decimal("10000")
         self.realised_pnl: Decimal = Decimal("0")
 
@@ -190,6 +205,8 @@ class _BaseBroker:
                     reference_price=(reference_price if reference_price is not None
                                      else price))
         self.fills.append(fill)
+        self.fills_total += 1
+        self.notional_total += fill.notional
         return fill
 
     async def sync(self) -> None:
