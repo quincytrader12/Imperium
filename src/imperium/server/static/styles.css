@@ -515,3 +515,25 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   color: var(--dim);
   cursor: help;
 }
+
+
+/* ---------- the scanning indicator ---------- */
+/* A pulse rather than a spinner: it says work is happening without implying
+   the operator is waiting for it. The scan is continuous by design. */
+.scanning { color: var(--accent); white-space: nowrap; }
+.scanning i {
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+  animation: scanpulse 1.6s ease-in-out infinite;
+}
+@keyframes scanpulse {
+  0%, 100% { opacity: .25; transform: scale(.8); }
+  50%      { opacity: 1;   transform: scale(1.15); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scanning i { animation: none; opacity: 1; }
+}

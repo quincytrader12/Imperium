@@ -238,6 +238,32 @@
 
   function renderReasoning(s) {
     var host = $('reasoning');
+
+    /* Say that a scan is happening. Without this the panel is a list of
+     * verdicts with no indication that anything is still working through the
+     * market behind them -- and a symbol that has not been reached yet looks
+     * identical to one that was looked at and had nothing to say. */
+    var us = s.universe_scan || {};
+    var note = $('reason-note');
+    if (note) {
+      if (us.ranked) {
+        var pct = Math.round((us.cohort_progress || 0) * 100);
+        note.innerHTML =
+          '<span class="scanning"><i></i>scanning</span> ' +
+          fmtNum(us.cohort_at || 0, 0) + ' of ' + fmtNum(us.ranked, 0) +
+          ' ranked · ' + pct + '% of this pass · ' +
+          fmtCount(us.cohort_passes || 0) + ' complete';
+        note.title =
+          'The ranking covers the whole market; a cohort of ' +
+          fmtNum(us.size || 0, 0) + ' carries engines at a time and rotates ' +
+          'through it. Symbols that were scanned and had nothing to say are ' +
+          'retired and come round again on the next pass; anything holding a ' +
+          'position or worth trading stays.';
+      } else {
+        note.textContent = 'why each symbol is or is not trading';
+        note.title = '';
+      }
+    }
     var items = s.watchlist.map(function (r) { return r.decision; })
       .filter(function (d) { return d && d.symbol; });
 

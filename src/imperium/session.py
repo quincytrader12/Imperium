@@ -93,6 +93,8 @@ RECONCILE_SECONDS = 30
 #: far faster than any of the strategies here can act on anyway.
 EVAL_SLICE = 25
 
+
+
 #: How many symbols carry an engine and a bar ring -- the set actually reasoned
 #: about bar by bar. The scan ranks the entire tradable listing; this bounds
 #: what is kept from it. The bound is memory, measured rather than guessed: a
@@ -100,6 +102,23 @@ EVAL_SLICE = 25
 #: laptop running the terminal alongside a browser can carry all day. Raising it
 #: costs that much again per hundred and 1,500 symbols would be 430MB.
 TRADED_UNIVERSE = 150
+
+#: Symbols carrying an engine at once. The ranking covers the whole market; this
+#: bounds what is resident, because a full bar ring measures about 286KB and an
+#: engine per listed symbol would be gigabytes.
+COHORT_SIZE = TRADED_UNIVERSE
+
+#: How often the cohort rotates. One rotation costs a daily-bar request and a
+#: snapshot -- two against a budget of two hundred a minute -- so a twenty
+#: second cycle walks eleven thousand symbols in about twenty-five minutes
+#: while spending three requests a minute.
+COHORT_SECONDS = 20
+
+#: How many symbols' worth of history the pooled estimates keep. Several
+#: cohorts, so the market-wide figures do not swing as the cursor walks from
+#: mega-caps to micro-caps, and bounded so they do not become the memory the
+#: rotation exists to avoid.
+POOLED_SAMPLE_SYMBOLS = 600
 
 #: How often the whole listing is re-ranked. A full sweep is one request per
 #: two hundred symbols, so re-ranking the US equity market costs around fifty --
@@ -180,6 +199,16 @@ class TradingSession:
         #: a claim.
         self.universe_considered: int = 0
         self.universe_priced: int = 0
+        #: The whole ranked market, as names. Cheap to hold; what costs memory
+        #: is an engine and its bar ring, and only a cohort carries those.
+        self.ranked_universe: list[str] = []
+        self._cohort_cursor: int = 0
+        self._cohort_rotated_at: float = 0.0
+        #: Complete passes over the ranked market.
+        self.cohort_passes: int = 0
+        #: Pooled-estimate inputs, carried across cohort rotations and bounded.
+        self._overnight_samples: dict[str, Any] = {}
+        self._trend_samples: dict[str, Any] = {}
         self.scan_note: str = "not yet scanned"
         self.status_message = "idle"
         self.venue_error: str = ""
@@ -432,24 +461,94 @@ class TradingSession:
                               "seed list")
             return
         ranked.sort(reverse=True)
-        chosen = [symbol for _, symbol in ranked[:limit]]
-        # Keep anything currently held, whatever its rank: dropping a symbol
-        # that holds a position leaves the position with nothing managing it.
-        for symbol, pos in self.broker.positions.items():
-            if not pos.is_flat and symbol not in chosen:
-                chosen.append(symbol)
-
-        self.universe = chosen
+        # The whole ranked market is kept, not just the head of it. Symbols are
+        # cheap to hold as a list of names; what costs memory is an engine and
+        # its bar ring, and those belong to the cohort currently being
+        # evaluated rather than to the ranking.
+        self.ranked_universe = [symbol for _, symbol in ranked]
         self.universe_scanned_at = time.time()
         self.universe_considered = len(shortlist)
         self.universe_priced = len(ranked)
-        self._prune(chosen)
-        equities = sum(1 for s in chosen if classify_symbol(s) is AssetClass.US_EQUITY)
-        crypto = len(chosen) - equities
-        self.scan_note = (f"{len(chosen)} traded of {len(ranked):,} priced from "
-                          f"{len(shortlist):,} listed ({equities} equity, "
-                          f"{crypto} crypto), ranked by traded value")
+        self._cohort_cursor = 0
+        self.cohort_passes = 0
+        await self.rotate_cohort(force=True)
+
+        equities = sum(1 for s in self.ranked_universe
+                       if classify_symbol(s) is AssetClass.US_EQUITY)
+        crypto = len(self.ranked_universe) - equities
+        self.scan_note = (f"{len(ranked):,} priced from {len(shortlist):,} "
+                          f"listed ({equities:,} equity, {crypto} crypto), "
+                          f"ranked by traded value")
         self.telemetry.event(Level.INFO, "universe", f"scanned: {self.scan_note}")
+
+    async def rotate_cohort(self, *, force: bool = False) -> int:
+        """Retire the symbols that did not make the cut, and bring in the next.
+
+        The ranking covers the whole market; this is what walks it. Only a
+        cohort carries engines at once -- a full bar ring costs around 286KB,
+        so an engine per listed symbol would be gigabytes -- and the cursor
+        advances through the ranking so that every symbol is eventually
+        evaluated rather than only the head of it.
+
+        What survives a rotation is what has earned it: anything holding a
+        position, anything the strategies are carrying overnight or across
+        days, and anything whose last decision said it was worth trading. The
+        rest is retired and its memory released. That is the difference between
+        a watchlist and a leaderboard -- a name that was scanned and refused
+        has been answered, and holding it forever would crowd out the names
+        that have not been looked at yet.
+        """
+        if not self.ranked_universe:
+            return 0
+        if not force and time.time() - self._cohort_rotated_at < COHORT_SECONDS:
+            return 0
+
+        # Everything that has earned its place, whatever it ranks.
+        keep = {s for s, pos in self.broker.positions.items() if not pos.is_flat}
+        keep |= set(self.overnight_holdings) | set(self.trend_holdings)
+        keep |= {s for s, e in self.engines.items()
+                 if e.decision.verdict is Verdict.TRADING}
+        keep &= set(self.ranked_universe) | keep      # held names stay regardless
+
+        size = max(1, COHORT_SIZE - len(keep))
+        if self._cohort_cursor >= len(self.ranked_universe):
+            self._cohort_cursor = 0
+            self.cohort_passes += 1
+        fresh = self.ranked_universe[self._cohort_cursor:self._cohort_cursor + size]
+        self._cohort_cursor += len(fresh)
+        if self._cohort_cursor >= len(self.ranked_universe):
+            self._cohort_cursor = 0
+            self.cohort_passes += 1
+
+        retired = [s for s in self.universe if s not in keep and s not in fresh]
+        self.universe = sorted(keep) + [s for s in fresh if s not in keep]
+        self._cohort_rotated_at = time.time()
+        self._sweep_cursor = 0
+        self._prune(self.universe)
+
+        # A cohort with no daily bars cannot be reasoned about by the multi-day
+        # strategy, which is the only one that works on a symbol with no live
+        # stream -- so the bars come with the rotation rather than up to six
+        # hours later.
+        if fresh:
+            await self.refresh_daily_history(force=True)
+
+        if retired:
+            self.telemetry.event(
+                Level.INFO, "universe",
+                f"{len(retired)} symbols scanned and retired, {len(fresh)} "
+                f"brought in — {self.cohort_progress:.0%} through the market",
+                detail="Retired means answered, not rejected forever: it comes "
+                       "round again on the next pass. Anything holding a "
+                       "position or worth trading stays.")
+        return len(fresh)
+
+    @property
+    def cohort_progress(self) -> float:
+        """How far through the ranked market this pass has reached."""
+        if not self.ranked_universe:
+            return 0.0
+        return min(1.0, self._cohort_cursor / len(self.ranked_universe))
 
     def _prune(self, keep: list[str]) -> None:
         """Drop state for symbols that are no longer traded.
@@ -602,6 +701,18 @@ class TradingSession:
             pair = self._trend_observations(symbol, bars)
             if pair is not None:
                 scored[symbol] = pair
+
+        # Accumulated across cohorts, not recomputed from the current one.
+        # The ranking is ordered by traded value, so a cohort is not a random
+        # sample of the market -- the first is mega-caps and the seventieth is
+        # micro-caps, and an estimate rebuilt from each in turn would swing
+        # between them and call the swing a change in the market. Bounded, so
+        # this does not become the memory the cohort exists to avoid.
+        self._overnight_samples.update(splits)
+        self._trend_samples.update(scored)
+        self._forget_oldest_samples()
+        splits = dict(self._overnight_samples)
+        scored = dict(self._trend_samples)
 
         pooled = overnight_mod.pool(splits) if splits else None
         self.pooled_drift = pooled
@@ -805,6 +916,18 @@ class TradingSession:
         if len(scores) < 10:
             return None
         return np.asarray(scores), np.asarray(forward)
+
+    def _forget_oldest_samples(self) -> None:
+        """Bound the pooled samples to a few cohorts' worth.
+
+        Insertion-ordered, so this drops what was measured longest ago. The
+        point is an estimate that spans several cohorts rather than one, not an
+        estimate that remembers the whole market -- that would be exactly the
+        memory the rotation exists to avoid.
+        """
+        for store in (self._overnight_samples, self._trend_samples):
+            while len(store) > POOLED_SAMPLE_SYMBOLS:
+                store.pop(next(iter(store)))
 
     def _update_session_phase(self) -> SessionPhase:
         """Where the clock is, relative to the two auction windows.
@@ -1394,6 +1517,9 @@ class TradingSession:
                     # Cheap: it returns immediately unless a day has passed.
                     await self.refresh_daily_history()
                     last_universe = time.time()
+                # Walk the ranking: retire what has been answered, bring in
+                # what has not been looked at yet.
+                await self.rotate_cohort()
                 if time.time() - last_full_scan > FULL_SCAN_SECONDS:
                     # The slow loop re-ranks the whole market. Kept off the
                     # per-minute path because it is fifty requests, and a
@@ -1666,6 +1792,13 @@ class TradingSession:
                 if self.universe_scanned_at else 0.0,
                 "sweeps": self.sweeps,
                 "sweep_at": self._sweep_cursor,
+                # The cohort walking the ranked market. "150 of 11,005" is the
+                # answer to "is it actually scanning everything".
+                "ranked": len(self.ranked_universe),
+                "cohort_at": self._cohort_cursor,
+                "cohort_passes": self.cohort_passes,
+                "cohort_progress": self.cohort_progress,
+                "pooled_symbols": len(self._trend_samples),
                 "size": len(self.universe),
                 # Streamed vs evaluated. Every symbol below the line is still
                 # being scanned and still counted in the census; it is only the
