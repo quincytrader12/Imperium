@@ -2242,6 +2242,24 @@ class TradingSession:
             "throttled": pause > 0,
         }
 
+    def _quiet_is_expected(self) -> bool:
+        """True when the feed having nothing to send is the correct answer.
+
+        One test, used by both the lamp's explanation and the health score,
+        because they were about to disagree: a cohort holding crypto streams
+        around the clock, so silence there is a fault however shut the equity
+        market is. ``_crypto_only`` is the wrong question -- it asks whether
+        *everything* is crypto, and a mixed cohort would have excused a dead
+        socket every evening.
+        """
+        if not self.running:
+            return True
+        if self.market_clock.is_open:
+            return False
+        streamable = self.universe[:self.feed.symbol_limit]
+        return not any(classify_symbol(s) is AssetClass.CRYPTO
+                       for s in streamable)
+
     def _feed_reason(self) -> str:
         """Why the data lamp reads the way it does, in a sentence.
 
@@ -2270,7 +2288,7 @@ class TradingSession:
         if math.isfinite(age) and age < STALE_AFTER_SECONDS:
             return f"{streamed} symbols streaming live"
 
-        shut = not self.market_clock.is_open and not self._crypto_only()
+        shut = self._quiet_is_expected()
         when = ""
         if shut and self.market_clock.next_open:
             when = f", which opens {self.market_clock.describe()}"
@@ -2292,20 +2310,48 @@ class TradingSession:
 
         A single number nobody can decompose is not diagnostic, so the parts are
         published alongside it.
+
+        Components that cannot apply right now are dropped rather than scored
+        zero, and the weight is renormalised over the rest. This was the bug
+        behind "the health scanner is not functioning": with the equity market
+        shut and nothing to stream, ``data`` and ``link`` were scored zero --
+        together 55% of the weight -- so a program doing exactly the right
+        thing sat pinned at 45%, flat and red, all night. A gauge that reads
+        failure whenever the market is closed is not measuring health; it is
+        measuring the clock, and an operator learns within a day to ignore it.
+
+        Silence is only counted against the program when there is something to
+        be silent about.
         """
         age = self.feed.data_age
-        data = 1.0 if age < 5 else (0.6 if age < STALE_AFTER_SECONDS else 0.0)
-        link = 1.0 if self.feed.connected else 0.0
         venue = {"ok": 1.0, "off": 0.5, "bad": 0.0}.get(self.lamps.venue, 0.5)
         errors = max(0.0, 1.0 - min(1.0, self.feed.errors / 20.0))
         reconn = max(0.0, 1.0 - min(1.0, self.feed.reconnects / 10.0))
-        score = 0.30 * data + 0.25 * link + 0.20 * venue + 0.15 * errors + 0.10 * reconn
+
+        parts: dict[str, float] = {}
+        weights: dict[str, float] = {}
+        # Data and the socket are expected to be quiet when the session is
+        # stopped, or when every market this cohort holds is closed.
+        if not self._quiet_is_expected():
+            parts["data"] = (1.0 if age < 5
+                             else (0.6 if age < STALE_AFTER_SECONDS else 0.0))
+            parts["link"] = 1.0 if self.feed.connected else 0.0
+            weights["data"], weights["link"] = 0.30, 0.25
+        parts["venue"] = venue
+        parts["errors"] = errors
+        parts["reconnects"] = reconn
+        weights["venue"], weights["errors"], weights["reconnects"] = 0.20, 0.15, 0.10
+
+        total = sum(weights.values()) or 1.0
+        score = sum(parts[k] * weights[k] for k in parts) / total
         if self.allocator.halted:
             score = min(score, 0.35)
         return {
             "score": round(score, 3),
-            "components": {"data": data, "link": link, "venue": venue,
-                           "errors": errors, "reconnects": reconn},
+            "components": {k: round(v, 3) for k, v in parts.items()},
+            # Named so the terminal can say a component is not being counted
+            # rather than silently showing fewer bars than last time.
+            "not_applicable": sorted({"data", "link"} - set(parts)),
             "data_age": None if not math.isfinite(age) else round(age, 1),
             "reconnects": self.feed.reconnects,
             "errors": self.feed.errors,

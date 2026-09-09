@@ -143,3 +143,91 @@ async def test_the_explanation_actually_reaches_the_browser():
     assert snapshot["lamps"]["data"] == "off", (
         "the lamp is still honest — the sentence explains it, it does not "
         "dress it up as working")
+
+
+# ---------------------------------------------------------------------------
+# The health score, which had the same defect one layer down: it scored
+# expected silence as failure and sat flat and red all night.
+# ---------------------------------------------------------------------------
+
+
+def test_a_shut_market_does_not_drag_the_health_score_down():
+    """Reported as "the health scanner is not functioning".
+
+    It was functioning. ``data`` and ``link`` are 55% of the weight between
+    them, and with the equity market shut and nothing to stream both scored
+    zero -- so a program doing exactly the right thing was pinned at 45%, red
+    and flat, every night. A gauge that reads failure whenever the market is
+    closed measures the clock, not health, and an operator learns to ignore it
+    within a day.
+    """
+    session = _session(open_market=False)
+    session.running = True
+    session.universe = ["AAPL", "MSFT"]          # no crypto: nothing to stream
+    session.feed.connected = False
+    # Held steady so this measures the market's hours and nothing else. An
+    # unattached key is its own (real) deduction, and would otherwise be the
+    # thing the assertion below is actually reading.
+    session.lamps.venue = "ok"
+
+    health = session._health_score()
+
+    assert "data" in health["not_applicable"]
+    assert "link" in health["not_applicable"]
+    assert health["score"] > 0.8, (
+        f"a correctly idle session still scores {health['score']} — the gauge "
+        f"is reporting the market's hours as the program's health")
+
+
+def test_crypto_in_the_cohort_means_silence_is_still_a_fault():
+    """The distinction that makes the rule safe rather than an excuse.
+
+    Crypto trades around the clock, so a cohort holding any means the feed
+    should be delivering whatever the equity clock says. Excusing silence here
+    would hide a dead socket every evening -- and since crypto is now pinned
+    resident, that is most evenings.
+    """
+    session = _session(open_market=False)
+    session.running = True
+    session.universe = ["AAPL", "BTC/USD"]
+    session.feed.connected = False
+
+    health = session._health_score()
+
+    assert health["not_applicable"] == [], (
+        "the cohort holds crypto, which trades all night — a silent feed is a "
+        "real fault and must count against the score")
+    assert health["score"] < 0.6
+    assert "not a fault" not in session._feed_reason()
+
+
+def test_the_two_readouts_agree_about_whether_silence_is_expected():
+    """The lamp's sentence and the health score must not contradict each other.
+
+    They were computed from different tests -- one asked whether *everything*
+    was crypto, the other whether *anything* was -- so a mixed cohort would
+    have had the panel calling the same silence expected and unhealthy at once.
+    """
+    for open_market, universe in ((False, ["AAPL"]), (False, ["AAPL", "BTC/USD"]),
+                                  (True, ["AAPL"])):
+        session = _session(open_market=open_market)
+        session.running = True
+        session.universe = list(universe)
+        session.feed.connected = True
+        session.feed.symbols = list(universe)
+
+        excused_by_lamp = "not a fault" in session._feed_reason()
+        excused_by_score = bool(session._health_score()["not_applicable"])
+        assert excused_by_lamp == excused_by_score, (
+            f"open={open_market} universe={universe}: the lamp and the health "
+            f"score disagree about whether this silence is expected")
+
+
+def test_a_stopped_session_is_not_scored_as_unhealthy():
+    """Nothing is subscribed because nothing was asked for. That is the Start
+    button not having been pressed, not a fault to report."""
+    session = _session(open_market=True)
+    session.running = False
+    session.lamps.venue = "ok"
+
+    assert session._health_score()["score"] > 0.8

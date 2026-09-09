@@ -117,14 +117,18 @@
     <div class="cluster-wrap" id="cluster-wrap">
       <canvas id="cluster"></canvas>
       <div id="tooltip" hidden></div>
-      <div class="cluster-legend">
-        <span><i style="background:#35a7ff"></i>scan</span>
-        <span><i style="background:#7ce0ff"></i>decision</span>
-        <span><i style="background:#6b7b91"></i>refused</span>
-        <span><i style="background:#c678f0"></i>cap</span>
-        <span><i style="background:#35d69b"></i>order</span>
-        <span><i style="background:#e8b444"></i>warmup</span>
-        <span><i style="background:#ff5c6c"></i>halt</span>
+      <!-- The swatches are painted from the canvas's own palette at startup.
+           Written out here as hex they were a second copy of the same fact,
+           and a legend that disagrees with the field it explains is worse
+           than no legend. -->
+      <div class="cluster-legend" id="cluster-legend">
+        <span data-kind="scan"><i></i>scan</span>
+        <span data-kind="decision"><i></i>decision</span>
+        <span data-kind="refused"><i></i>refused</span>
+        <span data-kind="cap"><i></i>cap</span>
+        <span data-kind="order"><i></i>order</span>
+        <span data-kind="warmup"><i></i>warmup</span>
+        <span data-kind="halt"><i></i>halt</span>
       </div>
     </div>
   </section>

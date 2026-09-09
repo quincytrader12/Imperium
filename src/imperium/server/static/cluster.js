@@ -26,12 +26,18 @@
 (function (global) {
   'use strict';
 
+  /* One colour per pulse kind, and they have to be told apart at a glance in a
+   * field of several hundred. The three that matter most to an operator are
+   * the loudest: a decision was reached, the cost cap refused it, an order
+   * went out. Scanning stays the quiet blue underneath them -- it is the
+   * background hum, and at twenty pulses a second anything brighter would
+   * drown the three events worth looking at. */
   var KIND_COLOR = {
-    scan:     [53, 167, 255],
-    decision: [124, 224, 255],
-    refused:  [107, 123, 145],
-    cap:      [198, 120, 240],
-    order:    [53, 214, 155],
+    scan:     [53, 167, 255],     // blue — the background hum
+    decision: [57, 255, 140],     // neon green — a verdict was reached
+    refused:  [107, 123, 145],    // grey — looked at, nothing there
+    cap:      [190, 60, 255],     // neon purple — the cost gate said no
+    order:    [255, 150, 40],     // bright orange — money actually moved
     warmup:   [232, 180, 68],
     halt:     [255, 92, 108]
   };
@@ -51,6 +57,23 @@
 
   function rnd(a, b) { return a + Math.random() * (b - a); }
 
+  function cssColor(kind) {
+    var c = KIND_COLOR[kind];
+    return c ? 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')' : '';
+  }
+
+  /* Paint the legend from this palette, so the two cannot drift apart. */
+  function paintLegend(root) {
+    if (!root) return 0;
+    var spans = root.querySelectorAll('[data-kind]'), painted = 0;
+    for (var i = 0; i < spans.length; i++) {
+      var dot = spans[i].querySelector('i');
+      var col = cssColor(spans[i].getAttribute('data-kind'));
+      if (dot && col) { dot.style.background = col; painted++; }
+    }
+    return painted;
+  }
+
   function Cluster(canvas, tooltipEl) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
@@ -62,9 +85,22 @@
     this.nodes = {};          // symbol -> {x, y, angle, radius}
     this.hub = { x: 0, y: 0 };
     this.paths = {};          // symbol -> [{x, y}, ...] control points
-    this.networkSprite = null;
+    /* The network is built as several sprite layers rather than one image so
+     * each can drift on its own phase. One image sliding about reads as a
+     * picture being moved; layers at different phases read as depth. */
+    this.networkLayers = null;
     this.neuronSprites = {};  // cache key -> canvas
     this.positions = {};      // symbol -> weight (drives neurons)
+    /* How many times each symbol has been looked at, and what the last look
+     * concluded. The ring grows out of this: a symbol the scanner has been
+     * over many times is drawn as something larger and more alive than one it
+     * has never reached, so the field visibly matures as the sweep works
+     * through the universe instead of looking identical at minute one and
+     * hour six. */
+    this.scans = {};
+    this.lastKind = {};
+    this.lastPulseAt = {};
+    this.totalPulses = 0;
 
     this.orbs = [];
     this.seenSeq = 0;         // monotonic dedupe: overlapping windows are free
@@ -119,7 +155,7 @@
   };
 
   Cluster.prototype.layout = function () {
-    if (!this.w || !this.symbols.length) { this.networkSprite = null; return; }
+    if (!this.w || !this.symbols.length) { this.networkLayers = null; return; }
     var cx = this.w * 0.5, cy = this.h * 0.5;
     this.hub = { x: cx, y: cy };
     var rx = Math.min(this.w * 0.42, this.h * 0.86);
@@ -144,7 +180,7 @@
       this.nodes[sym] = node;
       this.paths[sym] = growPath(node, this.hub, seed);
     }
-    this.networkSprite = null;   // regenerate on the next frame
+    this.networkLayers = null;   // regenerate on the next frame
   };
 
   function hashString(s) {
@@ -206,44 +242,135 @@
     };
   }
 
+  //: How many independent drifting layers the pathway network is split across.
+  //
+  // Three, not one: a single sprite nudged each frame is a picture being slid
+  // about, which the eye reads as exactly that. Split across layers that drift
+  // on different phases, the parallax between them reads as depth and the
+  // filaments look suspended rather than painted on.
+  var NETWORK_LAYERS = 3;
+
   Cluster.prototype.buildNetworkSprite = function () {
-    var c = document.createElement('canvas');
-    c.width = Math.max(1, Math.floor(this.w * this.dpr));
-    c.height = Math.max(1, Math.floor(this.h * this.dpr));
-    var g = c.getContext('2d');
-    g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    var layers = [];
+    for (var L = 0; L < NETWORK_LAYERS; L++) {
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.floor(this.w * this.dpr));
+      c.height = Math.max(1, Math.floor(this.h * this.dpr));
+      var g = c.getContext('2d');
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      layers.push({ canvas: c, ctx: g,
+                    // A phase and a rate per layer, so no two drift together.
+                    phase: L * 2.2, rate: 0.055 + L * 0.021,
+                    ax: 3.5 + L * 1.6, ay: 2.4 + L * 1.1 });
+    }
 
     for (var i = 0; i < this.symbols.length; i++) {
       var sym = this.symbols[i];
       var pts = this.paths[sym];
       if (!pts) continue;
+      var lg = layers[i % NETWORK_LAYERS].ctx;
       /* Two passes: a wide dim halo, then a thin bright core. One pass with a
        * shadow blur is far more expensive and looks flatter. */
-      g.strokeStyle = 'rgba(40, 92, 140, 0.16)';
-      g.lineWidth = 2.4;
-      strokePath(g, pts);
-      g.strokeStyle = 'rgba(90, 170, 235, 0.30)';
-      g.lineWidth = 0.7;
-      strokePath(g, pts);
-
-      var node = this.nodes[sym];
-      g.beginPath();
-      g.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-      g.fillStyle = 'rgba(120, 190, 240, 0.42)';
-      g.fill();
+      lg.strokeStyle = 'rgba(40, 92, 140, 0.16)';
+      lg.lineWidth = 2.4;
+      strokePath(lg, pts);
+      lg.strokeStyle = 'rgba(90, 170, 235, 0.30)';
+      lg.lineWidth = 0.7;
+      strokePath(lg, pts);
+      /* The ring node is NOT baked in any more -- it is drawn per frame from
+       * how often the scanner has been over that symbol. See drawNodes. */
     }
 
-    // The hub.
-    var hg = g.createRadialGradient(this.hub.x, this.hub.y, 0,
-                                    this.hub.x, this.hub.y, 26);
+    // The hub, on the middle layer.
+    var hgctx = layers[Math.floor(NETWORK_LAYERS / 2)].ctx;
+    var hg = hgctx.createRadialGradient(this.hub.x, this.hub.y, 0,
+                                        this.hub.x, this.hub.y, 26);
     hg.addColorStop(0, 'rgba(124, 224, 255, 0.30)');
     hg.addColorStop(1, 'rgba(124, 224, 255, 0)');
-    g.fillStyle = hg;
-    g.beginPath();
-    g.arc(this.hub.x, this.hub.y, 26, 0, Math.PI * 2);
-    g.fill();
+    hgctx.fillStyle = hg;
+    hgctx.beginPath();
+    hgctx.arc(this.hub.x, this.hub.y, 26, 0, Math.PI * 2);
+    hgctx.fill();
 
-    this.networkSprite = c;
+    this.networkLayers = layers;
+  };
+
+  /* How mature a symbol looks, 0..1, from how many times it has been scanned.
+   *
+   * Logarithmic on purpose. Linear growth would have the first cohort dwarf
+   * everything that follows within a minute and then stop meaning anything;
+   * on a log curve the difference between one look and ten is as visible as
+   * between ten and a hundred, which is the comparison an operator actually
+   * makes. */
+  function maturity(count) {
+    if (!count) return 0;
+    // Saturates over a few hundred looks rather than a few dozen, so the field
+    // keeps growing across a session instead of reaching its final appearance
+    // in the first minute and then standing still again.
+    return Math.min(1, Math.log(1 + count) / Math.log(1 + 400));
+  }
+
+  /* The ring, drawn per frame rather than baked into the sprite.
+   *
+   * This is what makes the field show its work: a symbol nothing has reached
+   * yet is a bare point, and one the sweep has been over many times has grown
+   * a bright soma with a halo. Without it the cluster looks identical after
+   * six hours of scanning as it did at startup, which is the complaint this
+   * answers -- the panel was busy but never *changed*.
+   *
+   * Cheap: one arc and one gradient per symbol, and the gradient only for the
+   * ones that have earned a halo. */
+  Cluster.prototype.drawNodes = function (ctx, now) {
+    for (var i = 0; i < this.symbols.length; i++) {
+      var sym = this.symbols[i];
+      var node = this.nodes[sym];
+      if (!node) continue;
+      var d = this.nodeDrift(i, now);
+      var x = node.x + d.x, y = node.y + d.y;
+      var m = maturity(this.scans[sym] || 0);
+
+      // Recency, so a symbol that was just looked at flares briefly and then
+      // settles back to its accumulated size. A field where everything is the
+      // same brightness cannot show where the sweep is right now.
+      var since = now - (this.lastPulseAt[sym] || -1e9);
+      var fresh = since < 1400 ? Math.pow(1 - since / 1400, 2) : 0;
+
+      var col = KIND_COLOR[this.lastKind[sym]] || [120, 190, 240];
+      var r = node.radius * (0.72 + m * 0.95) + fresh * 1.8;
+
+      if (m > 0.02 || fresh > 0) {
+        /* Restrained on purpose. The halo is what fills the panel, and at a
+         * hundred and fifty nodes a generous one turns the ring into a band of
+         * light that hides both the filaments under it and the orbs crossing
+         * them. Growth has to be legible, not loud. */
+        var halo = r * (1.8 + m * 1.3);
+        var g = ctx.createRadialGradient(x, y, 0, x, y, halo);
+        var a = (0.04 + m * 0.10 + fresh * 0.26);
+        g.addColorStop(0, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a + ')');
+        g.addColorStop(1, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, halo, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' +
+                      (0.32 + m * 0.40 + fresh * 0.26) + ')';
+      ctx.fill();
+    }
+  };
+
+  /* A slow per-node wander. Seeded off the index so neighbours never move
+   * together -- a ring drifting in unison is a rotating picture, not a set of
+   * suspended cells. */
+  Cluster.prototype.nodeDrift = function (i, now) {
+    var t = now / 1000;
+    return {
+      x: Math.sin(t * (0.17 + (i % 7) * 0.013) + i * 1.7) * (1.6 + (i % 3) * 0.7),
+      y: Math.cos(t * (0.13 + (i % 5) * 0.011) + i * 2.3) * (1.4 + (i % 4) * 0.6)
+    };
   };
 
   function strokePath(g, pts) {
@@ -400,6 +527,13 @@
       if (!keys.length) return;
       pts = this.paths[keys[hashString(pulse.symbol) % keys.length]];
     }
+    /* The ring is built out of this: every pulse is another look at that
+     * symbol, and the node grows and takes the colour of the last verdict. */
+    this.scans[pulse.symbol] = (this.scans[pulse.symbol] || 0) + 1;
+    this.lastKind[pulse.symbol] = pulse.kind;
+    this.lastPulseAt[pulse.symbol] = now;
+    this.totalPulses++;
+
     var depth = rnd(0.35, 1.0);            // near and sharp, or far and dim
     this.orbs.push({
       pts: pts,
@@ -432,10 +566,30 @@
     ctx.fillStyle = 'rgba(6, 8, 12, 0.34)';
     ctx.fillRect(0, 0, this.w, this.h);
 
-    if (!this.networkSprite && this.symbols.length) this.buildNetworkSprite();
-    if (this.networkSprite) {
-      ctx.drawImage(this.networkSprite, 0, 0, this.w, this.h);
+    if (!this.networkLayers && this.symbols.length) this.buildNetworkSprite();
+    if (this.networkLayers) {
+      /* Each layer drifts on its own phase. A translate around a cached image
+       * costs nothing -- the geometry is not rebuilt -- so the whole network
+       * breathes for the price of three drawImage calls.
+       *
+       * The network also brightens with how hard the scanner is working: at
+       * rest it is a faint skeleton, under a heavy sweep it lights up. That is
+       * the difference between a panel that is running and one that is merely
+       * displayed. */
+      var load = Math.min(1, this.pulseRate / 25);
+      var t = now / 1000;
+      for (var L = 0; L < this.networkLayers.length; L++) {
+        var lay = this.networkLayers[L];
+        var dx = Math.sin(t * lay.rate * Math.PI * 2 + lay.phase) * lay.ax;
+        var dy = Math.cos(t * lay.rate * Math.PI * 2 * 0.83 + lay.phase) * lay.ay;
+        ctx.globalAlpha = 0.62 + 0.38 * load;
+        ctx.drawImage(lay.canvas, dx, dy, this.w, this.h);
+      }
+      ctx.globalAlpha = 1;
     }
+
+    // The ring, sized by how often each symbol has been scanned.
+    this.drawNodes(ctx, now);
 
     this.drawNeurons(ctx, now);
 
@@ -463,7 +617,12 @@
         if (d < hoverDist) { hoverDist = d; hover = o; isHover = true; }
       }
 
-      var core = CORE_RADIUS * (0.6 + o.depth * 0.7) * (isHover ? 1.7 : 1);
+      /* An orb on a well-worked symbol is a little more substantial than one
+       * on a symbol the sweep has just reached. Bounded tightly -- the orb
+       * budget is measured against the bloom, so letting these grow freely
+       * would saturate the field at exactly the moment it gets busy. */
+      var grow = 1 + 0.30 * maturity(this.scans[o.symbol] || 0);
+      var core = CORE_RADIUS * (0.6 + o.depth * 0.7) * grow * (isHover ? 1.7 : 1);
       var bloom = core * BLOOM_MULTIPLE;
       var a = isHover ? Math.min(1, alpha * 2.1) : alpha;
 
@@ -500,9 +659,17 @@
       // A slow breath, so a held position reads as alive without animating the
       // geometry itself.
       var breath = 1 + 0.05 * Math.sin(now / 900 + hashString(sym) % 10);
-      var w = sprite.width * breath, h = sprite.height * breath;
+      // Grown by attention as well as by size: a position the scanner keeps
+      // returning to is drawn larger than one it has looked at twice.
+      var grown = 1 + 0.22 * maturity(this.scans[sym] || 0);
+      var w = sprite.width * breath * grown, h = sprite.height * breath * grown;
+      // Drifts with its node, so the cell and the filament it sits on stay
+      // together. A neuron pinned to a moving ring would swim off its own
+      // pathway.
+      var idx = this.symbols.indexOf(sym);
+      var d = this.nodeDrift(idx < 0 ? i : idx, now);
       ctx.globalAlpha = 0.82;
-      ctx.drawImage(sprite, node.x - w / 2, node.y - h / 2, w, h);
+      ctx.drawImage(sprite, node.x + d.x - w / 2, node.y + d.y - h / 2, w, h);
       ctx.globalAlpha = 1;
     }
   };
@@ -526,4 +693,7 @@
 
   global.Cluster = Cluster;
   global.Cluster.MAX_REPLAY = MAX_REPLAY;
+  global.Cluster.KIND_COLOR = KIND_COLOR;
+  global.Cluster.paintLegend = paintLegend;
+  global.Cluster.maturity = maturity;
 })(window);

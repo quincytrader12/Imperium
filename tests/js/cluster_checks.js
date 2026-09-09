@@ -142,11 +142,83 @@ const c4 = new window.Cluster(canvas, null);
 c4.resize();
 c4.setUniverse(['BTCUSDT', 'ETHUSDT']);
 c4.buildNetworkSprite();
-const sprite = c4.networkSprite;
+const sprite = c4.networkLayers;
 c4.setUniverse(['BTCUSDT', 'ETHUSDT']);        // same universe
-check('sprite_kept_when_universe_unchanged', c4.networkSprite === sprite);
+check('sprite_kept_when_universe_unchanged', c4.networkLayers === sprite);
 c4.setUniverse(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
-check('sprite_invalidated_when_universe_changes', c4.networkSprite === null);
+check('sprite_invalidated_when_universe_changes', c4.networkLayers === null);
+
+/* The network is split across layers so each can drift on its own phase. One
+ * layer would make the drift a picture being slid about. */
+c4.setUniverse(['A', 'B', 'C', 'D', 'E', 'F']);
+c4.buildNetworkSprite();
+check('network_is_layered_for_independent_drift',
+      Array.isArray(c4.networkLayers) && c4.networkLayers.length > 1,
+      'layers: ' + (c4.networkLayers || []).length);
+const phases = (c4.networkLayers || []).map(l => l.phase + ':' + l.rate);
+check('no_two_layers_drift_together',
+      new Set(phases).size === phases.length, phases.join(' '));
+
+/* The drift has to actually move, and stay small: a ring that wanders far
+ * detaches its nodes from the filaments they sit on. */
+const d0 = c4.nodeDrift(0, 0), d1 = c4.nodeDrift(0, 2500);
+check('nodes_drift_over_time', Math.abs(d0.x - d1.x) + Math.abs(d0.y - d1.y) > 0.05,
+      JSON.stringify([d0, d1]));
+let maxDrift = 0;
+for (let i = 0; i < 40; i++) {
+  for (let t = 0; t < 20000; t += 250) {
+    const d = c4.nodeDrift(i, t);
+    maxDrift = Math.max(maxDrift, Math.hypot(d.x, d.y));
+  }
+}
+check('drift_stays_bounded', maxDrift < 8, 'max ' + maxDrift.toFixed(2));
+check('neighbouring_nodes_do_not_drift_in_lockstep',
+      Math.abs(c4.nodeDrift(0, 1000).x - c4.nodeDrift(1, 1000).x) > 0.01);
+
+/* The ring grows out of how often each symbol has been scanned. Without this
+ * the field looks the same after six hours as it did at startup, which is the
+ * complaint it answers. */
+const c5 = new window.Cluster(canvas, null);
+c5.resize();
+c5.setUniverse(['A', 'B']);
+c5.spawn({ symbol: 'A', kind: 'scan', intensity: 1 }, 1000);
+check('a_pulse_is_counted_against_its_symbol', c5.scans.A === 1);
+check('an_unscanned_symbol_stays_at_zero', !c5.scans.B);
+for (let i = 0; i < 50; i++) c5.spawn({ symbol: 'A', kind: 'scan', intensity: 1 }, 1000);
+check('scanning_accumulates', c5.scans.A === 51, 'scans ' + c5.scans.A);
+check('the_last_verdict_is_remembered', c5.lastKind.A === 'scan');
+c5.spawn({ symbol: 'A', kind: 'order', intensity: 1 }, 2000);
+check('a_new_verdict_replaces_the_last', c5.lastKind.A === 'order');
+
+/* Growth must be gradual and bounded, or the first cohort saturates within a
+ * minute and the ring stops meaning anything for the rest of the session. */
+const m = window.Cluster.maturity;
+check('maturity_is_zero_before_anything_is_scanned', m(0) === 0);
+check('maturity_never_exceeds_one', m(1e9) <= 1);
+check('maturity_rises_with_scanning', m(200) > m(20) && m(20) > m(2));
+check('maturity_is_not_saturated_by_one_cohort', m(60) < 0.85,
+      'm(60)=' + m(60).toFixed(3));
+
+/* The legend is painted from this palette rather than carrying its own copy,
+ * so the two cannot drift apart. */
+const dots = {};
+const fakeLegend = {
+  querySelectorAll: () => ['scan', 'decision', 'cap', 'order'].map(k => ({
+    getAttribute: () => k,
+    querySelector: () => ({ style: (dots[k] = { background: '' }) })
+  }))
+};
+const painted = window.Cluster.paintLegend(fakeLegend);
+check('the_legend_is_painted_from_the_palette', painted === 4, 'painted ' + painted);
+check('decision_is_neon_green', /^rgb\(57, ?255, ?140\)$/.test(dots.decision.background),
+      dots.decision.background);
+check('cap_is_neon_purple', /^rgb\(190, ?60, ?255\)$/.test(dots.cap.background),
+      dots.cap.background);
+check('order_is_bright_orange', /^rgb\(255, ?150, ?40\)$/.test(dots.order.background),
+      dots.order.background);
+check('the_three_loud_kinds_are_distinct',
+      new Set([dots.decision.background, dots.cap.background,
+               dots.order.background, dots.scan.background]).size === 4);
 
 console.log(JSON.stringify(results, null, 2));
 process.exit(results.every(r => r.pass) ? 0 : 1);

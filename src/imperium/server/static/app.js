@@ -519,8 +519,22 @@
     /* A soft area under the line instead of shadowBlur. The glow was the most
      * expensive thing on this canvas -- recomputed over the whole path every
      * second -- and a fill is close to free. */
-    var grad = ctx.createLinearGradient(0, 0, 0, ht);
-    grad.addColorStop(0, col + '44');
+    /* Anchored to the trace, not to the canvas. Run from y=0 and the bright
+     * end of the gradient sits above the line, in the region that is never
+     * filled -- so the fill under a low score was drawn almost entirely in the
+     * transparent tail and the area read as empty. */
+    var top = ht, bot = 0;
+    for (var g0 = 0; g0 < n; g0++) {
+      var yy = ht - 3 - state.ecg[g0] * (ht - 8);
+      if (yy < top) top = yy;
+      if (yy > bot) bot = yy;
+    }
+    var grad = ctx.createLinearGradient(0, top, 0, Math.max(bot + 6, ht));
+    grad.addColorStop(0, col + '4c');
+    // A mid stop, so a trace that spends most of its range low still has a
+    // visible body under it. With two stops the fill under a falling line sits
+    // entirely in the transparent tail.
+    grad.addColorStop(0.6, col + '22');
     grad.addColorStop(1, col + '00');
     ctx.beginPath();
     ctx.moveTo(pointAt(0).x, ht);
@@ -1189,6 +1203,12 @@
   }
 
   initFolding();
+
+  /* The legend takes its swatches from the canvas palette rather than carrying
+   * its own copy of the same hex codes. */
+  if (window.Cluster && window.Cluster.paintLegend) {
+    window.Cluster.paintLegend(document.getElementById('cluster-legend'));
+  }
 
   window.addEventListener('resize', function () { cluster.resize(); });
   document.addEventListener('visibilitychange', function () {
