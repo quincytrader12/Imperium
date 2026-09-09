@@ -86,6 +86,12 @@ class Decision:
     overnight_nights: int = 0
     #: Market-on-close / market-on-open, when the overnight trade is live.
     entry_order: str = ""
+    #: True when the decision is to leave an existing position exactly as it
+    #: is. Distinct from both "trade to this weight" and "rejected": a carried
+    #: position asked to re-target itself pays a spread every evaluation on a
+    #: delta of nearly nothing, which turns a low-turnover strategy into a
+    #: high-turnover one without changing a single line of its reasoning.
+    hold: bool = False
     #: The trend strategy's own state, when it owns this symbol.
     trend_score: float = 0.0
     trend_drift_bps: float = 0.0
@@ -149,6 +155,7 @@ class Decision:
             "overnight_bps": round(self.overnight_bps, 2),
             "overnight_nights": self.overnight_nights,
             "entry_order": self.entry_order,
+            "hold": self.hold,
             "trend_score": round(self.trend_score, 3),
             "trend_drift_bps": round(self.trend_drift_bps, 3),
             "trend_min_hold_days": round(self.trend_min_hold_days, 1),
@@ -451,6 +458,7 @@ class SymbolEngine:
             # branch above would have taken it.
             held_weight = self.allocator.observe(self.symbol).current_weight
             d.verdict = Verdict.TRADING
+            d.hold = True
             d.target_weight = held_weight
             d.raw_weight = held_weight
             d.reason = (

@@ -989,6 +989,14 @@ class TradingSession:
     async def _act_on(self, decision: Decision) -> None:
         if decision.verdict is not Verdict.TRADING:
             return
+        if decision.hold:
+            # Leave it exactly as it is. Re-targeting a carried position to the
+            # weight it already holds looks like a no-op and is not: equity
+            # moves with every fill and every price tick, so the delta is never
+            # quite zero, and each evaluation pays a spread to trade a fraction
+            # of a share. Over a session that is a low-turnover strategy
+            # quietly becoming a high-turnover one.
+            return
         price = self.feed.quote(decision.symbol).last
         if price <= 0:
             return

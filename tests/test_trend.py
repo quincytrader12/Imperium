@@ -484,3 +484,96 @@ def test_the_standard_error_is_robust_to_heteroskedasticity():
     assert robust > classical * 1.5, "the fixture must separate the two"
     assert abs(pooled.t_stat) == pytest.approx(abs(beta / robust), rel=1e-6)
     assert abs(pooled.t_stat) != pytest.approx(abs(beta / classical), rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_a_dead_trend_closes_its_position_through_the_session():
+    """The lifecycle end to end, not just the engine's opinion of it.
+
+    A strategy that can open a position and cannot close it is worse than one
+    that never opened it. The exit path runs through a different branch of
+    _act_on than the entry -- a target of zero rather than a positive weight --
+    so it is exercised rather than assumed.
+    """
+    import time as _t
+
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.broker.cash = Decimal("10000")
+    q = session.feed.quote("PLTR")
+    q.last, q.bid, q.ask, q.updated_at = 20.0, 19.99, 20.01, _t.time()
+    await session.broker.apply_target("PLTR", 0.1, 20.0, 10_000.0)
+
+    engine = session.engine("PLTR")
+    engine.decision.strategy = "trend"
+    session.trend_holdings["PLTR"] = _t.time() - 5 * 86_400
+    session._sync_trend_holdings()
+    assert engine.trend_held and engine.trend_days_held == pytest.approx(5.0, abs=0.1)
+
+    # A pooled premium that is real, and a symbol whose trend has turned down.
+    engine.pooled_trend = PooledTrend(15.0, 8.0, 9000, 40)
+    engine.daily_bars = daily(200, drift_per_day=-0.004, seed=5)
+    price = 20.0
+    for k in range(engine.params.warmup_bars + 5):
+        engine.series.add(Bar(k * 60_000, price, price * 1.001, price * 0.999,
+                              price, 1000.0, closed=True))
+    engine.set_book(19.99, 20.01)
+
+    decision = engine.evaluate()
+    assert decision.strategy == "trend"
+    assert decision.trend_phase == TrendPhase.EXIT.value
+    assert decision.verdict is Verdict.TRADING
+    assert decision.target_weight == 0.0
+
+    await session._act_on(decision)
+
+    assert session.broker.positions["PLTR"].is_flat
+    assert session.broker.fills[-1].side == "SELL"
+    # And the session stops carrying it, so the clock does not keep running on
+    # a position that no longer exists.
+    session._sync_trend_holdings()
+    assert "PLTR" not in session.trend_holdings
+    assert not engine.trend_held
+
+
+@pytest.mark.asyncio
+async def test_a_carried_position_is_not_re_entered_every_day():
+    """Prevents the failure that would quietly eat the account.
+
+    A low-turnover strategy that re-derives an entry each time it looks is a
+    high-turnover strategy paying a round trip a day. Once carried, the target
+    is the position already held, so the broker computes no delta and sends
+    nothing.
+    """
+    import time as _t
+
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.broker.cash = Decimal("10000")
+    q = session.feed.quote("PLTR")
+    q.last, q.bid, q.ask, q.updated_at = 20.0, 19.99, 20.01, _t.time()
+    await session.broker.apply_target("PLTR", 0.1, 20.0, 10_000.0)
+    session.allocator.observe("PLTR").current_weight = 0.1
+    session.allocator.observe("PLTR").admitted = True
+    session.allocator.equity = 10_000.0
+
+    engine = session.engine("PLTR")
+    engine.decision.strategy = "trend"
+    session.trend_holdings["PLTR"] = _t.time() - 2 * 86_400
+    session._sync_trend_holdings()
+    engine.pooled_trend = PooledTrend(15.0, 8.0, 9000, 40)
+    engine.daily_bars = daily(200, drift_per_day=0.003, seed=6)
+    price = 20.0
+    for k in range(engine.params.warmup_bars + 5):
+        engine.series.add(Bar(k * 60_000, price, price * 1.001, price * 0.999,
+                              price, 1000.0, closed=True))
+    engine.set_book(19.99, 20.01)
+
+    fills_before = len(session.broker.fills)
+    for _ in range(5):
+        await session._act_on(engine.evaluate())
+
+    assert engine.decision.trend_phase in (TrendPhase.HOLDING.value,
+                                           TrendPhase.MATURE.value)
+    assert len(session.broker.fills) == fills_before, (
+        "a carried position must not be re-bought every time it is evaluated")
