@@ -161,6 +161,59 @@ worse-priced stock substitute. Deep-in-the-money options are stock substitutes
 with a wider spread. There is no version of this that works, so the program
 does not pretend otherwise.
 
+### A small account is not a scaled-down large one
+
+The limits are percentages, and a percentage of a small balance can be an
+amount no venue will trade. On a $70 account the base limits allow five
+positions of $11 each, and a 2%-ATR name sizes to **$7.00**. Alpaca accepts
+that as a fractional order, which is exactly the problem — it looks like it
+worked. A $7 position cannot be held overnight (auction orders take whole
+shares), cannot be taken at all in a non-fractionable name, and cannot be
+trimmed.
+
+So the balance decides how many positions the book can carry, and concentration
+follows from that:
+
+| equity | positions | max position | risk/trade | daily halt |
+|---|---|---|---|---|
+| $70 | 2 | $28.00 (40%) | 1.25% | 10% |
+| $120 | 3 | $32.00 (27%) | 0.83% | 6.7% |
+| $200+ | 5 | 20% | 0.50% | 4% |
+
+It converges exactly on the base limits above ~$160 and changes nothing for an
+account of any ordinary size. It is re-derived on every tick from the book
+being traded, so an account that grows spreads back out on its own and one that
+draws down concentrates again.
+
+**The floor.** $25 is the smallest position this program will place, set by
+three venue facts rather than by preference: fractional fills stop at $1 of
+notional so anything smaller cannot be trimmed; auction orders take whole
+shares; and non-fractionable symbols need whole shares for any order. $25 buys
+one share of a large part of the market. A position sized below it is raised to
+it when that stays inside the per-symbol cap *and* risks no more than 2× the
+per-trade budget at its stop — and refused, with the arithmetic, when it does
+not. At $70 that means calm names trade at $25 and volatile ones are declined:
+
+| ATR | stop | size | risk at stop | |
+|---|---|---|---|---|
+| 1% | 2.5% | $25.00 | 0.89% | raised to the floor |
+| 2% | 5.0% | $25.00 | 1.79% | raised to the floor |
+| 4% | 10.0% | — | — | refused: too much risk for the smallest tradeable size |
+
+**Deliberately not scaled:** `atr_stop_multiple` and `target_volatility`. Both
+describe the market, not the wallet. How far a stock moves before a stop is a
+property of the stock, and widening it because the account is small would
+*cut* the position for a given risk budget — the opposite of what a small
+account needs. The lever that makes positions viable is the risk budget, and
+that is scaled.
+
+**What a $70 account cannot do.** Hold any share priced above $28 overnight, at
+any weight, because the closing auction is whole-share only. That excludes most
+of the market, and the terminal says so per symbol rather than showing an
+unexplained absence of overnight trades. This is also why the overnight
+strategy matters at this size: it is not a day trade, so it is the one strategy
+a sub-$25,000 account can run every night without touching the PDT ceiling.
+
 ### Pattern-day-trader limits
 
 A US margin account under $25,000 may make three day trades in five rolling

@@ -25,7 +25,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from imperium.execution.risk import RiskLimits
+from imperium.execution.risk import (
+    FLOOR_RISK_MULTIPLE, VIABLE_POSITION_NOTIONAL, RiskLimits,
+)
 
 
 @dataclass(frozen=True)
@@ -91,10 +93,21 @@ def size_position(
     seconds_per_year: int,
     bar_seconds: int,
     allows_short: bool,
+    equity: float = 0.0,
+    position_floor: float = VIABLE_POSITION_NOTIONAL,
 ) -> SizingResult:
     """Return a target portfolio weight in [0, max_position_weight].
 
     ``signal`` is the strategy's conviction in [-1, +1].
+
+    ``equity`` and ``position_floor`` add the bound that only exists on a small
+    account: a weight is a fraction, and a fraction of a small balance can be
+    an amount no venue will trade. On a $70 book a 2%-ATR name sizes to $17.50
+    -- Alpaca accepts that as a fractional order, and it still cannot be held
+    overnight, cannot be taken at all in a non-fractionable name, and cannot be
+    trimmed. Below the floor the position is either raised to it, if that stays
+    inside the per-symbol cap, or refused with the reason -- never quietly
+    submitted at a size that cannot do what the strategy intends.
     """
     if not math.isfinite(signal) or signal == 0.0:
         return SizingResult(0.0, "no signal", 0.0, 0.0, float("nan"),
@@ -145,6 +158,57 @@ def size_position(
         binding = "volatility target"
         reason = (f"{limits.target_volatility:.0%} target vol against "
                   f"{ann_vol:.0%} annualised allows {weight:.1%}")
+
+    # The small-account bound. Applied last, because it is about what the venue
+    # will do with the result rather than about how large the position should be.
+    if equity > 0 and position_floor > 0 and weight > 0:
+        floor_weight = position_floor / equity
+        if weight < floor_weight:
+            # What raising it to the floor would actually risk: the position is
+            # still bounded by its stop, so the loss that matters is the weight
+            # multiplied by the stop distance -- not the weight itself. A name
+            # with a 5% stop can be raised a long way for very little; one with
+            # a 60% stop cannot be raised at all.
+            stop_fraction = ((limits.atr_stop_multiple * atr) / price
+                             if math.isfinite(atr) and atr > 0 and price > 0
+                             else float("nan"))
+            floor_risk = (floor_weight * stop_fraction
+                          if math.isfinite(stop_fraction) else float("nan"))
+            risk_ceiling = limits.risk_per_trade * FLOOR_RISK_MULTIPLE
+
+            too_concentrated = floor_weight > limits.max_position_weight
+            too_risky = math.isfinite(floor_risk) and floor_risk > risk_ceiling
+
+            if too_concentrated or too_risky:
+                why = ("would take "
+                       f"{floor_weight:.0%} of the account, past the "
+                       f"{limits.max_position_weight:.0%} per-symbol cap"
+                       if too_concentrated else
+                       f"would risk {floor_risk:.1%} of the account at its stop, "
+                       f"past the {risk_ceiling:.1%} this account will spend on "
+                       f"one trade")
+                return SizingResult(
+                    0.0, "account too small", float(vol_weight),
+                    float(risk_weight if math.isfinite(risk_weight) else -1.0),
+                    float(ann_vol),
+                    f"this symbol sizes to ${weight * equity:,.2f}, below the "
+                    f"${position_floor:,.0f} a venue will treat as a position, "
+                    f"and raising it {why}. A ${equity:,.2f} account cannot "
+                    f"carry this name at this volatility — that is arithmetic, "
+                    f"not a refusal to trade.")
+
+            spent = (f"{floor_risk:.2%}" if math.isfinite(floor_risk)
+                     else "an unmeasured amount")
+            reason = (
+                f"raised from {weight:.1%} (${weight * equity:,.2f}) to the "
+                f"${position_floor:,.0f} smallest position this venue can "
+                f"actually work with — {floor_weight:.1%} of a ${equity:,.2f} "
+                f"account, risking {spent} at its stop against a "
+                f"{limits.risk_per_trade:.2%} budget. Below this a position "
+                f"cannot be held overnight, cannot be taken in a "
+                f"non-fractionable name, and cannot be trimmed.")
+            weight = floor_weight
+            binding = "venue minimum"
 
     return SizingResult(
         weight=float(weight), binding=binding,

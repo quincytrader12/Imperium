@@ -31,6 +31,7 @@ from imperium.execution.broker import (
 )
 from imperium.execution.engine import Decision, SymbolEngine
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
+from imperium.execution import risk as risk_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
@@ -129,7 +130,13 @@ class TradingSession:
                  limits: RiskLimits | None = None,
                  params: StrategyParams | None = None) -> None:
         self.spec: VenueSpec = registry.get(venue_id)
-        self.limits = limits or RiskLimits()
+        #: The limits as configured, before any account-size adjustment. Kept
+        #: so re-scaling always derives from the original rather than
+        #: compounding on its own previous output.
+        self.base_limits = limits or RiskLimits()
+        self.limits = self.base_limits
+        #: How those limits were adjusted for this balance, and why.
+        self.account_scale: risk_mod.AccountScale | None = None
         self.params = params or StrategyParams()
         self.telemetry = TelemetryHub()
         self.allocator = PortfolioAllocator(self.limits)
@@ -934,6 +941,14 @@ class TradingSession:
         equity = self.equity()
         self.allocator.equity = equity
         self.allocator.cash = float(self.broker.cash)
+        # Scaled on the book that is actually being traded, not on the account
+        # record. In live mode they are the same number. In paper they are not:
+        # the venue's own paper balance never moves, because no order is sent to
+        # it, so scaling on the account would freeze a paper book at its opening
+        # limits however much it grew -- and growing out of those limits is the
+        # entire point. The book starts from the real balance because
+        # absorb_account seeds it.
+        self.apply_account_scale(equity)
         self._roll_trading_day(equity)
         if self.day_start_equity <= 0:
             self.day_start_equity = equity
@@ -942,6 +957,48 @@ class TradingSession:
         self._equity_curve.append((time.time(), equity))
         if len(self._equity_curve) > 2000:
             self._equity_curve = self._equity_curve[-2000:]
+
+    def apply_account_scale(self, equity: float) -> bool:
+        """Re-derive the limits for what this balance can actually trade.
+
+        A percentage framework stops working quietly at a small balance: the
+        base limits allow five positions of $11 on a $70 account, and $11 is
+        not a position -- it cannot be held overnight, cannot be taken in a
+        non-fractionable name, and cannot be trimmed. The account's size decides
+        how many positions it can carry, and concentration follows from that.
+
+        Re-derived rather than set once, because the balance moves and the whole
+        point is that it grows: an account that reaches a few hundred dollars
+        should spread back out on its own, and one that draws down should
+        concentrate again rather than keep sizing for money it no longer has.
+
+        The engines and the allocator are handed the new limits explicitly.
+        They hold their own reference, so replacing only this one would leave
+        every existing engine sizing against the limits of an account that no
+        longer exists.
+        """
+        scale = risk_mod.scale_for_equity(equity)
+        if (self.account_scale is not None
+                and scale.positions == self.account_scale.positions
+                and abs(scale.risk_per_trade - self.account_scale.risk_per_trade) < 1e-9):
+            self.account_scale = scale
+            return False
+
+        previous = self.account_scale
+        self.account_scale = scale
+        self.limits = risk_mod.limits_for_equity(equity, self.base_limits)
+        self.allocator.limits = self.limits
+        for engine in self.engines.values():
+            engine.limits = self.limits
+        if previous is not None:
+            self.telemetry.event(
+                Level.INFO, "risk",
+                f"limits re-scaled for a ${equity:,.2f} account: "
+                f"{scale.positions} concurrent "
+                f"{'position' if scale.positions == 1 else 'positions'} at up to "
+                f"{scale.max_position_weight:.0%} each",
+                detail=scale.note)
+        return True
 
     def _roll_trading_day(self, equity: float) -> None:
         """Start a new day when the venue's calendar does.
@@ -1058,6 +1115,13 @@ class TradingSession:
                 Level.INFO, "account",
                 f"simulated book seeded from the real account: "
                 f"{self.account_cash:,.2f} {self.account_currency}")
+        # The allocator's view of cash is otherwise only refreshed inside the
+        # trading loop, so a terminal that has read an account but not yet been
+        # started reported zero buying power against a funded balance.
+        self.allocator.cash = float(self.broker.cash)
+        self.allocator.equity = self.account_equity or self.allocator.equity
+        if self.account_equity > 0:
+            self.apply_account_scale(self.account_equity)
 
     async def _run(self) -> None:
         last_universe = 0.0
@@ -1310,6 +1374,7 @@ class TradingSession:
             "keep_awake": self.keep_awake.as_dict(),
             "loop_age": (time.time() - self._loop_beat) if self._loop_beat else None,
             "limits": self._limits_block(),
+            "account_scale": self._scale_block(),
             "regime_census": self._regime_census(),
             "costs": self._cost_summary(),
             "venue_budget": self._venue_budget(),
@@ -1383,6 +1448,36 @@ class TradingSession:
                 "last_error": self.feed.last_error,
             },
             "equity_curve": self._equity_curve[-240:],
+        }
+
+    def _scale_block(self) -> dict[str, Any]:
+        """How the limits were adjusted for this balance, and what that costs.
+
+        Published in full because "why is it not trading" on a small account is
+        almost always this, and the answer is arithmetic rather than a fault: a
+        position has to be worth something before a venue will treat it as one.
+        """
+        scale = self.account_scale
+        equity = self.account_equity or self.equity()
+        floor = risk_mod.VIABLE_POSITION_NOTIONAL
+        return {
+            "known": scale is not None,
+            "equity": equity,
+            "positions": scale.positions if scale else self.limits.max_concurrent_positions,
+            "max_position_weight": self.limits.max_position_weight,
+            "max_position_value": self.limits.max_position_weight * equity,
+            "risk_per_trade": self.limits.risk_per_trade,
+            "risk_per_trade_value": self.limits.risk_per_trade * equity,
+            "daily_loss_halt": self.limits.daily_loss_halt,
+            "daily_loss_value": self.limits.daily_loss_halt * equity,
+            "position_floor": floor,
+            "scaled": bool(scale and not scale.unscaled),
+            "note": scale.note if scale else "the account balance is not known yet",
+            #: The most expensive share this account can hold overnight. Auction
+            #: orders take whole shares, so this is a hard reach limit rather
+            #: than a preference, and on a small balance it excludes most of the
+            #: market.
+            "overnight_max_share_price": self.limits.max_position_weight * equity,
         }
 
     def _account_block(self) -> dict[str, Any]:

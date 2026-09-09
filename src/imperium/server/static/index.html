@@ -74,6 +74,9 @@
         <span class="note" id="risk-note">—</span>
       </h2>
       <div class="gauges" id="gauges"></div>
+      <!-- Only shown when the account is small enough that its size, rather
+           than the market, is what is deciding the limits. -->
+      <div class="notice compact scaled" id="scale-note" hidden></div>
       <div class="limit-grid" id="limit-grid"></div>
       <div class="halt-bar">
         <button id="btn-halt" class="danger" title="Blocks new and increased exposure. Reductions and exits always pass.">Halt book</button>

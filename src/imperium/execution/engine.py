@@ -27,7 +27,7 @@ import numpy as np
 from imperium.execution import costs
 from imperium.execution.bars import Bar, BarSeries
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
-from imperium.execution.risk import RiskLimits
+from imperium.execution.risk import VIABLE_POSITION_NOTIONAL, RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
 from imperium.strategy import regime as regime_mod
 from imperium.strategy.regime import Regime, RegimeVerdict
@@ -297,6 +297,9 @@ class SymbolEngine:
             # is shortable but hard to borrow accepts the order and then fails
             # to locate.
             allows_short=self.asset.shortable and self.can_short,
+            # A weight is a fraction; on a small account a fraction can be an
+            # amount no venue will trade. The sizer needs the balance to know.
+            equity=self.allocator.equity,
         )
         d.raw_weight = sized.weight
         d.sizing_reason = sized.reason
@@ -356,6 +359,24 @@ class SymbolEngine:
           so risk is bounded by size alone.
         """
         d.strategy = "overnight"
+        # Whole shares, or nothing. The closing auction does not take
+        # fractional quantities, so a name priced above everything this account
+        # may put in one position is unreachable overnight however good the
+        # drift is -- and on a small balance that is most of the market. Said
+        # plainly, because "no trades overnight" with no reason given is
+        # indistinguishable from a broken strategy.
+        budget = self.limits.max_position_weight * self.allocator.equity
+        if self.allocator.equity > 0 and d.price > budget:
+            d.verdict = Verdict.REJECTED
+            d.reason = (
+                f"one share costs ${d.price:,.2f} and this account can put at "
+                f"most ${budget:,.2f} into a single name; the closing auction "
+                f"takes whole shares only, so this symbol cannot be held "
+                f"overnight until the account is larger")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", d.reason, 0.15)
+            return d
+
         signal: OvernightSignal = overnight_mod.evaluate(
             self.daily_bars, pooled=self.pooled_drift)
         d.overnight_bps = signal.shrunk_bps or signal.mean_overnight_bps
@@ -412,7 +433,28 @@ class SymbolEngine:
         tail = overnight_sd * 3.0
         if tail > 0:
             weight = min(weight, self.limits.risk_per_trade / tail)
-        d.raw_weight = max(0.0, weight)
+        weight = max(0.0, weight)
+        # The same venue floor as the intraday path, and it bites hardest here:
+        # market-on-close orders take whole shares only, so an overnight
+        # position below one share cannot be entered at all.
+        equity = self.allocator.equity
+        if equity > 0 and weight > 0:
+            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            if weight < floor_weight:
+                if floor_weight > self.limits.max_position_weight:
+                    d.verdict = Verdict.REJECTED
+                    d.reason = (
+                        f"an overnight position here sizes to "
+                        f"${weight * equity:,.2f}; the closing auction takes "
+                        f"whole shares only, and raising it to the "
+                        f"${VIABLE_POSITION_NOTIONAL:,.0f} minimum would exceed "
+                        f"the {self.limits.max_position_weight:.0%} per-symbol "
+                        f"cap on a ${equity:,.2f} account")
+                    self.decision = d
+                    self.telemetry.pulse(self.symbol, "refused", d.reason, 0.2)
+                    return d
+                weight = floor_weight
+        d.raw_weight = weight
         d.sizing_reason = (
             f"{self.limits.target_volatility:.0%} target against "
             f"{annual_vol:.0%} annualised overnight volatility, capped by a "

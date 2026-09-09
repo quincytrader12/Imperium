@@ -576,7 +576,28 @@
            L.pdt_blocked ? 'bad' : '',
            s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit');
 
-    $('risk-note').textContent = s.halted ? 'HALTED' : 'live bounds';
+    /* On a small account "why is it not trading" is almost always the size of
+     * the account, and the answer is arithmetic rather than a fault. Shown
+     * next to the limits it produced, because a 40% position cap looks reckless
+     * until you know it is $28. */
+    var sc = s.account_scale || {};
+    var sn = $('scale-note');
+    if (sn) {
+      if (sc.scaled) {
+        sn.textContent = sc.positions + ' × $' + fmtNum(sc.max_position_value, 2) +
+          ' max · floor $' + fmtNum(sc.position_floor, 0) +
+          ' · overnight needs a share under $' +
+          fmtNum(sc.overnight_max_share_price, 2);
+        sn.className = 'notice compact scaled';
+        sn.hidden = false;
+        sn.title = sc.note || '';
+      } else {
+        sn.hidden = true;
+      }
+    }
+
+    $('risk-note').textContent = s.halted ? 'HALTED'
+      : (sc.scaled ? 'scaled to $' + fmtNum(sc.equity, 2) : 'live bounds');
     var btn = $('btn-halt');
     btn.textContent = s.halted ? 'Release book' : 'Halt book';
     btn.className = s.halted ? 'armed' : 'danger';
