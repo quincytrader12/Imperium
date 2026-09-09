@@ -33,6 +33,20 @@ from imperium.venues.assets import AssetClass, classify_symbol
 
 log = logging.getLogger("imperium.feed")
 
+#: Concurrent websocket subscriptions to start with.
+#:
+#: Alpaca's basic (free) plan caps them; thirty is the published figure for
+#: crypto trade and quote channels and the commonly reported cap for the basic
+#: stock stream. Treated as a starting point rather than a fact, because the
+#: real limit depends on the account's data subscription and the program has no
+#: endpoint that reports it -- see MarketFeed._handle_stream_error, which halves
+#: this on a 405 until the venue accepts the request.
+STREAM_SYMBOL_LIMIT = 30
+
+#: Never negotiate below this. A stream of a handful of symbols is still worth
+#: having, and halving without a floor would converge on zero.
+MIN_STREAM_SYMBOLS = 5
+
 
 @dataclass
 class Quote:
@@ -69,8 +83,25 @@ class MarketFeed:
         self.errors = 0
         self.last_message_at: float = 0.0
         self.last_error: str = ""
+        #: How many symbols this plan will stream at once.
+        #:
+        #: Alpaca's basic plan caps concurrent subscriptions; the paid plans
+        #: raise or remove the cap. The starting value is the basic figure, and
+        #: it is *adapted* rather than trusted, because the real limit depends
+        #: on a subscription this program cannot read. An over-limit request is
+        #: rejected whole -- error 405, previous subscriptions untouched, which
+        #: on a fresh connection means none at all.
+        self.symbol_limit: int = STREAM_SYMBOL_LIMIT
+        #: Symbols above the cap. They are still scanned, still priced by the
+        #: snapshot sweep, and still tradeable on the daily-bar strategies --
+        #: what they lose is the live minute stream.
+        self.dropped: int = 0
+        self._subscribed: list[str] = []
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
+        #: Set when the subscription must be renegotiated, so the socket loop
+        #: reconnects rather than sitting on a subscription the plan refused.
+        self._resubscribe = asyncio.Event()
         self._bar_handlers: list[Callable[[str, Bar], None]] = []
         self._live: dict[AssetClass, bool] = {}
 
@@ -101,6 +132,7 @@ class MarketFeed:
     async def start(self, symbols: list[str]) -> None:
         await self.stop()
         self.symbols = list(symbols)
+        self.dropped = max(0, len(self.symbols) - self.symbol_limit)
         self._stop.clear()
         grouped: dict[AssetClass, list[str]] = {}
         for symbol in self.symbols:
@@ -111,6 +143,11 @@ class MarketFeed:
         for asset_class, group in grouped.items():
             self._tasks.append(asyncio.create_task(
                 self._run(asset_class, group), name=f"feed-{asset_class.value}"))
+
+    @property
+    def streamed(self) -> int:
+        """How many symbols are actually subscribed, after the plan's cap."""
+        return min(len(self.symbols), self.symbol_limit)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -143,11 +180,22 @@ class MarketFeed:
                     self.telemetry.event(
                         Level.GOOD, "feed",
                         f"{asset_class.value} data connected "
-                        f"({len(symbols)} symbols)")
+                        f"({len(self._subscribed)} of {len(symbols)} symbols"
+                        + (f", {len(symbols) - len(self._subscribed)} above the "
+                           f"plan's cap" if len(self._subscribed) < len(symbols)
+                           else "") + ")")
+                    self._resubscribe.clear()
                     async for raw in ws:
                         if self._stop.is_set():
                             break
                         self._handle(raw)
+                        if self._resubscribe.is_set():
+                            # The plan refused this subscription. Reconnecting
+                            # is the only way to renegotiate it, and sitting
+                            # here would mean a connected socket delivering
+                            # nothing.
+                            self._resubscribe.clear()
+                            break
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -194,13 +242,59 @@ class MarketFeed:
                         f"data feed, but the key must be valid and the plan "
                         f"must include the '{self.feed}' feed.")
                 if msg_type == "success" and msg.get("msg") == "authenticated":
+                    # Only as many as the plan allows. Alpaca rejects an
+                    # over-limit subscription *whole* -- the response is error
+                    # 405 and the previous subscriptions are left untouched,
+                    # which for a fresh connection means no subscriptions at
+                    # all. The terminal would then run with a connected socket
+                    # and no data, which looks like a quiet market.
+                    wanted = symbols[:self.symbol_limit]
+                    self._subscribed = list(wanted)
                     await ws.send(json.dumps({
                         "action": "subscribe",
-                        "bars": symbols,
-                        "quotes": symbols,
+                        "bars": wanted,
+                        "quotes": wanted,
                     }))
                     return
         raise RuntimeError("the data feed did not answer the auth handshake")
+
+    def _handle_stream_error(self, msg: dict[str, Any]) -> None:
+        """Act on an error the stream sends after the subscription.
+
+        These arrive with no symbol attached, and were previously dropped by
+        the symbol filter -- so the one message that explains why no data is
+        arriving was the one message thrown away.
+
+        Code 405 is "symbol limit exceeded": the request asked for more symbols
+        than the plan allows and was rejected in full. The cap is halved and
+        the socket closed so the loop reconnects with a subscription the plan
+        will accept. Halving rather than guessing, because the real limit
+        depends on a subscription this program has no way to read.
+        """
+        code = msg.get("code")
+        text = str(msg.get("msg", "unknown error"))
+        self.errors += 1
+        self.last_error = f"stream error {code}: {text}"
+
+        if code == 405:
+            previous = self.symbol_limit
+            self.symbol_limit = max(MIN_STREAM_SYMBOLS, len(self._subscribed) // 2)
+            self.dropped = max(0, len(self.symbols) - self.symbol_limit)
+            self.telemetry.event(
+                Level.WARN, "feed",
+                f"the data plan refused {previous} concurrent symbols; "
+                f"retrying with {self.symbol_limit}",
+                detail=(f"{text}. The symbols above the cap are still scanned "
+                        f"and still priced by the snapshot sweep — they lose "
+                        f"only the live minute stream, so the intraday "
+                        f"strategy cannot trade them while the daily-bar "
+                        f"strategies still can."))
+            self._resubscribe.set()
+            return
+
+        self.telemetry.event(Level.WARN, "feed",
+                             f"the data stream reported an error: {text}",
+                             detail=f"code {code}")
 
     @staticmethod
     def _decode(raw: str | bytes) -> list[dict[str, Any]]:
@@ -220,6 +314,9 @@ class MarketFeed:
         self.last_message_at = time.time()
         for msg in messages:
             kind = msg.get("T")
+            if kind == "error":
+                self._handle_stream_error(msg)
+                continue
             symbol = msg.get("S")
             if not symbol:
                 continue

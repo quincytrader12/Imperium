@@ -161,6 +161,34 @@ worse-priced stock substitute. Deep-in-the-money options are stock substitutes
 with a wider spread. There is no version of this that works, so the program
 does not pretend otherwise.
 
+### The data plan's subscription cap
+
+The scan ranks the whole market and 150 symbols carry an engine, but the
+websocket cannot subscribe to nearly that many. Alpaca's basic plan limits
+concurrent subscriptions — 30 is the published figure for crypto trade and
+quote channels and the commonly reported cap for the basic stock stream.
+
+Two properties make that dangerous rather than merely restrictive:
+
+- an over-limit request is rejected **whole** (error 405, previous
+  subscriptions untouched), which on a fresh connection means *no*
+  subscriptions at all;
+- the rejection arrives as a message with no symbol attached, and the message
+  handler filtered on symbols — so the one message explaining the silence was
+  the one message discarded.
+
+Together: a connected socket delivering nothing, reading as a quiet market. The
+cap is now applied before subscribing, negotiated down by halving on a 405
+(the true limit depends on a data subscription this program cannot read), and
+floored so it never converges on zero.
+
+**Held positions are first in the queue for a stream.** A carried position is
+the one symbol where a stale price means a stop that does not fire and an exit
+sized on a number from minutes ago. Symbols below the cap are still scanned,
+still priced by the snapshot sweep every minute, and still tradeable by the
+daily-bar strategies — what they lose is the intraday path, which cannot work
+on a minute-old price anyway.
+
 ### The no-trade band
 
 A strategy that re-targets exactly will trade on every evaluation, because

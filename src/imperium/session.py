@@ -721,6 +721,25 @@ class TradingSession:
                 detail="flatten it by hand, or halt and let the retirement "
                        "sweep close it")
 
+    def _stream_priority(self) -> list[str]:
+        """The universe, ordered by who most needs a live stream.
+
+        The plan caps concurrent subscriptions well below the number of symbols
+        this scans, so the order decides who gets one. A position being carried
+        goes first without exception: it is the one symbol where a stale price
+        means a stop that does not fire and an exit sized on a number from
+        several minutes ago.
+
+        Everything below the cap is still scanned, still priced by the
+        snapshot sweep every minute, and still tradeable by the daily-bar
+        strategies. What it loses is the intraday path, which cannot work on a
+        minute-old price anyway.
+        """
+        held = [s for s, pos in self.broker.positions.items() if not pos.is_flat]
+        ordered = [s for s in held if s in self.universe]
+        ordered += [s for s in self.universe if s not in set(ordered)]
+        return ordered
+
     def _trend_observations(self, symbol: str, bars: list[Bar]):
         """One symbol's (trend score, next-day return) pairs for the pooled fit.
 
@@ -1283,7 +1302,7 @@ class TradingSession:
         await self.seed_history()
         await self.refresh_daily_history(force=True)
         await self.refresh_universe()
-        await self.feed.start(self.universe)
+        await self.feed.start(self._stream_priority())
         self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
 
     async def supervise(self) -> None:
@@ -1554,6 +1573,11 @@ class TradingSession:
             "health": health,
             "feed": {
                 "connected": self.feed.connected,
+                # Streamed against scanned. The gap is the plan's subscription
+                # cap, not a fault, and the symbols above it are still scanned.
+                "streamed": self.feed.streamed,
+                "symbol_limit": self.feed.symbol_limit,
+                "dropped": self.feed.dropped,
                 "reconnects": self.feed.reconnects,
                 "errors": self.feed.errors,
                 "age": None if not math.isfinite(age) else round(age, 1),
