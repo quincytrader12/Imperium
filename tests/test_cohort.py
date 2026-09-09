@@ -186,15 +186,26 @@ async def test_the_pooled_estimate_spans_cohorts_rather_than_resetting():
 @pytest.mark.asyncio
 async def test_the_pooled_samples_stay_bounded():
     """Otherwise the accumulation becomes exactly the memory the cohort
-    rotation exists to avoid."""
+    rotation exists to avoid.
+
+    The ranking has to be wider than the cap for this to mean anything. With
+    a market smaller than the bound the walk can never exceed it, the trim
+    never runs, and the test passes with the trim deleted -- proving only
+    that a small market is small.
+    """
     from imperium.session import POOLED_SAMPLE_SYMBOLS
 
-    async with _session(extra_equities=400) as (session, _):
+    async with _session(extra_equities=900) as (session, _):
         await session.scan_universe()
+        seen: set[str] = set(session._trend_samples)
         for _ in range(12):
             session._cohort_rotated_at = 0.0
             await session.rotate_cohort()
+            seen |= set(session._trend_samples)
 
+        assert len(seen) > POOLED_SAMPLE_SYMBOLS, (
+            f"only {len(seen)} symbols were ever sampled — the walk never "
+            f"gave the bound anything to discard, so this proves nothing")
         assert len(session._trend_samples) <= POOLED_SAMPLE_SYMBOLS
         assert len(session._overnight_samples) <= POOLED_SAMPLE_SYMBOLS
 
@@ -211,3 +222,46 @@ async def test_the_snapshot_reports_progress_through_the_market():
         assert scan["cohort_at"] > 0
         assert 0.0 < scan["cohort_progress"] <= 1.0
         assert scan["size"] <= COHORT_SIZE
+
+
+@pytest.mark.asyncio
+async def test_the_trading_loop_actually_rotates_the_cohort():
+    """The call site, not the method.
+
+    Every other test here calls ``rotate_cohort`` directly, so all of them
+    still pass with the call removed from the trading loop -- a rotation that
+    works perfectly and never happens. The terminal would then sit on the
+    first cohort forever, which is the exact behaviour the rotation was
+    written to replace, and nothing on screen would say so.
+
+    So this drives the loop itself: start it, let one iteration run, stop it.
+    """
+    import asyncio
+
+    async with _session() as (session, _):
+        await session.scan_universe()
+        first = list(session.universe)
+        cursor = session._cohort_cursor
+        # The loop is rate limited on purpose; without this the single
+        # iteration below would correctly decline to rotate.
+        session._cohort_rotated_at = 0.0
+
+        session.running = True
+        loop = asyncio.create_task(session._run())
+        try:
+            # One iteration, then the loop parks on its one-second sleep.
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if session._cohort_cursor > cursor:
+                    break
+        finally:
+            session.running = False
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop
+
+        assert session._cohort_cursor > cursor, (
+            "the trading loop ran a full iteration and never rotated the "
+            "cohort — the terminal would sit on the first 150 symbols "
+            "forever")
+        assert set(session.universe) - set(first), "new symbols must arrive"
