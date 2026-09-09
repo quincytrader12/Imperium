@@ -18,6 +18,8 @@ import json
 import logging
 import math
 import time
+
+import numpy as np
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -36,8 +38,11 @@ from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
 from imperium.strategy import overnight as overnight_mod
+from imperium.strategy import trend as trend_mod
 from imperium.strategy.overnight import PooledDrift, SessionPhase
+from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
+from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.strategy.signals import StrategyParams
 from imperium.telemetry.streams import Level, TelemetryHub
@@ -176,6 +181,12 @@ class TradingSession:
         #: at once. Held on the session rather than per engine because it is one
         #: measurement of one market, and every engine reads the same one.
         self.pooled_drift: PooledDrift | None = None
+        #: The market-wide trend premium, and the positions carried on it.
+        self.pooled_trend: PooledTrend | None = None
+        self.trend_note: str = "not yet measured"
+        #: symbol -> unix time the trend position was opened. Persisted, because
+        #: a multi-day hold outlives the process by design.
+        self.trend_holdings: dict[str, float] = {}
         self.session_phase: SessionPhase = SessionPhase.CLOSED
         self.overnight_note: str = "not yet measured"
         #: Symbols this strategy carried through a close, and the night it
@@ -252,6 +263,7 @@ class TradingSession:
             # time it is -- and would then refuse the overnight trade with a
             # reason that describes the wiring rather than the market.
             e.pooled_drift = self.pooled_drift
+            e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
             self.engines[symbol] = e
             self.allocator.observe(symbol)
@@ -505,7 +517,13 @@ class TradingSession:
         """
         if self.client is None:
             return
-        equities = [s for s in self.universe
+        # Both classes: the overnight decomposition is equity-only, but the
+        # trend strategy runs on daily bars for crypto too -- and crypto is
+        # where a small account can trade continuously, because it sits outside
+        # the pattern-day-trader rule entirely.
+        wanted = [s for s in self.universe
+                  if classify_symbol(s) is not AssetClass.US_OPTION]
+        equities = [s for s in wanted
                     if classify_symbol(s) is AssetClass.US_EQUITY]
         # Daily bars change once a day, so the interval exists to stop this
         # spending request budget to learn nothing. It must not strand a symbol
@@ -513,20 +531,21 @@ class TradingSession:
         # history for up to six hours and refuse every night in that window
         # with "warming up", which describes this method rather than the market.
         missing = any(not self.engines.get(s) or not self.engines[s].daily_bars
-                      for s in equities)
+                      for s in wanted)
         if (not force and not missing
                 and time.time() - self._daily_loaded_at < OVERNIGHT_REFRESH_SECONDS):
             return
-        if not equities:
-            self.overnight_note = ("no equities in the universe, so there is no "
-                                   "overnight session to measure")
+        if not wanted:
+            self.overnight_note = ("nothing in the universe has a daily series "
+                                   "to measure")
             self.pooled_drift = None
+            self.pooled_trend = None
             return
 
         start = (dt.datetime.now(tz=dt.timezone.utc)
                  - dt.timedelta(days=OVERNIGHT_HISTORY_DAYS))
         try:
-            batches = await self.client.bars(equities, timeframe="1Day",
+            batches = await self.client.bars(wanted, timeframe="1Day",
                                              limit=OVERNIGHT_HISTORY_DAYS,
                                              start=start)
         except VenueError as exc:
@@ -537,7 +556,8 @@ class TradingSession:
         self._daily_loaded_at = time.time()
 
         splits: dict[str, Any] = {}
-        for symbol in equities:
+        scored: dict[str, tuple[Any, Any]] = {}
+        for symbol in wanted:
             rows = batches.get(symbol) or []
             bars: list[Bar] = []
             for row in rows:
@@ -551,17 +571,26 @@ class TradingSession:
                     continue
             engine = self.engine(symbol)
             engine.daily_bars = bars
-            split = overnight_mod.split_daily(bars)
-            if split.nights:
-                splits[symbol] = split
+            if classify_symbol(symbol) is AssetClass.US_EQUITY:
+                split = overnight_mod.split_daily(bars)
+                if split.nights:
+                    splits[symbol] = split
+            pair = self._trend_observations(symbol, bars)
+            if pair is not None:
+                scored[symbol] = pair
 
         pooled = overnight_mod.pool(splits) if splits else None
         self.pooled_drift = pooled
+        pooled_trend = trend_mod.pool(scored) if scored else None
+        self.pooled_trend = pooled_trend
+        self.trend_note = (pooled_trend.describe() if pooled_trend
+                           else "no trend premium measured yet")
         # Every engine reads the same market estimate. Assigned rather than
         # looked up so an engine created later in the session cannot quietly
         # run against no prior and refuse everything for the wrong reason.
         for engine in self.engines.values():
             engine.pooled_drift = pooled
+            engine.pooled_trend = pooled_trend
 
         if pooled is None:
             self.overnight_note = "no daily history returned for any equity"
@@ -584,6 +613,7 @@ class TradingSession:
             path = config.state_path()
             path.write_text(json.dumps(
                 {"overnight_holdings": self.overnight_holdings,
+                 "trend_holdings": self.trend_holdings,
                  "saved_at": time.time()}, indent=2), encoding="utf-8")
             try:
                 path.chmod(0o600)
@@ -619,6 +649,18 @@ class TradingSession:
                 "held overnight will be reported as unmanaged rather than "
                 "exited automatically", detail=str(exc))
             return
+        try:
+            carried = payload.get("trend_holdings")
+            if isinstance(carried, dict):
+                self.trend_holdings = {str(k): float(v) for k, v in carried.items()}
+        except (AttributeError, TypeError, ValueError):
+            # A trend position whose start time is unreadable is treated as
+            # opened now: it will simply be held longer than it needs to be,
+            # which costs nothing and is the safe direction. Closing it early
+            # would throw away a round trip already paid for.
+            self.trend_holdings = {
+                symbol: time.time()
+                for symbol, pos in self.broker.positions.items() if not pos.is_flat}
         if recovered:
             self.overnight_holdings = recovered
             self.telemetry.event(
@@ -626,6 +668,34 @@ class TradingSession:
                 f"recovered {len(recovered)} overnight "
                 f"{'hold' if len(recovered) == 1 else 'holds'} across a "
                 f"restart: {', '.join(sorted(recovered))}")
+
+    def _sync_trend_holdings(self) -> None:
+        """Tell each engine how long its trend position has been carried.
+
+        The holding period is not bookkeeping here, it is the strategy: the
+        decision to keep a position is made against how much of its round-trip
+        cost the elapsed time has already paid for. An engine that does not know
+        how long it has held would re-derive an entry every day and pay the
+        round trip each time.
+        """
+        now = time.time()
+        for symbol, engine in self.engines.items():
+            position = self.broker.positions.get(symbol)
+            held = position is not None and not position.is_flat
+            if held and symbol not in self.trend_holdings:
+                # Only claim a position this strategy actually opened.
+                engine.trend_held = engine.decision.strategy == "trend"
+                if engine.trend_held:
+                    self.trend_holdings[symbol] = now
+                    self._save_overnight_state()
+            elif not held and symbol in self.trend_holdings:
+                self.trend_holdings.pop(symbol, None)
+                self._save_overnight_state()
+                engine.trend_held = False
+            else:
+                engine.trend_held = held and symbol in self.trend_holdings
+            opened = self.trend_holdings.get(symbol)
+            engine.trend_days_held = ((now - opened) / 86_400.0) if opened else 0.0
 
     def _report_unmanaged_equity(self) -> None:
         """Name any equity held while shut that this strategy did not enter.
@@ -650,6 +720,38 @@ class TradingSession:
                 f"overnight strategy, so no opening exit will be lodged for it",
                 detail="flatten it by hand, or halt and let the retirement "
                        "sweep close it")
+
+    def _trend_observations(self, symbol: str, bars: list[Bar]):
+        """One symbol's (trend score, next-day return) pairs for the pooled fit.
+
+        Every score is computed from bars strictly *before* the return it is
+        paired with. That is the whole discipline of this function: a score
+        that peeked at the day it is predicting would produce a spectacular
+        premium and an unplaceable trade.
+        """
+        closes = trend_mod.daily_closes(bars)
+        # Classified from the symbol: a Bar carries no identity of its own, and
+        # defaulting to the equity lookbacks would have measured crypto -- a
+        # market whose momentum lives at one to four weeks -- on a
+        # one-to-six-month window.
+        spec = trend_mod.spec_for(classify_symbol(symbol))
+        longest = max(spec.lookbacks)
+        if closes.size < longest + trend_mod.MIN_DAYS:
+            return None
+
+        scores: list[float] = []
+        forward: list[float] = []
+        for i in range(longest + 2, closes.size - 1):
+            score, _ = trend_mod.blended_score(closes[: i + 1], spec)
+            if not math.isfinite(score):
+                continue
+            # closes[i] is the last bar the score saw; closes[i + 1] is the day
+            # it is being asked to predict.
+            scores.append(score)
+            forward.append(math.log(closes[i + 1] / closes[i]))
+        if len(scores) < 10:
+            return None
+        return np.asarray(scores), np.asarray(forward)
 
     def _update_session_phase(self) -> SessionPhase:
         """Where the clock is, relative to the two auction windows.
@@ -929,6 +1031,7 @@ class TradingSession:
 
     async def _tick(self) -> None:
         phase = self._update_session_phase()
+        self._sync_trend_holdings()
         await self._drain_bars()
         if phase is SessionPhase.CLOSING:
             # After the drain, so a position entered on this tick is already
@@ -1396,6 +1499,7 @@ class TradingSession:
                 "feed": self.spec.default_feed,
             },
             "overnight": self._overnight_block(),
+            "trend": self._trend_block(),
             "universe_scan": {
                 "note": self.scan_note,
                 "scanned_at": self.universe_scanned_at,
@@ -1511,6 +1615,79 @@ class TradingSession:
             #: figure the broker's own app shows.
             "day_pnl": (self.account_equity - self.account_last_equity
                         if known and self.account_last_equity else 0.0),
+        }
+
+    def _trend_block(self) -> dict[str, Any]:
+        """The trend strategy's state, and the constraint that selects it.
+
+        The day-trade budget is published alongside, because on a small account
+        that is *why* this strategy is the one running: an intraday round trip
+        it cannot close is not a trade, and a multi-day hold is not a day trade.
+        """
+        pooled = self.pooled_trend
+        decisions = [e.decision for e in self.engines.values()
+                     if e.decision.strategy == "trend"]
+        carried = [
+            {"symbol": symbol,
+             "days": round((time.time() - opened) / 86_400.0, 2),
+             "min_days": round(
+                 self.engines[symbol].decision.trend_min_hold_days, 1)
+             if symbol in self.engines else 0.0}
+            for symbol, opened in sorted(self.trend_holdings.items())
+        ]
+        return {
+            "measured": pooled is not None,
+            "credible": bool(pooled and pooled.credible),
+            "beta_bps": pooled.beta_bps if pooled else 0.0,
+            "t_stat": pooled.t_stat if pooled else 0.0,
+            "observations": pooled.observations if pooled else 0,
+            "symbols": pooled.symbols if pooled else 0,
+            "note": self.trend_note,
+            "candidates": len(decisions),
+            "eligible": sum(1 for d in decisions if d.verdict is Verdict.TRADING),
+            "holdings": carried,
+            "day_trades_available": self.allocator.day_trades_available(),
+            "day_trades_left": max(
+                0, self.limits.pdt_max_day_trades - self.allocator.day_trade_count),
+            #: When options become reachable, and why they are not yet. The
+            #: question comes up on every small account, and the answer is
+            #: arithmetic rather than a policy.
+            "options": self._options_block(),
+            # The reason this strategy exists, in one line.
+            "why": ("a position held across a session close is not a day trade, "
+                    "so this is the horizon an account under the "
+                    f"${self.limits.pdt_equity_floor:,.0f} floor can actually "
+                    "trade"),
+        }
+
+    def _options_block(self) -> dict[str, Any]:
+        """Why options are not traded, expressed as a number rather than a rule.
+
+        A contract is a hundred shares, so the smallest possible option
+        position is a hundred times the quoted premium and cannot be reduced.
+        Below the threshold an account can only reach contracts so cheap that
+        the quoted spread is a large fraction of the premium.
+        """
+        equity = self.account_equity or self.equity()
+        budget = self.limits.max_position_weight * equity
+        reachable = budget / float(assets_mod.OPTION_CONTRACT_MULTIPLIER)
+        threshold = float(assets_mod.MIN_OPTION_ACCOUNT_EQUITY)
+        return {
+            "tradeable": False,
+            "contract_multiplier": assets_mod.OPTION_CONTRACT_MULTIPLIER,
+            "max_premium_reachable": reachable,
+            "min_equity": threshold,
+            "affordable": equity >= threshold,
+            "fees_per_contract_round_trip": float(
+                assets_mod.OPTION_FEES_PER_CONTRACT_ROUND_TRIP),
+            "note": (
+                f"one contract is 100 shares, so this account can reach a "
+                f"premium of ${reachable:,.2f} — "
+                + ("enough for liquid contracts, but options still need an "
+                   "implied-volatility model this program does not have"
+                   if equity >= threshold else
+                   f"only contracts cheap enough that the spread is most of "
+                   f"the premium. Options need about ${threshold:,.0f}.")),
         }
 
     def _overnight_block(self) -> dict[str, Any]:

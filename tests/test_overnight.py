@@ -553,11 +553,13 @@ async def test_the_session_fetches_daily_history_as_daily_history():
                   for r in venue.requests if r.url.path.endswith("/bars")]
     assert timeframes and all(tf == "1Day" for tf in timeframes)
 
-    # And crypto was never asked for: it does not close, so it has no
-    # overnight session to decompose.
+    # Crypto daily bars *are* fetched -- the trend strategy runs on them, and
+    # crypto is the one market a small account can trade continuously. What
+    # crypto must never do is enter the overnight decomposition: a market that
+    # does not close has no close-to-open seam to measure.
     asked = ",".join(dict(r.url.params).get("symbols", "")
                      for r in venue.requests if r.url.path.endswith("/bars"))
-    assert "AAPL" in asked and "BTC/USD" not in asked
+    assert "AAPL" in asked and "BTC/USD" in asked
 
 
 @pytest.mark.asyncio
@@ -573,6 +575,8 @@ async def test_every_engine_reads_the_same_pooled_estimate():
         await session.refresh_daily_history(force=True)
 
         assert session.pooled_drift is not None
+        # Two equities. BTC/USD is in the universe and has daily bars, but a
+        # market that never closes contributes no overnight observations.
         assert session.pooled_drift.symbols == 2          # AAPL and SPY
         # The mock bakes a known drift into its daily bars; recovering it
         # proves the decomposition survived the round trip through the wire

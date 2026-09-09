@@ -639,6 +639,48 @@
       : total + ' evaluated';
   }
 
+  /* ---------- multi-day trend ---------- */
+
+  function renderTrend(s) {
+    var t = s.trend;
+    if (!t) return;
+    var o = t.options || {};
+
+    $('tr-note').textContent = t.credible
+      ? t.beta_bps.toFixed(2) + 'bp/day · t=' + t.t_stat.toFixed(1)
+      : (t.measured ? 'premium not measurable yet' : 'not yet measured');
+
+    /* The day-trade budget sits in this panel on purpose: it is the reason
+     * this strategy is the one running on a small account, not a side note. */
+    var dtTone = t.day_trades_available ? '' : 'warn';
+    $('tr-grid').innerHTML =
+      cell('premium', t.beta_bps.toFixed(2) + 'bp', t.credible ? 'good' : '',
+           'per unit of trend') +
+      cell('t-stat', (t.t_stat >= 0 ? '+' : '') + t.t_stat.toFixed(2),
+           Math.abs(t.t_stat) >= 2 ? 'good' : '',
+           t.credible ? 'credible' : 'not yet') +
+      cell('sample', fmtNum(t.observations, 0), '', t.symbols + ' symbols') +
+      cell('carrying', String((t.holdings || []).length), '', 'multi-day') +
+      cell('day trades', t.day_trades_left + ' left', dtTone,
+           t.day_trades_available ? 'intraday open' : 'intraday closed') +
+      cell('options', o.affordable ? 'reachable' : 'need $' +
+           fmtNum(o.min_equity, 0), '',
+           '1 contract = ' + o.contract_multiplier + ' sh');
+
+    var why = $('tr-why');
+    if (!t.day_trades_available) {
+      why.textContent = t.why;
+    } else if (!t.credible) {
+      why.textContent = t.note;
+    } else {
+      var held = (t.holdings || []).map(function (h) {
+        return h.symbol + ' ' + h.days.toFixed(1) + '/' + h.min_days + 'd';
+      });
+      why.textContent = held.length ? 'carrying ' + held.join(' · ') : t.note;
+    }
+    why.title = (o.note || '');
+  }
+
   /* ---------- overnight drift ---------- */
 
   /* The four windows the strategy moves through, in clock order. The two that
@@ -872,6 +914,7 @@
     renderPnl(s);
     renderRisk(s);
     renderCensus(s);
+    renderTrend(s);
     renderOvernight(s);
     renderCosts(s);
     renderStats(s);

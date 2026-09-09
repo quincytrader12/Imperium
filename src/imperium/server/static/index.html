@@ -89,6 +89,15 @@
       <div class="census" id="census"></div>
     </section>
 
+    <!-- The multi-day trend. On a small account this is the strategy that
+         actually runs, because a position held across a close is not a day
+         trade -- so the day-trade budget is shown right beside it. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Multi-day trend <span class="note" id="tr-note">—</span></h2>
+      <div class="limit-grid" id="tr-grid"></div>
+      <div class="dimmer" id="tr-why" style="padding:0 9px 8px"></div>
+    </section>
+
     <!-- The overnight drift strategy. Kept apart from the intraday panels
          because it is a different trade: a different holding period, no stop
          behind it, and its own order types. -->

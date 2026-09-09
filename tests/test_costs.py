@@ -120,20 +120,38 @@ def test_the_gate_reason_names_every_number_that_decided_it():
 
 
 def test_there_is_exactly_one_round_trip_cost_implementation():
-    """Prevents the failure this module exists to stop. A previous attempt had
-    three implementations of this arithmetic that disagreed by 5.5x, so every
-    caller must import this one rather than reimplement it."""
+    """Prevents the failure this module exists to stop.
+
+    A previous attempt had three implementations of this arithmetic that
+    disagreed by 5.5x, so every caller must take the number from here rather
+    than derive its own.
+
+    What counts as an offence is *deriving* the cost, not naming it. A strategy
+    that receives a round-trip cost as a parameter and reasons about it is doing
+    the right thing; an earlier version of this test failed those too, which
+    pushes callers toward worse parameter names to get green rather than toward
+    the single implementation.
+    """
     import pathlib
     import re
 
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "imperium"
+    #: Halving a spread by hand -- the exact arithmetic of the original bug.
+    by_hand = re.compile(r"spread\s*/\s*2|half_spread")
+    #: A second definition of the one function.
+    redefined = re.compile(r"def\s+round_trip_cost_bps\b")
+    #: Assigning a round-trip figure from the cost components themselves.
+    derived = re.compile(
+        r"round_trip\w*\s*=\s*[^\n=][^\n]*\b(spread|commission|fee)\w*\b",
+        re.IGNORECASE)
+
     offenders = []
     for path in src.rglob("*.py"):
         if path.name == "costs.py":
             continue
         text = path.read_text(encoding="utf-8")
-        if re.search(r"spread\s*/\s*2|half_spread|round_trip_bps\s*=", text):
+        if by_hand.search(text) or redefined.search(text) or derived.search(text):
             offenders.append(str(path.relative_to(src)))
     assert offenders == [], (
-        f"these modules compute round-trip cost themselves instead of importing "
-        f"imperium.execution.costs: {offenders}")
+        f"these modules derive a round-trip cost themselves instead of taking "
+        f"it from imperium.execution.costs: {offenders}")

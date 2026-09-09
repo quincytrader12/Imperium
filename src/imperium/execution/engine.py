@@ -35,6 +35,8 @@ from imperium.strategy import overnight as overnight_mod
 from imperium.strategy.overnight import (
     OvernightSignal, PooledDrift, SessionPhase,
 )
+from imperium.strategy import trend as trend_mod
+from imperium.strategy.trend import PooledTrend, TrendPhase, TrendSignal
 from imperium.strategy.signals import (
     BlendedSignal, StrategyParams, blend, mean_reversion_signal, momentum_signal,
 )
@@ -84,6 +86,12 @@ class Decision:
     overnight_nights: int = 0
     #: Market-on-close / market-on-open, when the overnight trade is live.
     entry_order: str = ""
+    #: The trend strategy's own state, when it owns this symbol.
+    trend_score: float = 0.0
+    trend_drift_bps: float = 0.0
+    trend_min_hold_days: float = 0.0
+    trend_days_held: float = 0.0
+    trend_phase: str = ""
 
     @property
     def warming_up(self) -> bool:
@@ -141,6 +149,11 @@ class Decision:
             "overnight_bps": round(self.overnight_bps, 2),
             "overnight_nights": self.overnight_nights,
             "entry_order": self.entry_order,
+            "trend_score": round(self.trend_score, 3),
+            "trend_drift_bps": round(self.trend_drift_bps, 3),
+            "trend_min_hold_days": round(self.trend_min_hold_days, 1),
+            "trend_days_held": round(self.trend_days_held, 1),
+            "trend_phase": self.trend_phase,
             "distance": round(self.distance_to_trading, 4),
         }
 
@@ -186,6 +199,14 @@ class SymbolEngine:
         #: own history cannot resolve this effect alone.
         self.pooled_drift: PooledDrift | None = None
         self.session_phase: SessionPhase = SessionPhase.CLOSED
+        #: The market-wide trend premium, estimated across the universe. Held
+        #: here rather than measured per symbol for the same reason as the
+        #: overnight drift: one symbol's history cannot resolve it.
+        self.pooled_trend: PooledTrend | None = None
+        #: How long a trend position has been carried, in days, and whether one
+        #: is open at all. Set by the session, which owns the book.
+        self.trend_held: bool = False
+        self.trend_days_held: float = 0.0
 
     # -- market data -----------------------------------------------------
 
@@ -240,6 +261,17 @@ class SymbolEngine:
 
         d.session_phase = self.session_phase.value
 
+        # One symbol, one strategy at a time. Three horizons share this book and
+        # blending them would allocate the same capital twice, so the choice is
+        # made once, explicitly, and recorded on the decision.
+        #
+        # A trend position already open owns its symbol until it closes: it is
+        # the only thing that knows what the position cost and how long that
+        # cost still needs to be carried, and handing it to another strategy
+        # mid-life would pay the round trip and collect none of the edge.
+        if self.trend_held:
+            return self._decide_trend(d, closes)
+
         # The overnight trade is a different trade, not a variant of the
         # intraday one: a different holding period, no intraday stop, and its
         # own order types. It is evaluated in its own window and never blended
@@ -247,6 +279,15 @@ class SymbolEngine:
         if (self.session_phase is SessionPhase.CLOSING
                 and self.asset.asset_class is AssetClass.US_EQUITY):
             return self._decide_overnight(d, closes, rets)
+
+        # An intraday strategy on an account that cannot close what it opens is
+        # not constrained, it is prevented -- a position opened with no day
+        # trade left to close it becomes an unplanned overnight hold with an
+        # intraday stop behind it. Where the round trip is unavailable, the
+        # multi-day horizon is not a fallback; it is the only horizon that
+        # exists.
+        if self.pdt_subject and not self.allocator.day_trades_available():
+            return self._decide_trend(d, closes)
 
         verdict = regime_mod.classify(closes[-250:], self._thresholds(),
                                       returns=rets[-250:])
@@ -336,6 +377,184 @@ class SymbolEngine:
             d.reason = f"{signal.reason}; {sized.reason}"
             self.telemetry.pulse(self.symbol, "decision", d.reason,
                                  intensity=min(1.0, 0.4 + abs(signal.value) * 0.6))
+        self.decision = d
+        return d
+
+    @property
+    def pdt_subject(self) -> bool:
+        """Whether this symbol's round trips count as day trades.
+
+        Equities and options do; crypto does not, because it is not a security
+        under FINRA's rule. That single distinction is most of why a very small
+        account can trade crypto continuously and equities only across sessions.
+        """
+        return self.asset.asset_class is not AssetClass.CRYPTO
+
+    def _decide_trend(self, d: Decision, closes: np.ndarray) -> Decision:
+        """Carry a multi-day trend, for at least as long as its costs require.
+
+        The horizon is the point. A round trip is paid once per holding period,
+        so the cost per day falls the longer the position is carried -- and a
+        position held across a session close is not a day trade, which is what
+        makes this the only strategy available to an account under the
+        pattern-day-trader floor.
+
+        Entering and staying are judged differently on purpose. Entering has to
+        justify the whole round trip; staying only has to justify itself,
+        because the entry cost is already spent and closing early throws it
+        away without collecting the edge it bought.
+        """
+        d.strategy = "trend"
+        d.regime = "trend"
+
+        estimate = costs.estimate_for_symbol(
+            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
+            style="taker")
+        d.round_trip_cost_bps = float(estimate.round_trip_bps)
+        d.spread_bps = float(estimate.spread_bps)
+        d.spread_assumed = estimate.spread_is_assumed
+        d.cost_warnings = estimate.warnings
+
+        signal: TrendSignal = trend_mod.evaluate(
+            self.daily_bars, asset_class=self.asset.asset_class,
+            pooled=self.pooled_trend,
+            round_trip_bps=float(estimate.round_trip_bps),
+            safety_multiple=self.params.safety_multiple)
+
+        d.trend_score = signal.score
+        d.trend_drift_bps = signal.drift_bps_per_day
+        d.trend_min_hold_days = (signal.min_hold_days
+                                 if math.isfinite(signal.min_hold_days) else 0.0)
+        d.trend_days_held = self.trend_days_held
+        d.conviction = signal.value
+        d.expected_edge_bps = signal.expected_edge_bps
+        d.regime_reason = signal.reason
+
+        phase = trend_mod.phase_for(
+            held=self.trend_held, days_held=self.trend_days_held,
+            min_hold_days=signal.min_hold_days, signal=signal)
+        d.trend_phase = phase.value
+
+        if phase is TrendPhase.EXIT:
+            d.verdict = Verdict.TRADING
+            d.target_weight = 0.0
+            d.reason = (f"the trend that justified this position has gone "
+                        f"(score {signal.score:+.2f}) after "
+                        f"{self.trend_days_held:.0f} days — closing it")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "decision", d.reason, 0.8)
+            return d
+
+        if phase in (TrendPhase.HOLDING, TrendPhase.MATURE):
+            # Already carried. The entry cost is spent, so the only question is
+            # whether the reason to be here still holds -- and it does, or the
+            # branch above would have taken it.
+            held_weight = self.allocator.observe(self.symbol).current_weight
+            d.verdict = Verdict.TRADING
+            d.target_weight = held_weight
+            d.raw_weight = held_weight
+            d.reason = (
+                f"carrying the trend: day {self.trend_days_held:.0f} of the "
+                f"{signal.min_hold_days:.0f} its {signal.drift_bps_per_day:.2f}"
+                f"bp/day needs to cover {estimate.round_trip_bps:.2f}bp of cost"
+                if phase is TrendPhase.HOLDING else
+                f"the trend has paid for its costs and is still intact "
+                f"(score {signal.score:+.2f} after "
+                f"{self.trend_days_held:.0f} days)")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "decision", d.reason, 0.4)
+            return d
+
+        if not signal.eligible:
+            d.verdict = Verdict.REJECTED
+            d.reason = signal.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", signal.reason, 0.2)
+            return d
+
+        gate = costs.gate(
+            expected_edge_bps=Decimal(str(round(signal.expected_edge_bps, 6))),
+            estimate=estimate,
+            safety_multiple=Decimal(str(self.params.safety_multiple)))
+        d.required_bps = float(gate.required_bps)
+        if not gate.admitted:
+            d.verdict = Verdict.REJECTED
+            d.reason = (f"the trend is worth {signal.expected_edge_bps:.1f}bp "
+                        f"over {signal.min_hold_days:.0f} days and needs "
+                        f"{gate.required_bps:.2f}bp to clear its costs")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", d.reason, 0.25)
+            return d
+
+        # Sized on daily volatility over the class's own calendar, like every
+        # other strategy here. The holding period is days, so the daily series
+        # is the right one -- an intraday estimate would describe a risk this
+        # position is not taking.
+        daily_vol = signal.daily_vol_bps / 10_000.0
+        if daily_vol <= 0:
+            d.verdict = Verdict.REJECTED
+            d.reason = "daily volatility is not estimable for this symbol"
+            self.decision = d
+            return d
+        periods = (365.0 if self.asset.asset_class is AssetClass.CRYPTO else 252.0)
+        annual_vol = daily_vol * math.sqrt(periods)
+        weight = (self.limits.target_volatility / annual_vol) * signal.value
+        weight = min(weight, self.limits.max_position_weight)
+        # The loss that bounds a multi-day hold is a multi-day move, not a
+        # single bar's ATR -- so the risk budget is measured against a 2-sigma
+        # excursion over the planned holding period.
+        horizon_sigma = daily_vol * math.sqrt(max(1.0, signal.min_hold_days))
+        tail = 2.0 * horizon_sigma
+        if tail > 0:
+            weight = min(weight, self.limits.risk_per_trade / tail)
+        weight = max(0.0, weight)
+
+        equity = self.allocator.equity
+        if equity > 0 and weight > 0:
+            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            if weight < floor_weight:
+                if floor_weight > self.limits.max_position_weight:
+                    d.verdict = Verdict.REJECTED
+                    d.reason = (
+                        f"a trend position here sizes to ${weight * equity:,.2f}, "
+                        f"and the ${VIABLE_POSITION_NOTIONAL:,.0f} minimum would "
+                        f"exceed the {self.limits.max_position_weight:.0%} "
+                        f"per-symbol cap on a ${equity:,.2f} account")
+                    self.decision = d
+                    self.telemetry.pulse(self.symbol, "refused", d.reason, 0.2)
+                    return d
+                weight = floor_weight
+
+        d.raw_weight = weight
+        d.sizing_reason = (
+            f"{self.limits.target_volatility:.0%} target against "
+            f"{annual_vol:.0%} annualised daily volatility, capped by a "
+            f"{self.limits.risk_per_trade:.2%} budget on a 2-sigma "
+            f"{signal.min_hold_days:.0f}-day excursion ({tail * 100:.1f}%)")
+
+        if d.raw_weight <= 0:
+            d.verdict = Verdict.REJECTED
+            d.reason = d.sizing_reason
+            self.decision = d
+            return d
+
+        clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
+        d.target_weight = clamped.weight
+        d.clamp_binding = clamped.binding
+        d.clamp_reason = clamped.reason
+
+        state = self.allocator.observe(self.symbol)
+        if not state.admitted:
+            d.verdict = Verdict.NOT_ADMITTED
+            d.reason = state.reason or clamped.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "cap", d.reason, 0.3)
+            return d
+
+        d.verdict = Verdict.TRADING
+        d.reason = f"{signal.reason}; {d.sizing_reason}"
+        self.telemetry.pulse(self.symbol, "decision", d.reason,
+                             min(1.0, 0.4 + signal.value * 0.6))
         self.decision = d
         return d
 

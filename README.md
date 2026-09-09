@@ -161,6 +161,95 @@ worse-priced stock substitute. Deep-in-the-money options are stock substitutes
 with a wider spread. There is no version of this that works, so the program
 does not pretend otherwise.
 
+### Three horizons, and which one a small account can actually use
+
+| strategy | horizon | order type | day trade? | where it works |
+|---|---|---|---|---|
+| intraday blend | minutes | market | **yes** | any account with day trades left |
+| multi-day trend | days–weeks | market (fractional) | no | **any account, and the only one under the PDT floor** |
+| overnight drift | one night | MOC / MOO (whole shares) | no | equities priced under the position cap |
+
+One symbol is owned by exactly one strategy at a time. Blending them would
+allocate the same capital twice, so the choice is made once, explicitly, and
+shown on the decision.
+
+**Why a $70 account needs the middle row.** Under FINRA's pattern-day-trader
+rule a margin account below $25,000 may make three day trades in five business
+days. An intraday strategy there is not constrained, it is *prevented*: a
+position it cannot close the same day is not an intraday position, it is an
+accidental overnight hold with an intraday stop behind it. A trade carried
+across a session close is not a day trade at all, so the multi-day horizon
+removes the binding constraint rather than working around it. Crypto sits
+outside the rule entirely, which is why it keeps the intraday path at any
+balance.
+
+(FINRA has approved removing the $25,000 threshold, effective June 2026, with
+firms given until October 2027 to implement. Nothing here assumes either state
+— the day-trade count and the PDT flag are read from the venue every tick, so
+the program follows whatever the broker actually enforces.)
+
+**The arithmetic.** A round trip is paid once per holding period, so cost per
+unit of time falls as the period grows. With drift `μ` bp/day and round trip
+`C` bp, a position must be held
+
+    H* = k · C / μ    days
+
+before the edge has covered the cost, `k` being the same safety multiple every
+other strategy is judged against. Crypto pays ~50bp and needs ~4 days at a
+20bp/day drift; a US equity pays 2–4bp and needs about one. **H\* is floored at
+one session** — a shorter plan would be a day trade, which is the one thing
+this strategy exists not to be.
+
+Entering and staying are judged differently on purpose: entering must justify
+the whole round trip, staying only has to justify itself, because the entry
+cost is already spent and closing early throws it away without collecting the
+edge it bought.
+
+**The evidence.** Moskowitz, Ooi & Pedersen (JFE 2012) found positive
+time-series momentum in *every one* of 58 futures contracts, 52 significant at
+5%. Liu & Tsyvinski (RFS 2021) found strong crypto time-series momentum at one-
+to four-week horizons — a one-SD week predicting **+3.16%** the next week for
+Bitcoin. The lookbacks differ by asset class for that reason: 21/63/126 days
+for equities, 7/14/28 for crypto.
+
+**What that evidence does not give a small account.** The headline Sharpe near
+1.0 in Moskowitz et al. is a *diversified* portfolio of 58 markets. Single-
+instrument time-series momentum is far weaker, and an account carrying two
+positions receives almost none of that diversification. The premium is
+therefore estimated **pooled across the universe**, never per symbol — measured
+here, 4 of 40 symbols cross |t| > 2 on data with a true premium of exactly
+zero, so a strategy that picked its best-looking symbol would be selecting on
+noise every time.
+
+### Options: affordable long before they are sensible
+
+An earlier version of this program asserted a $0.65 per-contract commission and
+concluded options were unusable. **That premise was wrong.** Alpaca is
+commission-free on options; what remains is regulatory pass-through of about
+**$0.09 per contract round trip** — OCC clearing, ORF, and TAF on the sell.
+Fees are not the obstacle.
+
+Two other things are, and both are structural:
+
+1. **A contract is 100 shares**, so position size is quantised. The smallest
+   possible trade is 100× the premium and cannot be reduced.
+2. **The spread is the whole cost**, and it is worst exactly where a small
+   account is forced to shop.
+
+| account | premium reachable | round-trip spread | breakeven move |
+|---|---|---|---|
+| $70 | $0.28 | ~15% | **23%** |
+| $250 | $0.50 | ~8% | 12% |
+| $500 | $1.00 | ~5% | 8% |
+| $1,500+ | $3.00 | ~2–3% | 4% |
+
+So options become *affordable* around $1,500 — and are still not traded, for a
+reason that does not go away with money: the strategies here forecast drift in
+the underlying, and an option pays theta for calendar time whether or not that
+drift arrives. Trading them needs a model of implied volatility, not a
+different threshold on this one. `scripts/option_affordability.py` computes the
+table; the terminal shows the reachable premium against the threshold.
+
 ### A small account is not a scaled-down large one
 
 The limits are percentages, and a percentage of a small balance can be an

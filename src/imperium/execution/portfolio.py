@@ -111,6 +111,19 @@ class PortfolioAllocator:
                     f"{self.limits.pdt_equity_floor:,.0f} floor")
         return ""
 
+    def day_trades_available(self) -> bool:
+        """Whether a round trip inside one session is possible at all.
+
+        Distinct from :meth:`pdt_blocked`, which answers "may this position be
+        opened". This answers "can a strategy whose whole design is to open and
+        close within a session operate", and on a small account the answer is
+        usually no. A strategy that cannot close what it opens is not being
+        constrained; it is being prevented.
+        """
+        if self.equity <= 0 or self.equity >= self.limits.pdt_equity_floor:
+            return True
+        return self.day_trade_count < self.limits.pdt_max_day_trades
+
     @property
     def per_symbol_budget(self) -> float:
         """Ceiling divided by the *maximum* concurrency, never the current count.

@@ -138,6 +138,39 @@ CRYPTO_SPEC = AssetClassSpec(
     fractional=True,
 )
 
+#: An option contract is a hundred shares. This is the single most important
+#: number for a small account: it makes the position size *quantised*, so the
+#: smallest possible trade is a hundred times the quoted premium and cannot be
+#: reduced any further.
+OPTION_CONTRACT_MULTIPLIER = 100
+
+#: Per-contract regulatory pass-through, round trip, in dollars.
+#:
+#: Alpaca charges **no commission** on options -- an earlier version of this
+#: program asserted a $0.65 per-contract commission and concluded on that basis
+#: that options were unusable. The premise was wrong. What remains is small:
+#: OCC clearing around $0.025 and the Options Regulatory Fee around $0.02 on
+#: each leg, plus FINRA's TAF of about $0.0033 on the sell. Assumed from
+#: published schedules, not confirmed against a live account.
+#:
+#: Note what shape this cost is: a **flat fee per contract**, not a rate. Nine
+#: cents is 18bp of a $50 contract and 1.8bp of a $500 one, so the cheapest
+#: contracts -- the only ones a small account can reach -- are the ones where
+#: it bites hardest.
+OPTION_FEES_PER_CONTRACT_ROUND_TRIP = Decimal("0.093")
+
+#: Account equity below which no option position is worth opening.
+#:
+#: Derived, not chosen. One contract must fit inside the per-symbol cap, so at
+#: a 20% cap an account of E can afford a premium of E * 0.20 / 100. Below
+#: roughly $1,500 that only reaches contracts under $3, where the quoted spread
+#: is a large fraction of the premium: a $0.50 contract quoted 0.48/0.52 must
+#: gain over 12% before the round trip breaks even, and a $0.20 contract over
+#: 23%. Those are not positions, they are lottery tickets with a house edge.
+#: ``scripts/option_affordability.py`` computes the whole table.
+MIN_OPTION_ACCOUNT_EQUITY = Decimal("1500")
+
+
 OPTION_SPEC = AssetClassSpec(
     asset_class=AssetClass.US_OPTION,
     display_name="US option",
@@ -146,11 +179,19 @@ OPTION_SPEC = AssetClassSpec(
     shortable=False,
     trades_continuously=False,
     cost_model=CostModel(
+        # Commission-free at Alpaca. The real cost is the spread, and it is
+        # quoted in cents on a premium of a few dollars, so as a *rate* it
+        # depends entirely on which contract is bought -- roughly 200bp round
+        # trip on a liquid at-the-money contract and 4,000bp on a far
+        # out-of-the-money one. The default here is the liquid end; the gate
+        # will refuse anything cheaper on its own arithmetic.
         commission_bps=Decimal("0"),
-        sell_side_bps=Decimal("4.0"),
-        default_spread_bps=Decimal("50.0"),
+        sell_side_bps=Decimal("0"),
+        default_spread_bps=Decimal("200.0"),
         assumed=True,
-        source="not calibrated",
+        source="Alpaca is commission-free on options; per-contract regulatory "
+               "fees are assumed from published schedules and the spread is "
+               "not calibrated",
     ),
     calibration_key="us_equity",
     tick_size=Decimal("0.01"),
@@ -158,11 +199,22 @@ OPTION_SPEC = AssetClassSpec(
     tradeable=False,
     note=(
         "Options are recognised so that an option position is never silently "
-        "sized as though it were its underlying, but they are NOT traded. An "
-        "option's return is a non-linear function of the underlying's, so the "
-        "variance-ratio regime test and the volatility-target sizer -- both of "
-        "which assume returns are the thing being forecast -- do not carry "
-        "over. Trading them needs a different model, not a different threshold."
+        "sized as though it were its underlying, but they are NOT traded, for "
+        "three reasons in order of how binding they are.\n\n"
+        "First, affordability. A contract is a hundred shares, so position "
+        "size is quantised and the smallest possible trade is a hundred times "
+        "the premium. Under roughly $1,500 of equity an account can only reach "
+        "contracts cheap enough that the quoted spread is a large fraction of "
+        "the premium -- a $0.50 contract must gain over 12% simply to break "
+        "even on the round trip.\n\n"
+        "Second, the model. An option's return is a non-linear function of the "
+        "underlying's, so the variance-ratio regime test and the "
+        "volatility-target sizer -- both of which assume returns are the thing "
+        "being forecast -- do not carry over.\n\n"
+        "Third, theta. The strategies here forecast drift in the underlying, "
+        "and an option pays for calendar time whether or not the drift "
+        "arrives. Trading options needs a model of implied volatility, not a "
+        "different threshold on this one."
     ),
 )
 
