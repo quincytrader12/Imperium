@@ -85,6 +85,14 @@ ACCOUNT_REFRESH_SECONDS = 15
 #: hundred.
 RECONCILE_SECONDS = 30
 
+#: Symbols reasoned about per tick.
+#:
+#: Measured: one evaluation costs about 0.9ms, so a full pass over 150 symbols
+#: is roughly 140ms -- a visible stall if done every second. Twenty-five costs
+#: about 23ms a tick and covers the whole universe every six seconds, which is
+#: far faster than any of the strategies here can act on anyway.
+EVAL_SLICE = 25
+
 #: How many symbols carry an engine and a bar ring -- the set actually reasoned
 #: about bar by bar. The scan ranks the entire tradable listing; this bounds
 #: what is kept from it. The bound is memory, measured rather than guessed: a
@@ -241,6 +249,11 @@ class TradingSession:
         #: orders are not doing what it thinks.
         self.reconciliations: int = 0
         self._reconciled_at: float = 0.0
+        #: Where the evaluation sweep has reached, and how many full passes it
+        #: has completed. Published so "is it actually looking at anything" has
+        #: a number rather than an impression.
+        self._sweep_cursor: int = 0
+        self.sweeps: int = 0
         #: Asked for while a session runs, handed back when it stops. A book
         #: holding an overnight position through a suspended laptop is a book
         #: whose opening exit never gets lodged.
@@ -605,11 +618,21 @@ class TradingSession:
 
         if pooled is None:
             self.overnight_note = "no daily history returned for any equity"
+            self.telemetry.event(
+                Level.WARN, "overnight",
+                "No daily history came back, so the overnight drift cannot be "
+                "measured and nothing will be held overnight.",
+                detail="This usually means the data plan did not return daily "
+                       "bars for the equities in the universe.")
         else:
             self.overnight_note = pooled.describe()
-        self.telemetry.event(
-            Level.INFO if (pooled and pooled.credible) else Level.WARN,
-            "overnight", f"overnight drift: {self.overnight_note}")
+            # Said in words, not in statistics. An operator reading this at
+            # seven in the morning needs to know what the program will do, and
+            # a level that does not make an ordinary measurement look like a
+            # fault -- "not enough history yet" is information, not a warning.
+            self.telemetry.event(
+                Level.GOOD if pooled.credible else Level.INFO,
+                "overnight", pooled.explain(), detail=pooled.describe())
 
     def _save_overnight_state(self) -> None:
         """Persist which symbols are being carried overnight.
@@ -1016,6 +1039,58 @@ class TradingSession:
             decision = engine.evaluate()
             await self._act_on(decision)
 
+    async def _sweep(self) -> int:
+        """Reason about a slice of the universe, then move the cursor on.
+
+        The scanner ranks far more symbols than the data plan will stream, and
+        until this existed a symbol without a stream was never evaluated at
+        all: the only path to a decision was a bar arriving on the websocket.
+        With 150 symbols ranked and 30 streamed, 120 of them sat permanently
+        "unscanned" -- and with the market shut, all 150 did, which is why the
+        cluster showed no orbs and the reasoning panel filled with symbols
+        nothing had ever looked at.
+
+        Divided across ticks rather than done in one: a full pass costs about
+        140ms at 150 symbols, which would be a visible stall once a second. A
+        slice of :data:`EVAL_SLICE` costs about 23ms and covers the whole
+        universe every six seconds, so the work is spread instead of spiked.
+
+        Streamed symbols still evaluate the moment their bar closes, in
+        _drain_bars. This is the floor under that, not a replacement: it
+        guarantees every symbol is reasoned about on a bounded cycle whatever
+        the feed is doing.
+        """
+        universe = list(self.universe)
+        if not universe:
+            return 0
+        if self._sweep_cursor >= len(universe):
+            self._sweep_cursor = 0
+        slice_ = universe[self._sweep_cursor:self._sweep_cursor + EVAL_SLICE]
+        self._sweep_cursor += len(slice_)
+        if self._sweep_cursor >= len(universe):
+            self._sweep_cursor = 0
+            self.sweeps += 1
+
+        streamed = set(self._stream_priority()[:self.feed.symbol_limit])
+        for symbol in slice_:
+            engine = self.engine(symbol)
+            engine.streamed = symbol in streamed
+            quote = self.feed.quote(symbol)
+            engine.last_price = quote.last
+            engine.set_book(quote.bid or None, quote.ask or None)
+            try:
+                decision = engine.scan()
+            except Exception as exc:
+                # One symbol's arithmetic must never stop the sweep; the rest
+                # of the universe is still waiting to be looked at.
+                log.exception("evaluating %s raised", symbol)
+                self.telemetry.event(Level.WARN, "strategy",
+                                     f"could not evaluate {symbol}",
+                                     detail=f"{type(exc).__name__}: {exc}")
+                continue
+            await self._act_on(decision)
+        return len(slice_)
+
     async def _act_on(self, decision: Decision) -> None:
         if decision.verdict is not Verdict.TRADING:
             return
@@ -1071,6 +1146,10 @@ class TradingSession:
         phase = self._update_session_phase()
         self._sync_trend_holdings()
         await self._drain_bars()
+        # Every symbol gets looked at on a bounded cycle, whatever the feed is
+        # doing. Without this, only the symbols the plan streams were ever
+        # evaluated -- and with the market shut, none of them were.
+        await self._sweep()
         if phase is SessionPhase.CLOSING:
             # After the drain, so a position entered on this tick is already
             # recorded as an intentional overnight hold and is not closed again.
@@ -1580,6 +1659,13 @@ class TradingSession:
             "universe_scan": {
                 "note": self.scan_note,
                 "scanned_at": self.universe_scanned_at,
+                # When the next full re-rank is due. Without it a note that has
+                # not changed for fifteen minutes reads as a stall.
+                "next_scan_in": max(0.0, FULL_SCAN_SECONDS - (
+                    time.time() - self.universe_scanned_at))
+                if self.universe_scanned_at else 0.0,
+                "sweeps": self.sweeps,
+                "sweep_at": self._sweep_cursor,
                 "size": len(self.universe),
                 # Streamed vs evaluated. Every symbol below the line is still
                 # being scanned and still counted in the census; it is only the

@@ -1006,7 +1006,13 @@ async def test_a_stale_intraday_verdict_is_not_treated_as_an_overnight_answer(
         engine.decision.strategy = "intraday"
         engine.decision.verdict = Verdict.REJECTED
 
-        await session._tick()
+        # The guard is exercised directly rather than through a tick. The
+        # evaluation sweep now refreshes every verdict before the closing
+        # flatten runs, so a genuinely stale one no longer survives a whole
+        # tick to reach it -- which is the sweep doing its job. The guard still
+        # has to be right for the case where a symbol was not in the slice the
+        # sweep happened to cover.
+        await session._flatten_unwanted_before_the_close()
 
         assert not session.broker.positions["AAPL"].is_flat
     finally:
@@ -1056,7 +1062,9 @@ async def test_a_symbol_the_strategy_wants_is_not_closed_by_the_same_sweep(
         engine.decision.verdict = Verdict.TRADING
         engine.decision.target_weight = 0.1
 
-        await session._tick()
+        # Directly, for the same reason as above: the sweep would re-evaluate
+        # this symbol and replace the verdict being tested.
+        await session._flatten_unwanted_before_the_close()
 
         assert not session.broker.positions["AAPL"].is_flat
     finally:

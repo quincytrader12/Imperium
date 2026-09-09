@@ -863,7 +863,18 @@
       ? 'requests ' + v.remaining + '/' + v.limit + ' left' +
         (v.throttled ? ' · throttled ' + v.retry_after.toFixed(1) + 's' : '')
       : 'requests —';
-    $('foot-clock').textContent = (s.universe_scan && s.universe_scan.note) || '';
+    /* The scan note alone reads as a stall: it is the same sentence for
+     * fifteen minutes between full re-ranks. Saying when the next one lands,
+     * and that the evaluation sweep is still turning over in between, is the
+     * difference between "hung" and "on a schedule". */
+    var us = s.universe_scan || {};
+    var bits = [us.note || ''];
+    if (us.next_scan_in > 0) bits.push('re-rank in ' + fmtDuration(us.next_scan_in));
+    if (us.sweeps !== undefined) {
+      bits.push('sweep ' + (us.sweep_at || 0) + '/' + (us.size || 0) +
+                ' · ' + fmtCount(us.sweeps) + ' passes');
+    }
+    $('foot-clock').textContent = bits.filter(Boolean).join(' · ');
     var c = s.counters || {};
     $('foot-work').textContent =
       fmtCount(c.scan || 0) + ' scans · ' + fmtCount(c.decision || 0) +

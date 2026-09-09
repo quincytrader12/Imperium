@@ -185,6 +185,44 @@ class PooledDrift:
                 f"across {self.symbols} symbols; intraday "
                 f"{self.intraday_bps:+.2f}bp")
 
+    def explain(self) -> str:
+        """The same measurement, in words, and what follows from it.
+
+        The compact form above is for people who already know what a
+        t-statistic on a pooled overnight decomposition is. This one is for
+        reading at a glance on a screen at seven in the morning, and it says
+        what the program will *do*, which is the part that actually matters.
+        """
+        if not self.observations:
+            return ("No overnight history measured yet. Nothing will be held "
+                    "overnight until there is — this resolves itself as daily "
+                    "bars accumulate, it is not a refusal to trade.")
+
+        if not self.credible:
+            missing = []
+            if self.observations < 200:
+                missing.append(f"{self.observations:,} of 200 symbol-nights")
+            if self.symbols < 5:
+                missing.append(f"{self.symbols} of 5 symbols")
+            if abs(self.t_stat) < 2.0:
+                missing.append(f"a t-statistic of {self.t_stat:+.2f}, "
+                               f"where 2.0 is the bar for calling it real")
+            return ("Not enough overnight history yet to tell a real drift "
+                    "from noise: " + "; ".join(missing) + ". Nothing will be "
+                    "carried overnight until it is measurable.")
+
+        direction = "up" if self.mean_bps > 0 else "down"
+        return (
+            f"Overnight, these stocks have drifted {direction} "
+            f"{abs(self.mean_bps):.2f} basis points a night — about "
+            f"{abs(self.mean_bps) / 100:.3f}% — against {self.intraday_bps:+.2f}bp "
+            f"during the session. Measured across {self.observations:,} "
+            f"symbol-nights on {self.symbols} symbols, which is enough to be "
+            f"confident it is a real pattern rather than noise "
+            f"(t={self.t_stat:+.2f}). A position is only carried overnight "
+            f"where that drift beats what the trade costs, and on most nights "
+            f"it does not — that refusal is the strategy working, not failing.")
+
 
 def pool(splits: dict[str, SessionSplit]) -> PooledDrift:
     """Pool every symbol's overnight returns into one market estimate."""

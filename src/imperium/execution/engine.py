@@ -214,6 +214,12 @@ class SymbolEngine:
         #: is open at all. Set by the session, which owns the book.
         self.trend_held: bool = False
         self.trend_days_held: float = 0.0
+        #: Whether this symbol has a live minute stream. The data plan streams
+        #: far fewer symbols than the scanner ranks, so most do not -- and a
+        #: symbol without one is not broken, it is simply below the cap.
+        self.streamed: bool = False
+        #: Last price from the snapshot sweep, for symbols with no ring.
+        self.last_price: float = 0.0
 
     # -- market data -----------------------------------------------------
 
@@ -247,16 +253,6 @@ class SymbolEngine:
             self.telemetry.pulse(self.symbol, "refused", d.reason, intensity=0.1)
             return d
 
-        if bars_seen < self.params.warmup_bars:
-            d.verdict = Verdict.REJECTED
-            d.regime = Regime.WARMING_UP.value
-            d.reason = (f"warming up: {bars_seen} of {self.params.warmup_bars} "
-                        f"bars — this resolves itself, it is not a refusal to trade")
-            self.decision = d
-            self.telemetry.pulse(self.symbol, "warmup", d.reason,
-                                 intensity=bars_seen / max(1, self.params.warmup_bars))
-            return d
-
         # For an equity these drop the returns that span an overnight or
         # weekend seam. A close-to-open move is not a one-minute return, and
         # leaving it in inflates the volatility that sizes every position and
@@ -267,6 +263,7 @@ class SymbolEngine:
                    if rets.size > 8 else float("nan"))
 
         d.session_phase = self.session_phase.value
+        d.price = d.price or self.last_price
 
         # One symbol, one strategy at a time. Three horizons share this book and
         # blending them would allocate the same capital twice, so the choice is
@@ -295,6 +292,30 @@ class SymbolEngine:
         # exists.
         if self.pdt_subject and not self.allocator.day_trades_available():
             return self._decide_trend(d, closes)
+
+        # A symbol with no minute stream has no ring to warm up, and the data
+        # plan streams far fewer symbols than this program scans. Refusing it
+        # here would judge, by the intraday strategy's entry condition, a symbol
+        # the multi-day strategy needs nothing from the ring to trade.
+        if bars_seen < self.params.warmup_bars and self.has_daily_history:
+            return self._decide_trend(d, closes)
+
+        # Only now: the intraday blend is the one strategy that reads the ring.
+        if bars_seen < self.params.warmup_bars:
+            d.verdict = Verdict.REJECTED
+            d.regime = Regime.WARMING_UP.value
+            d.strategy = "intraday"
+            waiting = ("no live stream for this symbol — the data plan streams "
+                       "fewer symbols than this scans, and the multi-day "
+                       "strategy needs daily bars it does not have yet"
+                       if not self.streamed else
+                       "this resolves itself, it is not a refusal to trade")
+            d.reason = (f"warming up: {bars_seen} of {self.params.warmup_bars} "
+                        f"minute bars — {waiting}")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "warmup", d.reason,
+                                 intensity=bars_seen / max(1, self.params.warmup_bars))
+            return d
 
         verdict = regime_mod.classify(closes[-250:], self._thresholds(),
                                       returns=rets[-250:])
@@ -386,6 +407,15 @@ class SymbolEngine:
                                  intensity=min(1.0, 0.4 + abs(signal.value) * 0.6))
         self.decision = d
         return d
+
+    @property
+    def has_daily_history(self) -> bool:
+        """Enough daily bars for the multi-day strategy to have a view.
+
+        The trend strategy reads only daily bars, so it can reason about a
+        symbol the minute stream has never touched -- which is most of them.
+        """
+        return len(self.daily_bars) >= trend_mod.MIN_DAYS
 
     @property
     def pdt_subject(self) -> bool:
