@@ -405,6 +405,26 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 
 
+/* The watchlist columns are fixed rather than content-sized.
+   With automatic layout the widest cell in any row decides the column, so one
+   long verdict ("not admitted") or a five-figure price silently squeezed the
+   verdict column until it ellipsised -- and the verdict is the column the
+   scanner exists to show. Fixed widths mean every state is legible in the
+   300px left column without the operator scrolling sideways to find it. */
+#watchlist { table-layout: fixed; }
+#watchlist th:nth-child(1), #watchlist td:nth-child(1) { width: 36%; }
+#watchlist th:nth-child(2), #watchlist td:nth-child(2) { width: 19%; }
+#watchlist th:nth-child(3), #watchlist td:nth-child(3) { width: 18%; }
+#watchlist th:nth-child(4), #watchlist td:nth-child(4) { width: 27%; }
+/* NOT display:flex. A flex td stops being a table cell, which silently
+   discards the column widths above -- the symbol column came out 39px instead
+   of 36% and the tag ran into the ticker as "SPYEQ". */
+.wl-sym { overflow: hidden; text-overflow: ellipsis; }
+#watchlist td:nth-child(1) .cls-tag { margin-left: 5px; }
+/* The chip must never be clipped: a half-rendered verdict is worse than none. */
+#watchlist .v-chip { display: inline-block; max-width: 100%; overflow: hidden;
+                     text-overflow: ellipsis; white-space: nowrap; }
+
 /* Asset-class tag in the watchlist. The class decides the calendar, the cost
    model and the calibration, so it is shown rather than inferred from the
    ticker's shape. */
@@ -413,6 +433,14 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cls-us_equity { color: var(--accent-2); border-color: #1d4460; }
 .cls-crypto    { color: var(--hot); border-color: #3d2350; }
 .cls-us_option { color: var(--warn); border-color: #4a3a12; }
+
+/* The top of the crypto ranking. Five names, because the book will never
+   hold more than a couple and a longer list is scenery. */
+.xs-leaders { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 9px 4px; }
+.xs-leaders span { font-size: 9.5px; color: var(--dim); border: 1px solid #2a2140;
+                   border-radius: 2px; padding: 0 4px; }
+.xs-leaders span b { color: var(--hot); font-weight: 600; }
+.xs-panic { color: var(--warn); }
 
 /* ---------- overnight drift: the session phase track ---------- */
 /* Four windows in clock order. Only two of them lodge an order, and the panel

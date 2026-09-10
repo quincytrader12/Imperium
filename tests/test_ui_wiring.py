@@ -18,6 +18,7 @@ from pathlib import Path
 STATIC = Path(__file__).resolve().parents[1] / "src" / "imperium" / "server" / "static"
 APP_JS = (STATIC / "app.js").read_text(encoding="utf-8")
 INDEX = (STATIC / "index.html").read_text(encoding="utf-8")
+STYLES = (STATIC / "styles.css").read_text(encoding="utf-8")
 
 #: Ids the script builds at runtime from a prefix plus a key. They are covered
 #: by the lamp assertion below instead.
@@ -222,3 +223,55 @@ def test_the_build_check_actually_fails_when_an_asset_is_missing():
     assert any("no static files" in f for f in empty_page), (
         "a page referencing nothing passed, so the loop can be satisfied by "
         "checking zero files")
+
+
+# ---------------------------------------------------------------------------
+# The watchlist is the scanner. Its columns must line up with its headings.
+# ---------------------------------------------------------------------------
+
+
+def _watchlist_headers() -> list[str]:
+    """Just the watchlist's headings. The page has four tables, and matching
+    <th> across all of them counts the fills journal's columns too."""
+    table = re.search(r'<table id="watchlist".*?</thead>', INDEX, re.S)
+    assert table, "the watchlist table moved; update this test"
+    return re.findall(r"<th[^>]*>(.*?)</th>", table.group(0), re.S)
+
+
+def test_the_watchlist_body_has_a_cell_for_every_heading():
+    """The defect: five cells under four headings.
+
+    HTML sizes a table by the widest row, so the extra cell shifted every
+    heading one column left -- "Price" sat over the asset-class tag, "Verdict"
+    over the 24h change, and the verdict itself, the one column the scanner
+    exists to show, had no heading at all. Nothing failed; it just quietly
+    read wrong.
+    """
+    headers = _watchlist_headers()
+    built = re.search(r"\[('sym'.*?)\]\.forEach", APP_JS, re.S)
+    assert built, "the row builder moved; update this test"
+    cells = re.findall(r"'([a-z]+)'", built.group(1))
+    assert len(cells) == len(headers), (
+        f"the body builds {len(cells)} cells {cells} under {len(headers)} "
+        f"headings {headers} — every heading after the extra cell labels the "
+        f"wrong column")
+
+
+def test_every_watchlist_column_has_a_declared_width():
+    """Automatic layout lets the widest cell in any row decide the column, so
+    one long verdict or a five-figure price squeezes the verdict into an
+    ellipsis. A half-rendered verdict is worse than no verdict."""
+    assert "#watchlist { table-layout: fixed; }" in STYLES, (
+        "the table still sizes itself from its content")
+    widths = re.findall(r"#watchlist th:nth-child\((\d)\)", STYLES)
+    headers = _watchlist_headers()
+    assert len(set(widths)) == len(headers), (
+        f"{len(set(widths))} columns have a declared width but the table has "
+        f"{len(headers)}")
+
+
+def test_the_verdict_chip_cannot_be_clipped_silently():
+    """"trading" and "warming up" must both be readable without the operator
+    scrolling the panel sideways to find out which one it is."""
+    assert "#watchlist .v-chip" in STYLES
+    assert "text-overflow: ellipsis" in STYLES

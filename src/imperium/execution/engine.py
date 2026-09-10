@@ -29,6 +29,7 @@ from imperium.execution.bars import Bar, BarSeries
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution.risk import VIABLE_POSITION_NOTIONAL, RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
+from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import regime as regime_mod
 from imperium.strategy.regime import Regime, RegimeVerdict
 from imperium.strategy import overnight as overnight_mod
@@ -219,6 +220,14 @@ class SymbolEngine:
         #: here rather than measured per symbol for the same reason as the
         #: overnight drift: one symbol's history cannot resolve it.
         self.pooled_trend: PooledTrend | None = None
+        #: The crypto cross-section. Where this coin ranks against the other
+        #: coins the venue lists, what a unit of that rank has been worth, and
+        #: whether the market is in the state momentum crashes in.
+        self.pooled_cross: xs_mod.PooledCrossSection | None = None
+        self.cross_state: xs_mod.MarketState = xs_mod.MarketState()
+        self.cross_score: float = 0.0
+        self.cross_rank: int = 0
+        self.cross_cohort: int = 0
         #: How long a trend position has been carried, in days, and whether one
         #: is open at all. Set by the session, which owns the book.
         self.trend_held: bool = False
@@ -293,6 +302,16 @@ class SymbolEngine:
         if (self.session_phase is SessionPhase.CLOSING
                 and self.asset.asset_class is AssetClass.US_EQUITY):
             return self._decide_overnight(d, closes, rets)
+
+        # Crypto is ranked against the other coins the venue lists rather than
+        # judged on its own trend alone. The venue lists a few dozen, which is
+        # a cross-section; the time-series premium estimated across the whole
+        # tape is dominated by whatever the asset class did that fortnight and
+        # is close to one observation dressed as four hundred. See
+        # imperium.strategy.crosssection.
+        if (self.asset.asset_class is AssetClass.CRYPTO
+                and self.has_daily_history):
+            return self._decide_cross_section(d, closes)
 
         # An intraday strategy on an account that cannot close what it opens is
         # not constrained, it is prevented -- a position opened with no day
@@ -613,6 +632,156 @@ class SymbolEngine:
         d.reason = f"{signal.reason}; {d.sizing_reason}"
         self.telemetry.pulse(self.symbol, "decision", d.reason,
                              min(1.0, 0.4 + signal.value * 0.6))
+        self.decision = d
+        return d
+
+    def _decide_cross_section(self, d: Decision, closes: np.ndarray) -> Decision:
+        """Buy the coins that are beating their peers, when the ranking pays.
+
+        Long-only, because the venue does not lend coins to short. That makes
+        this the momentum factor *plus* the market, so two conditions guard it
+        that a long-short factor would not need: the coin's own trend must be
+        up, and the market must not be in the state momentum crashes in.
+        """
+        d.strategy = "cross_section"
+        d.regime = "cross_section"
+
+        estimate = costs.estimate_for_symbol(
+            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
+            style="taker")
+        d.round_trip_cost_bps = float(estimate.round_trip_bps)
+        d.spread_bps = float(estimate.spread_bps)
+        d.spread_assumed = estimate.spread_is_assumed
+        d.cost_warnings = estimate.warnings
+
+        # The coin's own trend, from the time-series strategy. The ranking says
+        # which coin; this says whether to hold the asset class at all.
+        own = trend_mod.evaluate(
+            self.daily_bars, asset_class=self.asset.asset_class,
+            pooled=self.pooled_trend,
+            round_trip_bps=float(estimate.round_trip_bps),
+            safety_multiple=self.params.safety_multiple)
+
+        # Daily closes, not the minute ring. This is a multi-day strategy: its
+        # volatility term is a daily one, and most coins have no minute stream
+        # at all -- the ring would be empty and every coin would be refused for
+        # "volatility is not estimable", which is a true statement about the
+        # wrong series.
+        daily = trend_mod.daily_closes(self.daily_bars)
+
+        signal = xs_mod.signal(
+            self.symbol, self.cross_score, self.cross_rank, self.cross_cohort,
+            daily,
+            pooled=self.pooled_cross, state=self.cross_state,
+            round_trip_bps=float(estimate.round_trip_bps),
+            safety_multiple=self.params.safety_multiple,
+            own_trend_positive=own.score > 0)
+
+        d.expected_edge_bps = signal.expected_edge_bps
+        d.regime_reason = signal.reason
+
+        if not signal.eligible:
+            d.verdict = Verdict.REJECTED
+            d.blocker = "cross-section not eligible"
+            d.reason = signal.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", signal.reason,
+                                 intensity=0.2)
+            return d
+
+        gate = costs.gate(
+            expected_edge_bps=Decimal(str(round(signal.expected_edge_bps, 6))),
+            estimate=estimate,
+            safety_multiple=Decimal(str(self.params.safety_multiple)))
+        d.required_bps = float(gate.required_bps)
+        if not gate.admitted:
+            d.verdict = Verdict.REJECTED
+            d.blocker = "costs"
+            d.reason = (f"ranking this coin is worth "
+                        f"{signal.expected_edge_bps:.1f}bp over "
+                        f"{signal.min_hold_days:.0f} days and needs "
+                        f"{gate.required_bps:.2f}bp to clear its costs — "
+                        f"crypto pays 25bp a side here, which is the whole "
+                        f"difference")
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "refused", d.reason, 0.25)
+            return d
+
+        daily_vol = signal.daily_vol_bps / 10_000.0
+        if daily_vol <= 0:
+            d.verdict = Verdict.REJECTED
+            d.blocker = "no volatility estimate"
+            d.reason = "daily volatility is not estimable for this coin"
+            self.decision = d
+            return d
+
+        annual_vol = daily_vol * math.sqrt(365.0)
+        weight = (self.limits.target_volatility / annual_vol) * signal.value
+        weight = min(weight, self.limits.max_position_weight)
+        horizon_sigma = daily_vol * math.sqrt(max(1.0, signal.min_hold_days))
+        tail = 2.0 * horizon_sigma
+        if tail > 0:
+            weight = min(weight, self.limits.risk_per_trade / tail)
+        # The ceiling that does not depend on the estimate.
+        #
+        # Everything above assumes a second moment exists to be estimated.
+        # Grobys et al. find the tail variance of crypto momentum returns is
+        # undefined under power-law tests, which would make a two-sigma rule
+        # not conservative but meaningless. This cap is the part that still
+        # holds if they are right.
+        weight = max(0.0, min(weight, xs_mod.MAX_CRYPTO_WEIGHT))
+
+        equity = self.allocator.equity
+        if equity > 0 and weight > 0:
+            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            if weight < floor_weight:
+                if floor_weight > self.limits.max_position_weight:
+                    d.verdict = Verdict.REJECTED
+                    d.blocker = "account too small"
+                    d.reason = (
+                        f"this coin sizes to ${weight * equity:,.2f} and the "
+                        f"${VIABLE_POSITION_NOTIONAL:,.0f} minimum would "
+                        f"exceed the {self.limits.max_position_weight:.0%} "
+                        f"per-symbol cap on a ${equity:,.2f} account")
+                    self.decision = d
+                    self.telemetry.pulse(self.symbol, "refused", d.reason, 0.2)
+                    return d
+                weight = floor_weight
+
+        d.raw_weight = weight
+        d.sizing_reason = (
+            f"{self.limits.target_volatility:.0%} target against "
+            f"{annual_vol:.0%} annualised daily volatility, capped by a "
+            f"{self.limits.risk_per_trade:.2%} budget on a 2-sigma "
+            f"{signal.min_hold_days:.0f}-day excursion ({tail * 100:.1f}%) and "
+            f"a hard {xs_mod.MAX_CRYPTO_WEIGHT:.0%} ceiling because the tail "
+            f"of crypto momentum has no reliable variance")
+
+        if d.raw_weight <= 0:
+            d.verdict = Verdict.REJECTED
+            d.blocker = "sizing"
+            d.reason = d.sizing_reason
+            self.decision = d
+            return d
+
+        clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
+        d.target_weight = clamped.weight
+        d.clamp_binding = clamped.binding
+        d.clamp_reason = clamped.reason
+
+        state = self.allocator.observe(self.symbol)
+        if not state.admitted:
+            d.verdict = Verdict.NOT_ADMITTED
+            d.blocker = "concurrency slot"
+            d.reason = state.reason or clamped.reason
+            self.decision = d
+            self.telemetry.pulse(self.symbol, "cap", d.reason, intensity=0.3)
+            return d
+
+        d.verdict = Verdict.TRADING
+        d.reason = f"{signal.reason}; {d.sizing_reason}"
+        self.telemetry.pulse(self.symbol, "decision", d.reason,
+                             intensity=min(1.0, 0.4 + signal.value * 0.6))
         self.decision = d
         return d
 

@@ -37,6 +37,7 @@ from imperium.execution import risk as risk_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
+from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
 from imperium.strategy.overnight import PooledDrift, SessionPhase
@@ -216,6 +217,15 @@ class TradingSession:
         #: Complete passes over the ranked market.
         self.cohort_passes: int = 0
         #: Pooled-estimate inputs, carried across cohort rotations and bounded.
+        #: The crypto cross-section: what the ranking pays, where each coin
+        #: sits in it, and whether the market is in the state momentum
+        #: crashes in. See imperium.strategy.crosssection.
+        self.pooled_cross: xs_mod.PooledCrossSection | None = None
+        self.cross_state = xs_mod.MarketState()
+        self.cross_scores: dict[str, float] = {}
+        self.cross_ranks: dict[str, int] = {}
+        self.cross_cohort: int = 0
+        self.cross_note: str = "no cross-sectional premium measured yet"
         self._overnight_samples: dict[str, Any] = {}
         self._trend_samples: dict[str, Any] = {}
         self.scan_note: str = "not yet scanned"
@@ -755,6 +765,11 @@ class TradingSession:
             engine.pooled_drift = pooled
             engine.pooled_trend = pooled_trend
 
+        # The crypto book is ranked against itself, which is a different
+        # estimate from the market-wide trend premium above. See
+        # imperium.strategy.crosssection for why thirty-nine coins need it.
+        self._refresh_cross_section()
+
         if pooled is None:
             self.overnight_note = "no daily history returned for any equity"
             self.telemetry.event(
@@ -931,6 +946,79 @@ class TradingSession:
         seen |= set(crypto)
         ordered += [s for s in self.universe if s not in seen]
         return ordered
+
+    def _refresh_cross_section(self) -> None:
+        """Rank the crypto cross-section, and measure what the ranking pays.
+
+        Rebuilt on the daily-history cadence rather than per tick: it walks
+        every coin over every aligned day, which is cheap at thirty-nine coins
+        and four hundred days and pointless to repeat every second when the
+        inputs only change when a daily bar closes.
+        """
+        coins = sorted(
+            s for s, engine in self.engines.items()
+            if classify_symbol(s) is AssetClass.CRYPTO and engine.daily_bars)
+        if len(coins) < xs_mod.MIN_CROSS_SECTION:
+            self.pooled_cross = None
+            self.cross_state = xs_mod.MarketState()
+            self.cross_note = (
+                f"only {len(coins)} coins have daily history; ranking needs "
+                f"{xs_mod.MIN_CROSS_SECTION}")
+            for engine in self.engines.values():
+                engine.pooled_cross = None
+            return
+
+        # Align on whole days. Coins trade around the clock, so a bar's day is
+        # its own; two coins listed at different times share only the days both
+        # actually have, and ranking across days a coin was not listed for
+        # would rank listing date.
+        series: dict[str, dict[int, float]] = {}
+        for symbol in coins:
+            series[symbol] = {
+                bar.open_time // 86_400_000: bar.close
+                for bar in self.engines[symbol].daily_bars if bar.closed}
+        common = sorted(set.intersection(*(set(v) for v in series.values())))
+        longest = max(xs_mod.LOOKBACKS)
+        if len(common) < longest + xs_mod.MARKET_WINDOW + 2:
+            self.pooled_cross = None
+            self.cross_state = xs_mod.MarketState()
+            self.cross_note = (
+                f"{len(common)} days shared across {len(coins)} coins; the "
+                f"ranking needs {longest + xs_mod.MARKET_WINDOW + 2}")
+            for engine in self.engines.values():
+                engine.pooled_cross = None
+            return
+
+        closes = {s: np.array([series[s][d] for d in common], dtype=float)
+                  for s in coins}
+
+        # An equal-weighted index of the coins, for the market state. Equal
+        # weighted rather than cap weighted because the venue does not publish
+        # a market cap and a Bitcoin-weighted index would be Bitcoin.
+        matrix = np.vstack([closes[s] / closes[s][0] for s in coins])
+        self.cross_state = xs_mod.market_state(matrix.mean(axis=0))
+
+        # Each day's ranking paired with the return that follows it. Strictly
+        # forward, which is the one property in this whole file worth its own
+        # function and its own test -- see crosssection.observations.
+        scored_cross = xs_mod.observations(closes)
+        self.pooled_cross = xs_mod.pool(scored_cross) if scored_cross else None
+
+        # Today's ranking, which is what the engines actually trade on.
+        today = {s: xs_mod.blended_return(closes[s]) for s in coins}
+        self.cross_scores = xs_mod.cross_sectional_scores(today)
+        ordered = sorted(self.cross_scores.items(), key=lambda kv: -kv[1])
+        self.cross_ranks = {s: i + 1 for i, (s, _) in enumerate(ordered)}
+        self.cross_cohort = len(self.cross_scores)
+        self.cross_note = (self.pooled_cross.describe() if self.pooled_cross
+                           else "no cross-sectional premium measured yet")
+
+        for symbol, engine in self.engines.items():
+            engine.pooled_cross = self.pooled_cross
+            engine.cross_state = self.cross_state
+            engine.cross_score = self.cross_scores.get(symbol, 0.0)
+            engine.cross_rank = self.cross_ranks.get(symbol, 0)
+            engine.cross_cohort = self.cross_cohort
 
     def _trend_observations(self, symbol: str, bars: list[Bar]):
         """One symbol's (trend score, next-day return) pairs for the pooled fit.
@@ -1829,6 +1917,9 @@ class TradingSession:
             },
             "overnight": self._overnight_block(),
             "trend": self._trend_block(),
+            # The crypto ranking. Its own block because it is a different
+            # estimate from the trend premium above: relative, not absolute.
+            "cross_section": self._cross_section_block(),
             # Why the book is not trading, counted. See _blockers.
             "blockers": self._blockers(),
             "universe_scan": {
@@ -1969,6 +2060,35 @@ class TradingSession:
             #: figure the broker's own app shows.
             "day_pnl": (self.account_equity - self.account_last_equity
                         if known and self.account_last_equity else 0.0),
+        }
+
+    def _cross_section_block(self) -> dict[str, Any]:
+        """Where each coin sits in the ranking, and whether it may be traded.
+
+        Published in full because "why is the crypto book flat" has four
+        different answers -- too few coins, an unmeasured premium, a panic
+        state, or fees -- and they are not distinguishable from a flat book.
+        """
+        pooled = self.pooled_cross
+        leaders = sorted(self.cross_scores.items(), key=lambda kv: -kv[1])[:5]
+        return {
+            "note": self.cross_note,
+            "cohort_note": self.cross_note,
+            # The cohort note when there is no estimate yet: "only 4 coins
+            # have daily history; ranking needs 10" is actionable, and "no
+            # premium measured" is not.
+            "explain": pooled.explain() if pooled else self.cross_note,
+            "credible": bool(pooled and pooled.credible),
+            "beta_bps": round(pooled.beta_bps, 2) if pooled else 0.0,
+            "t_stat": round(pooled.t_stat, 2) if pooled else 0.0,
+            "observations": pooled.observations if pooled else 0,
+            "cohort": self.cross_cohort,
+            "minimum_cohort": xs_mod.MIN_CROSS_SECTION,
+            "panic": self.cross_state.panic,
+            "market_note": self.cross_state.reason,
+            "leaders": [{"symbol": s, "score": round(v, 2),
+                         "rank": self.cross_ranks.get(s, 0)}
+                        for s, v in leaders],
         }
 
     def _trend_block(self) -> dict[str, Any]:

@@ -98,6 +98,17 @@
       <div class="dimmer" id="tr-why" style="padding:0 9px 8px"></div>
     </section>
 
+    <!-- The crypto cross-section. Its own panel because it is a different
+         estimate from the trend above: it ranks the coins against each other
+         rather than each coin against its own past, which is the form the
+         crypto momentum literature actually documents. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Crypto ranking <span class="note" id="xs-note">—</span></h2>
+      <div class="limit-grid" id="xs-grid"></div>
+      <div class="xs-leaders" id="xs-leaders"></div>
+      <div class="dimmer" id="xs-why" style="padding:0 9px 8px"></div>
+    </section>
+
     <!-- The overnight drift strategy. Kept apart from the intraday panels
          because it is a different trade: a different holding period, no stop
          behind it, and its own order types. -->

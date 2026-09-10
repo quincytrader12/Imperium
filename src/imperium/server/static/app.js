@@ -189,14 +189,25 @@
   function makeRow(symbol) {
     var tr = document.createElement('tr');
     var cells = {};
-    ['sym', 'cls', 'price', 'chg', 'verdict'].forEach(function (k) {
+    /* Four cells, because the header has four columns. The asset-class tag
+     * used to be a fifth with no <th> above it, which silently shifted every
+     * heading one column left: "Price" sat over the tag, "Verdict" over the
+     * 24h change, and the verdict itself -- the column an operator actually
+     * reads -- had no heading at all. It belongs to the symbol anyway. */
+    ['sym', 'price', 'chg', 'verdict'].forEach(function (k) {
       var td = document.createElement('td');
       if (k === 'price' || k === 'chg') td.className = 'num';
       cells[k] = td;
       tr.appendChild(td);
     });
-    cells.sym.textContent = symbol;
-    cells.cls.className = 'cls-tag';
+    var name = document.createElement('span');
+    name.className = 'wl-sym';
+    name.textContent = symbol;
+    cells.sym.appendChild(name);
+    var tag = document.createElement('span');
+    tag.className = 'cls-tag';
+    cells.sym.appendChild(tag);
+    cells.cls = tag;
     var chip = document.createElement('span');
     chip.className = 'v-chip';
     cells.verdict.appendChild(chip);
@@ -737,6 +748,50 @@
 
   /* ---------- multi-day trend ---------- */
 
+  /* The crypto ranking. "Why is the crypto book flat" has four different
+   * answers -- too few coins listed, an unmeasured premium, a panic state, or
+   * fees -- and a flat book looks the same under all of them. */
+  function renderCrossSection(s) {
+    var x = s.cross_section || {};
+    var note = $('xs-note');
+    if (!note) return;
+    note.textContent = x.credible
+      ? (x.beta_bps > 0 ? '+' : '') + x.beta_bps + 'bp/day per rank · t=' + x.t_stat
+      : (x.cohort ? 'not measurable yet'
+                  : (x.cohort_note || 'not enough coins to rank'));
+    note.className = 'note' + (x.panic ? ' xs-panic' : '');
+
+    var enough = (x.cohort || 0) >= (x.minimum_cohort || 0);
+    $('xs-grid').innerHTML =
+      cell('coins', (x.cohort || 0) + ' / ' + (x.minimum_cohort || 0),
+           enough ? 'good' : 'warn', 'ranked / needed') +
+      cell('premium', (x.beta_bps || 0).toFixed(2) + 'bp',
+           x.credible ? 'good' : '', 'per unit of rank') +
+      cell('t-stat', ((x.t_stat || 0) >= 0 ? '+' : '') + (x.t_stat || 0).toFixed(2),
+           Math.abs(x.t_stat || 0) >= 2 ? 'good' : '',
+           x.credible ? 'credible' : 'not yet') +
+      cell('sample', fmtNum(x.observations || 0, 0), '', 'coin-days') +
+      cell('market', x.panic ? 'panic' : 'ordinary', x.panic ? 'warn' : '',
+           x.panic ? 'nothing opened' : 'momentum ok');
+
+    var host = $('xs-leaders');
+    if (host) {
+      var leaders = x.leaders || [];
+      host.innerHTML = leaders.length
+        ? leaders.map(function (l) {
+            return '<span><b>' + l.symbol.replace('/USD', '') + '</b> ' +
+                   (l.score > 0 ? '+' : '') + l.score + 'σ</span>';
+          }).join('')
+        : '';
+    }
+
+    var why = $('xs-why');
+    if (why) {
+      why.textContent = (x.panic ? x.market_note : (x.explain || '')) || '';
+      why.className = x.panic ? 'warn' : 'dimmer';
+    }
+  }
+
   function renderTrend(s) {
     var t = s.trend;
     if (!t) return;
@@ -1028,6 +1083,7 @@
     renderRisk(s);
     renderCensus(s);
     renderTrend(s);
+    renderCrossSection(s);
     renderOvernight(s);
     renderCosts(s);
     renderStats(s);

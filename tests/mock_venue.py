@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import time
 from typing import Any, Callable
 
@@ -100,6 +101,26 @@ class MockVenue:
             made.append(symbol)
         return made
 
+    def list_extra_crypto(self, count: int) -> list[str]:
+        """Add ``count`` tradable coins to what /v2/assets returns.
+
+        The cross-sectional strategy needs a cross-section: with three coins
+        the "top decile" is one coin and the ranking measures which pairs the
+        venue happens to list. Alpaca lists a few dozen, so the fixture has to
+        as well or the test only ever exercises the too-narrow refusal.
+        """
+        made = []
+        for i in range(count):
+            symbol = f"CO{i:03d}/USD"
+            self._filler.append({
+                "symbol": symbol, "name": f"Coin {i}", "class": "crypto",
+                "exchange": "CRYPTO", "tradable": True, "shortable": False,
+                "easy_to_borrow": False, "fractionable": True,
+                "status": "active",
+            })
+            made.append(symbol)
+        return made
+
     # -- helpers ---------------------------------------------------------
 
     def _json(self, payload: Any, status: int = 200) -> httpx.Response:
@@ -174,7 +195,7 @@ class MockVenue:
             timeframe = params.get("timeframe", "1Min")
             bars = {}
             for i, symbol in enumerate(symbols):
-                bars[symbol] = self._bar_rows(i, limit, timeframe)
+                bars[symbol] = self._bar_rows(i, limit, timeframe, symbol)
             return self._json({"bars": bars, "next_page_token": None})
 
         if path.endswith("/snapshots"):
@@ -226,8 +247,42 @@ class MockVenue:
     daily_overnight_bps = 5.0
     daily_intraday_bps = -3.0
 
-    def _bar_rows(self, index: int, limit: int,
-                  timeframe: str) -> list[dict[str, Any]]:
+    #: Per-symbol daily drift, in basis points, so the cross-section has
+    #: something to rank.
+    #:
+    #: Without this every symbol followed an identical return path differing
+    #: only in price level, so the cross-sectional standard deviation was zero
+    #: and any strategy that ranks symbols against each other could only ever
+    #: be tested against its "nothing to rank" refusal. A fixture where every
+    #: name returns the same thing cannot exercise a relative-value strategy.
+    #:
+    #: Applied to crypto only, and to the intraday leg. Crypto contributes no
+    #: overnight observations -- a market that never closes has no overnight --
+    #: so the equity decomposition the drift tests assert on is untouched by
+    #: construction rather than by an averaging argument that only holds for
+    #: many symbols. (It does not hold for two: over the mock's two equities a
+    #: sine tilt averages +5.9bp, not zero, which is exactly how this was
+    #: caught.)
+    daily_symbol_spread_bps = 14.0
+
+    #: Day-to-day wobble on crypto bars, in basis points.
+    #:
+    #: Without it a coin's daily returns are identical every day, so realised
+    #: volatility is exactly zero and every volatility-scaled sizing rule
+    #: divides by it. The strategy then refuses every coin for "volatility is
+    #: not estimable" and the sizing path is never reached by any test.
+    #:
+    #: Deterministic rather than random so the fixture stays reproducible.
+    #:
+    #: Hashed rather than sinusoidal. A sine wobble is periodic, so a trailing
+    #: window samples its phase and the next day's return is anti-correlated
+    #: with it: the fixture then contains strong *reversal* and a momentum
+    #: strategy correctly refuses every coin, which looks exactly like the
+    #: strategy being broken. Measured at beta = -21.5bp/day, t = -34.5.
+    daily_crypto_wobble_bps = 90.0
+
+    def _bar_rows(self, index: int, limit: int, timeframe: str,
+                  symbol: str = "") -> list[dict[str, Any]]:
         """Bars whose spacing and shape actually follow the requested timeframe.
 
         A mock that serves minute-spaced rows for a ``1Day`` request would let a
@@ -241,9 +296,22 @@ class MockVenue:
 
         if timeframe == "1Day":
             close = base
+            # Persistent per-symbol drift: a name that has been outperforming
+            # keeps outperforming, so a cross-sectional ranking has a real
+            # signal to find rather than noise to fit.
+            crypto = "/" in symbol
+            tilt = (self.daily_symbol_spread_bps * math.sin(float(index))
+                    if crypto else 0.0)
             for k in range(limit):
+                # A hash, not a wave: white-ish noise with no period for a
+                # trailing window to lock on to.
+                seed = math.sin(k * 12.9898 + index * 78.233) * 43758.5453
+                wobble = (self.daily_crypto_wobble_bps
+                          * ((seed - math.floor(seed)) - 0.5) * 2.0
+                          if crypto else 0.0)
                 open_px = close * (1 + self.daily_overnight_bps / 10_000)
-                close = open_px * (1 + self.daily_intraday_bps / 10_000)
+                close = open_px * (
+                    1 + (self.daily_intraday_bps + tilt + wobble) / 10_000)
                 rows.append({
                     "t": (start + dt.timedelta(days=k)).isoformat(),
                     "o": open_px, "h": max(open_px, close) * 1.004,
