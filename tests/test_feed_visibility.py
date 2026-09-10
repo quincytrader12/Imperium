@@ -231,3 +231,68 @@ def test_a_stopped_session_is_not_scored_as_unhealthy():
     session.lamps.venue = "ok"
 
     assert session._health_score()["score"] > 0.8
+
+
+# ---------------------------------------------------------------------------
+# Sentences an operator actually reads, in a clock they actually keep.
+# ---------------------------------------------------------------------------
+
+
+def test_the_closed_market_sentence_is_not_two_sentences_spliced_together():
+    """A real defect, and one only reading the output in place would catch.
+
+    ``describe`` returns a whole clause -- "market closed, opens Fri 13:30
+    UTC" -- and it was embedded mid-sentence, producing "the equity market is
+    shut, which opens market closed, opens Fri 13:30 UTC". Every unit test
+    passed: they checked for the phrases around it, and none read the finished
+    line.
+    """
+    session = _session(open_market=False)
+    session.running = True
+    session.universe = ["AAPL", "MSFT"]
+    session.feed.connected = True
+    session.feed.symbols = list(session.universe)
+
+    reason = session._feed_reason()
+
+    assert "opens market closed" not in reason, reason
+    assert reason.count("market") <= 2, f"the clause is spliced twice: {reason}"
+    assert "UTC" in reason, "the operator still needs to know when"
+
+
+def test_the_clock_offers_a_bare_time_for_composing_sentences():
+    import datetime as dt
+
+    clock = MarketClock(is_open=False,
+                        next_open=dt.datetime(2026, 9, 11, 13, 30, tzinfo=UTC))
+    assert clock.next_change_text() == "Fri 13:30 UTC"
+    # And the whole-clause form is still available for standalone display.
+    assert clock.describe().startswith("market closed")
+
+
+@pytest.mark.asyncio
+async def test_the_per_symbol_note_does_not_repeat_the_timestamp():
+    """The note is stamped onto every equity row the market guard refuses. A
+    hundred and fifty copies of the same UTC time is noise, and the header
+    already carries the clock with a countdown.
+
+    Driven through the clock refresh rather than assigned here: a note this
+    test composes itself proves only that this test can compose one.
+    """
+    from imperium.venues.alpaca.client import AlpacaClient
+    from mock_venue import KEY, SECRET, MockVenue
+
+    venue = MockVenue()
+    venue.market_open = False
+    session = TradingSession()
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    try:
+        await session.refresh_clock()
+    finally:
+        await session.detach_client()
+
+    note = session.allocator.market_note
+    assert note, "the note must still say something"
+    assert "UTC" not in note, f"the timestamp is repeated per symbol: {note}"
+    assert "crypto continues" in note

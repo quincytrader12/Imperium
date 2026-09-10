@@ -113,3 +113,112 @@ def test_the_cohort_wide_reason_for_not_trading_is_rendered():
         "trading' is still unanswerable on screen")
     assert "b.summary" in APP_JS, "the summary sentence itself is not rendered"
     assert 'id="blockers"' in INDEX, "the page has nowhere to show it"
+
+
+# ---------------------------------------------------------------------------
+# Script dependencies. app.js reads globals another file defines, and a missing
+# script is not a degraded page — it throws on the first line that touches the
+# global and the whole terminal comes up blank.
+# ---------------------------------------------------------------------------
+
+
+def _script_order() -> list[str]:
+    return re.findall(r'<script[^>]+src="/static/([^"]+)"', INDEX)
+
+
+def test_every_global_the_script_depends_on_is_loaded_by_the_page():
+    """A missing <script> is not a missing feature.
+
+    ``app.js`` reads ``window.Fmt`` at the top of its body, so if fmt.js is not
+    loaded the reference throws immediately and every panel stays empty. The
+    page would be blank, with one line in a console nobody has open.
+    """
+    scripts = _script_order()
+    for global_name, provider in (("window.Fmt", "fmt.js"),
+                                  ("window.Cluster", "cluster.js")):
+        if global_name in APP_JS:
+            assert provider in scripts, (
+                f"app.js reads {global_name} and the page never loads "
+                f"{provider} — the terminal would come up blank")
+
+
+def test_dependencies_are_loaded_before_the_script_that_reads_them():
+    """Order is the other half of it: a provider loaded after its consumer is
+    the same failure with a longer explanation."""
+    scripts = _script_order()
+    assert "app.js" in scripts
+    app_at = scripts.index("app.js")
+    for provider in ("fmt.js", "cluster.js"):
+        if provider in scripts:
+            assert scripts.index(provider) < app_at, (
+                f"{provider} is loaded after app.js, which reads it")
+
+
+def test_the_build_verifies_every_asset_the_page_asks_for():
+    """The packaging check derives its list from the page for the same reason.
+
+    Kept by hand it goes stale silently: a new script ships unverified, and a
+    build that dropped it still reports success.
+    """
+    import sys
+    from pathlib import Path as _P
+
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "packaging"))
+    from verify_build import page_assets
+
+    found = page_assets(INDEX)
+    for script in _script_order():
+        assert f"/static/{script}" in found, (
+            f"the build check would not verify {script} shipped")
+    assert "/static/styles.css" in found, "the stylesheet is not checked either"
+
+
+def test_the_build_check_actually_fails_when_an_asset_is_missing():
+    """The check that guards the shipped artefact, checked itself.
+
+    A version of this loop that verifies nothing is indistinguishable from one
+    that verifies everything: both print a build that passed. That is the exact
+    shape of failure this whole file exists for, one level up — so the loop is
+    driven here against a bundle with a file deliberately missing.
+    """
+    import sys
+    import urllib.error
+    from pathlib import Path as _P
+
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "packaging"))
+    from verify_build import check_assets
+
+    body = INDEX
+
+    def fetch_all_present(path):
+        return 200, "x" * 5000
+
+    def fetch_missing_fmt(path):
+        if path.endswith("fmt.js"):
+            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+        return 200, "x" * 5000
+
+    def fetch_truncated(path):
+        return 200, "x" * 10          # served, but empty enough to be broken
+
+    ok: list[str] = []
+    check_assets(fetch_all_present, body, ok)
+    assert ok == [], f"a complete bundle was reported broken: {ok}"
+
+    missing: list[str] = []
+    check_assets(fetch_missing_fmt, body, missing)
+    assert any("fmt.js" in f for f in missing), (
+        "a build that dropped fmt.js was reported as passing — the terminal "
+        "would come up blank")
+    assert any("add-data" in f for f in missing), "the failure must name the cause"
+
+    truncated: list[str] = []
+    check_assets(fetch_truncated, body, truncated)
+    assert len(truncated) >= 3, (
+        "files served as near-empty stubs were accepted")
+
+    empty_page: list[str] = []
+    check_assets(fetch_all_present, "<html><body>nothing</body></html>", empty_page)
+    assert any("no static files" in f for f in empty_page), (
+        "a page referencing nothing passed, so the loop can be satisfied by "
+        "checking zero files")

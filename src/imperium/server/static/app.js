@@ -16,6 +16,10 @@
 (function () {
   'use strict';
 
+  // See fmt.js: the viewer's own clock, and a timezone-free countdown.
+  var fmtLocalTime = window.Fmt.fmtLocalTime;
+  var fmtUntil = window.Fmt.fmtUntil;
+
   var $ = function (id) { return document.getElementById(id); };
 
   var state = {
@@ -104,8 +108,15 @@
 
     var market = s.market || {};
     var mk = $('h-market');
-    mk.textContent = market.describe || '-';
+    var when = market.is_open ? market.next_close : market.next_open;
+    var until = fmtUntil(when), local = fmtLocalTime(when);
+    mk.textContent = market.is_open
+      ? (until ? 'open · closes in ' + until : 'open')
+      : (until ? 'closed · opens in ' + until : (market.describe || '-'));
     mk.className = 'v ' + (market.is_open ? 'up' : market.crypto_only ? '' : 'muted');
+    mk.title = (market.describe || '') + (local ? '\n' + (market.is_open
+      ? 'closes' : 'opens') + ' ' + local + ' your time' : '') +
+      '\nCrypto trades around the clock and is unaffected.';
 
     var trading = s.watchlist.filter(function (w) { return w.verdict === 'trading'; }).length;
     $('h-trading').textContent = trading + ' / ' + s.watchlist.length;
@@ -134,10 +145,18 @@
       messages.push(['warn', 'Pattern day trader: ' + s.limits.pdt_blocked +
         '. Exits still pass; no new equity exposure is opened.']);
     }
-    if (market && !market.is_open && !market.crypto_only) {
-      messages.push(['warn', 'Equity market is closed (' + (market.describe || '') +
-        '). Crypto continues; equities take no new exposure.']);
-    }
+    /* The closed equity market is deliberately NOT a banner.
+     *
+     * The banner is for things that stop the program working, and this does
+     * not: crypto trades through it, the sweep keeps reasoning, and the
+     * multi-day strategies keep their holds. It is true for roughly seventeen
+     * hours of every day, so as a permanent amber bar it trained the operator
+     * to ignore the one strip of screen reserved for real faults -- and it
+     * said so in UTC, which most operators do not think in.
+     *
+     * The header carries it with a countdown, and the blockers line says how
+     * many symbols it is actually holding up, which is the part that matters.
+     */
     if (s.halted) messages.push(['bad', 'BOOK HALTED — ' + s.halt_reason]);
     if (s.venue_error) messages.push(['warn', s.venue_error]);
     if (!messages.length) { banner.hidden = true; banner.textContent = ''; return; }
@@ -886,6 +905,12 @@
   }
 
   /* ---------- session statistics ---------- */
+
+  /* The venue's calendar is published in UTC, which is correct for a log and
+   * useless on screen: an operator outside UTC has to convert it in their head
+   * every time they glance at it. The browser knows the viewer's timezone, so
+   * the terminal shows their clock -- and leads with a countdown, which needs
+   * no timezone at all. */
 
   function fmtDuration(sec) {
     if (!sec || sec < 1) return '—';

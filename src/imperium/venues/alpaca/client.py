@@ -106,6 +106,18 @@ class MarketClock:
     def age(self) -> float:
         return time.time() - self.fetched_at if self.fetched_at else float("inf")
 
+    def next_change_text(self) -> str:
+        """Just the time of the next open or close, with no sentence around it.
+
+        ``describe`` returns a whole clause ("market closed, opens Fri 13:30
+        UTC"), which reads correctly on its own and turns into nonsense the
+        moment it is embedded in another sentence -- "the market is shut,
+        which opens market closed, opens Fri 13:30 UTC". Callers composing a
+        sentence want this instead.
+        """
+        when = self.next_close if self.is_open else self.next_open
+        return f"{when:%a %H:%M UTC}" if when else ""
+
     def describe(self) -> str:
         if self.is_open:
             if self.next_close:

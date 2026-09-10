@@ -402,9 +402,12 @@ class TradingSession:
         # clamped shut by the equity calendar from the close to the next open.
         self.allocator.set_market_state(
             equities_open=self.market_clock.is_open,
+            # No timestamp: this note is repeated on every equity row in the
+            # reasoning panel, and a hundred and fifty copies of the same UTC
+            # time is noise. The header carries the clock, with a countdown.
             note=("" if self.market_clock.is_open
-                  else f"{self.market_clock.describe()}; equities take no new "
-                       f"exposure while closed, crypto continues"))
+                  else "the equity market is closed; equities take no new "
+                       "exposure until it opens, crypto continues"))
 
     def _crypto_only(self) -> bool:
         """True when every admitted symbol trades around the clock.
@@ -2344,7 +2347,10 @@ class TradingSession:
         shut = self._quiet_is_expected()
         when = ""
         if shut and self.market_clock.next_open:
-            when = f", which opens {self.market_clock.describe()}"
+            # The bare time, not describe(): that returns a whole clause and
+            # embedding it here produced "which opens market closed, opens Fri
+            # 13:30 UTC".
+            when = f" until {self.market_clock.next_change_text()}"
         if not math.isfinite(age):
             if shut:
                 return (f"connected and subscribed to {streamed} symbols; the "
