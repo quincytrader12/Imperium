@@ -72,6 +72,14 @@ class Decision:
     #: the operator can tell a priced symbol from a guessed one.
     spread_assumed: bool = True
     clamp_binding: str = "none"
+    #: A short, stable label for *why* this symbol is not being traded.
+    #:
+    #: Set alongside the prose reason at every refusal. The prose carries this
+    #: symbol's own numbers, which is what an operator needs when looking at
+    #: one row -- and exactly what makes it useless for counting. Without a
+    #: label the terminal cannot answer "why is nothing trading", which after
+    #: four silent hours is the only question worth asking.
+    blocker: str = ""
     clamp_reason: str = ""
     sizing_reason: str = ""
     cost_warnings: tuple[str, ...] = ()
@@ -145,6 +153,7 @@ class Decision:
             "spread_bps": round(self.spread_bps, 3),
             "spread_assumed": self.spread_assumed,
             "clamp_binding": self.clamp_binding,
+            "blocker": self.blocker,
             "clamp_reason": self.clamp_reason,
             "sizing_reason": self.sizing_reason,
             "cost_warnings": list(self.cost_warnings),
@@ -247,6 +256,7 @@ class SymbolEngine:
 
         if not self.tradable:
             d.verdict = Verdict.REJECTED
+            d.blocker = "not tradable"
             d.reason = (f"{self.asset.display_name} is not traded by this "
                         f"program: {self.asset.note or 'unsupported asset class'}")
             self.decision = d
@@ -303,6 +313,7 @@ class SymbolEngine:
         # Only now: the intraday blend is the one strategy that reads the ring.
         if bars_seen < self.params.warmup_bars:
             d.verdict = Verdict.REJECTED
+            d.blocker = "warming up"
             d.regime = Regime.WARMING_UP.value
             d.strategy = "intraday"
             waiting = ("no live stream for this symbol — the data plan streams "
@@ -346,6 +357,7 @@ class SymbolEngine:
 
         if not gate.admitted:
             d.verdict = Verdict.REJECTED
+            d.blocker = "no signal"
             d.reason = gate.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "refused", gate.reason,
@@ -375,6 +387,7 @@ class SymbolEngine:
 
         if sized.weight <= 0:
             d.verdict = Verdict.REJECTED
+            d.blocker = "sizing"
             d.reason = sized.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "refused", sized.reason, intensity=0.2)
@@ -389,6 +402,7 @@ class SymbolEngine:
         state = self.allocator.observe(self.symbol)
         if not state.admitted:
             d.verdict = Verdict.NOT_ADMITTED
+            d.blocker = "concurrency slot"
             d.reason = state.reason or clamped.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "cap", d.reason, intensity=0.3)
@@ -505,6 +519,7 @@ class SymbolEngine:
 
         if not signal.eligible:
             d.verdict = Verdict.REJECTED
+            d.blocker = "trend not eligible"
             d.reason = signal.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "refused", signal.reason, 0.2)
@@ -517,6 +532,7 @@ class SymbolEngine:
         d.required_bps = float(gate.required_bps)
         if not gate.admitted:
             d.verdict = Verdict.REJECTED
+            d.blocker = "costs"
             d.reason = (f"the trend is worth {signal.expected_edge_bps:.1f}bp "
                         f"over {signal.min_hold_days:.0f} days and needs "
                         f"{gate.required_bps:.2f}bp to clear its costs")
@@ -531,6 +547,7 @@ class SymbolEngine:
         daily_vol = signal.daily_vol_bps / 10_000.0
         if daily_vol <= 0:
             d.verdict = Verdict.REJECTED
+            d.blocker = "no volatility estimate"
             d.reason = "daily volatility is not estimable for this symbol"
             self.decision = d
             return d
@@ -553,6 +570,7 @@ class SymbolEngine:
             if weight < floor_weight:
                 if floor_weight > self.limits.max_position_weight:
                     d.verdict = Verdict.REJECTED
+                    d.blocker = "account too small"
                     d.reason = (
                         f"a trend position here sizes to ${weight * equity:,.2f}, "
                         f"and the ${VIABLE_POSITION_NOTIONAL:,.0f} minimum would "
@@ -572,6 +590,7 @@ class SymbolEngine:
 
         if d.raw_weight <= 0:
             d.verdict = Verdict.REJECTED
+            d.blocker = "sizing"
             d.reason = d.sizing_reason
             self.decision = d
             return d
@@ -584,6 +603,7 @@ class SymbolEngine:
         state = self.allocator.observe(self.symbol)
         if not state.admitted:
             d.verdict = Verdict.NOT_ADMITTED
+            d.blocker = "concurrency slot"
             d.reason = state.reason or clamped.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "cap", d.reason, 0.3)
@@ -625,6 +645,7 @@ class SymbolEngine:
         budget = self.limits.max_position_weight * self.allocator.equity
         if self.allocator.equity > 0 and d.price > budget:
             d.verdict = Verdict.REJECTED
+            d.blocker = "share costs more than the budget"
             d.reason = (
                 f"one share costs ${d.price:,.2f} and this account can put at "
                 f"most ${budget:,.2f} into a single name; the closing auction "
@@ -653,6 +674,7 @@ class SymbolEngine:
 
         if not signal.eligible:
             d.verdict = Verdict.REJECTED
+            d.blocker = "overnight not eligible"
             d.reason = signal.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "refused", signal.reason,
@@ -666,6 +688,7 @@ class SymbolEngine:
         d.required_bps = float(gate.required_bps)
         if not gate.admitted:
             d.verdict = Verdict.REJECTED
+            d.blocker = "costs"
             # The most common and most important refusal in this strategy: the
             # drift is real and smaller than the cost of capturing it.
             d.reason = (f"overnight drift {signal.expected_edge_bps:.2f}bp does "
@@ -679,6 +702,7 @@ class SymbolEngine:
         overnight_sd = signal.overnight_vol_bps / 10_000.0
         if overnight_sd <= 0:
             d.verdict = Verdict.REJECTED
+            d.blocker = "no volatility estimate"
             d.reason = "overnight volatility is not estimable for this symbol"
             self.decision = d
             return d
@@ -700,6 +724,7 @@ class SymbolEngine:
             if weight < floor_weight:
                 if floor_weight > self.limits.max_position_weight:
                     d.verdict = Verdict.REJECTED
+                    d.blocker = "account too small"
                     d.reason = (
                         f"an overnight position here sizes to "
                         f"${weight * equity:,.2f}; the closing auction takes "
@@ -720,6 +745,7 @@ class SymbolEngine:
 
         if d.raw_weight <= 0:
             d.verdict = Verdict.REJECTED
+            d.blocker = "sizing"
             d.reason = d.sizing_reason
             self.decision = d
             return d
@@ -735,6 +761,7 @@ class SymbolEngine:
         state = self.allocator.observe(self.symbol)
         if not state.admitted:
             d.verdict = Verdict.NOT_ADMITTED
+            d.blocker = "concurrency slot"
             d.reason = state.reason or clamped.reason
             self.decision = d
             self.telemetry.pulse(self.symbol, "cap", d.reason, intensity=0.3)

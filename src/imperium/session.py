@@ -395,11 +395,16 @@ class TradingSession:
                                  "could not read the market clock",
                                  detail=exc.message)
             return
-        self.allocator.market_open = self.market_clock.is_open or self._crypto_only()
-        self.allocator.market_note = (
-            "" if self.allocator.market_open
-            else f"{self.market_clock.describe()}; equities take no new exposure "
-                 f"while closed")
+        # Per class. The old form was ``is_open or _crypto_only()`` -- one flag
+        # for the whole book, true only when *everything* resident was crypto.
+        # Crypto is pinned resident alongside equities, so it was almost never
+        # everything, and the flag read False every night: the 24/7 book was
+        # clamped shut by the equity calendar from the close to the next open.
+        self.allocator.set_market_state(
+            equities_open=self.market_clock.is_open,
+            note=("" if self.market_clock.is_open
+                  else f"{self.market_clock.describe()}; equities take no new "
+                       f"exposure while closed, crypto continues"))
 
     def _crypto_only(self) -> bool:
         """True when every admitted symbol trades around the clock.
@@ -1821,6 +1826,8 @@ class TradingSession:
             },
             "overnight": self._overnight_block(),
             "trend": self._trend_block(),
+            # Why the book is not trading, counted. See _blockers.
+            "blockers": self._blockers(),
             "universe_scan": {
                 "note": self.scan_note,
                 "scanned_at": self.universe_scanned_at,
@@ -2240,6 +2247,52 @@ class TradingSession:
             "utilisation": budget.utilisation,
             "retry_after": round(pause, 2),
             "throttled": pause > 0,
+        }
+
+    def _blockers(self) -> dict[str, Any]:
+        """What is stopping the book from trading, counted across the cohort.
+
+        The per-symbol reasons carry each symbol's own numbers, which is what
+        an operator needs when reading one row and exactly what makes them
+        useless for counting a hundred and fifty. After four silent hours the
+        only question worth asking is "what is holding *everything* up", and
+        until this existed the terminal could not answer it -- the answer was
+        spread across a scrolling panel, one symbol at a time.
+
+        Reported as counts against a named blocker rather than as prose, so a
+        single dominant cause is obvious at a glance.
+        """
+        counts: dict[str, int] = {}
+        trading = 0
+        for engine in self.engines.values():
+            decision = engine.decision
+            if decision.verdict is Verdict.TRADING and not decision.hold:
+                trading += 1
+                continue
+            # UNSCANNED is the engine's own initial state, so this is the
+            # exact signal rather than an inference from an empty field:
+            # "not looked at yet" and "looked at and refused" are different
+            # answers, and collapsing them would hide a sweep that has stopped.
+            if decision.verdict is Verdict.UNSCANNED:
+                label = "not yet scanned"
+            else:
+                label = decision.blocker or "other"
+
+            counts[label] = counts.get(label, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: -kv[1])
+        total = sum(counts.values())
+        summary = ""
+        if trading:
+            summary = f"{trading} symbol{'s' if trading != 1 else ''} worth trading"
+        elif ranked:
+            top, n = ranked[0]
+            share = n / total if total else 0.0
+            summary = (f"nothing is trading: {n} of {total} "
+                       f"({share:.0%}) held up by \u201c{top}\u201d")
+        return {
+            "summary": summary,
+            "trading": trading,
+            "counts": [{"blocker": k, "symbols": v} for k, v in ranked[:8]],
         }
 
     def _quiet_is_expected(self) -> bool:

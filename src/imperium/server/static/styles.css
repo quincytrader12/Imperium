@@ -170,6 +170,16 @@ tbody tr:hover { background: #111a27; }
 
 /* ---------- reasoning ---------- */
 
+/* "Why is nothing trading", answered for the whole cohort rather than one
+   symbol at a time. */
+.blockers { margin: 0; padding: 4px 8px; font-size: 9.5px; line-height: 1.5;
+            color: var(--dim); background: var(--panel-2);
+            border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+.blockers b { color: var(--text); font-weight: 600; }
+.blockers .trading { color: var(--good); }
+.blockers .tally { color: var(--dimmer); }
+
+
 .reason-row {
   padding: 4px 8px;
   border-bottom: 1px solid #0f1520;

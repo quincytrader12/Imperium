@@ -101,3 +101,15 @@ def test_the_venue_error_behind_a_dead_socket_is_reachable():
     assert "last_error" in APP_JS, (
         "the venue's own words about why the socket died are sent and never "
         "shown")
+
+
+def test_the_cohort_wide_reason_for_not_trading_is_rendered():
+    """After four silent hours the only question worth asking is what is
+    holding up *all* of the symbols. The session counts it; if nothing reads
+    the count, the answer is computed, transmitted and invisible -- which is
+    the state the per-symbol panel was already in."""
+    assert "blockers" in APP_JS, (
+        "nothing reads the cohort-wide blocker tally, so 'why is nothing "
+        "trading' is still unanswerable on screen")
+    assert "b.summary" in APP_JS, "the summary sentence itself is not rendered"
+    assert 'id="blockers"' in INDEX, "the page has nowhere to show it"

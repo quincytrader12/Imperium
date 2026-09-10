@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Iterable
 
 from imperium.execution.risk import RiskLimits
+from imperium.venues.assets import AssetClass, classify_symbol
 
 log = logging.getLogger("imperium.portfolio")
 
@@ -83,6 +84,12 @@ class PortfolioAllocator:
         self.flagged_pattern_day_trader: bool = False
         #: Set when the market is closed, so the book stops taking exposure it
         #: cannot actually get filled on.
+        #: Whether each class's own market is open. Per class, not one flag:
+        #: crypto never closes, and a single boolean meant the equity
+        #: calendar decided whether a 24/7 book could open a position. It
+        #: could not, from the close until the next open, which is most of
+        #: the day.
+        self.markets_open: dict[AssetClass, bool] = {}
         self.market_open: bool = True
         self.market_note: str = ""
         #: Who applied the current halt. See set_halt: a daily-loss halt is
@@ -233,6 +240,33 @@ class PortfolioAllocator:
 
     # -- clamping --------------------------------------------------------
 
+    def set_market_state(self, *, equities_open: bool,
+                         note: str = "") -> None:
+        """Record which markets are open, by asset class.
+
+        Crypto is open unconditionally -- that is what "trades around the
+        clock" means -- and equities follow the venue's calendar. Keeping them
+        apart is the whole point: the previous single flag was set from
+        ``is_open or crypto_only``, and since crypto is pinned resident
+        alongside equities it was almost never *only* crypto, so the flag read
+        False every night and clamped the crypto book shut with the equity one.
+        """
+        self.markets_open = {
+            AssetClass.CRYPTO: True,
+            AssetClass.US_EQUITY: equities_open,
+            AssetClass.US_OPTION: equities_open,
+        }
+        # Kept for the snapshot and for callers that want one summary number:
+        # true when anything at all can open.
+        self.market_open = any(self.markets_open.values())
+        self.market_note = note
+
+    def market_is_open(self, symbol: str) -> bool:
+        """Whether this particular symbol's market is open right now."""
+        if not self.markets_open:
+            return self.market_open
+        return self.markets_open.get(classify_symbol(symbol), self.market_open)
+
     def clamp(self, symbol: str, desired_weight: float, *,
               overnight: bool = False) -> ClampResult:
         """Reduce a desired weight to what the book can afford.
@@ -272,7 +306,7 @@ class PortfolioAllocator:
         # Beyond this point the request increases exposure, so the two
         # market-state guards apply. Both are deliberately placed after the
         # reduction check above: neither may ever block an exit.
-        if not self.market_open:
+        if not self.market_is_open(symbol):
             return ClampResult(current, "market closed",
                                self.market_note or "the market is closed, so no "
                                "new exposure is taken", reduced=True)

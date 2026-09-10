@@ -247,6 +247,21 @@
      * verdicts with no indication that anything is still working through the
      * market behind them -- and a symbol that has not been reached yet looks
      * identical to one that was looked at and had nothing to say. */
+    /* The cohort-wide answer to "why is nothing trading". A scrolling list of
+     * per-symbol prose cannot answer it: every line is about one symbol, and
+     * the thing worth knowing is what is holding up all of them. */
+    var bl = $('blockers');
+    if (bl) {
+      var b = s.blockers || {};
+      var bits = (b.counts || []).map(function (c) {
+        return c.symbols + ' ' + c.blocker;
+      });
+      bl.innerHTML =
+        '<b class="' + (b.trading ? 'trading' : '') + '">' +
+        (b.summary || 'nothing evaluated yet') + '</b>' +
+        (bits.length ? ' <span class="tally">· ' + bits.join(' · ') + '</span>' : '');
+    }
+
     var us = s.universe_scan || {};
     var note = $('reason-note');
     if (note) {
