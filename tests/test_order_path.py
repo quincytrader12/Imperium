@@ -157,3 +157,156 @@ async def test_the_order_carries_the_fields_the_venue_needs():
     assert sent.get("client_order_id"), (
         "no client order id — a retry after a timeout would place a second "
         "order with no way to tell it from the first")
+
+
+# ---------------------------------------------------------------------------
+# A refused order must reach the terminal, not only a log file.
+#
+# Reported directly by an operator: the console printed "not sending a market
+# on close order for AG, its size is less than one whole share and auctions
+# don't take fractions" with no explanation of what that meant or where to
+# look. The engine's own decision still said TRADING with a sizing reason
+# attached, so from the web UI a refusal here is indistinguishable from a bug
+# in the order path -- unless the refusal itself reaches the Activity log.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_refused_order_reaches_the_activity_log_not_only_stdout():
+    """The operator's exact situation: an auction order that rounds to zero
+    shares. Without telemetry wired in, this was a log.info() line visible
+    only in a console window running the packaged exe."""
+    from imperium.telemetry.streams import Level, TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+        # A tiny target weight on a normally-priced share sizes to a fraction.
+        fill = await broker.apply_target("AAPL", 0.0001, 180.0, 10_000.0,
+                                         order="market-on-close")
+    finally:
+        await client.aclose()
+
+    assert fill is None
+    events = [e for e in hub.events(20) if e["source"] == "order"]
+    assert events, (
+        "the order was refused and nothing reached the Activity log — the "
+        "operator's only explanation was a console line nobody but a raw "
+        "log window would see")
+    assert "AAPL" in events[0]["message"]
+    assert "whole share" in events[0]["message"]
+    assert events[0]["level"] == "warn"
+
+    pulses = [p for p in hub.pulse_window(50) if p["kind"] == "refused"]
+    assert any(p["symbol"] == "AAPL" for p in pulses), (
+        "no orb pulse fired either, so the cluster shows nothing happened")
+
+
+@pytest.mark.asyncio
+async def test_every_silent_refusal_branch_now_reaches_telemetry():
+    """The three siblings of the fractional-share refusal: not tradable, below
+    the venue minimum, and an auction order on a non-equity. All four used
+    log.info() and nothing else before this."""
+    from imperium.telemetry.streams import TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+
+        # Not tradable.
+        await broker.apply_target("HALTED", 0.1, 50.0, 10_000.0)
+        # An auction order on a non-equity.
+        await broker.apply_target("BTC/USD", 0.1, 50_000.0, 10_000.0,
+                                  order="market-on-close")
+    finally:
+        await client.aclose()
+
+    messages = " ".join(e["message"] for e in hub.events(20)
+                        if e["source"] == "order")
+    assert "HALTED" in messages and "not tradable" in messages
+    assert "BTC/USD" in messages and "US equities" in messages
+
+
+@pytest.mark.asyncio
+async def test_a_broker_with_no_telemetry_still_works_and_does_not_raise():
+    """Tests that construct a broker directly, without a hub, must keep
+    passing -- telemetry is a courtesy to the UI, not a requirement to place
+    an order."""
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER)          # no telemetry=
+        broker.arm_for_paper()
+        await broker.apply_target("HALTED", 0.1, 50.0, 10_000.0)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_set_mode_actually_wires_the_session_telemetry_into_the_broker():
+    """The call site, not the mechanism.
+
+    Every test above constructs a LiveBroker directly and passes telemetry=
+    by hand, so all of them still pass with session.set_mode() forgetting to
+    pass it along. Driven through set_mode instead: a refusal after switching
+    mode the ordinary way must land in the same telemetry hub the reasoning
+    panel and Activity log read from.
+    """
+    venue = MockVenue()
+    session = TradingSession()
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    session.credential = type("C", (), {"name": "paper-key",
+                                        "trade_enabled": False})()
+    try:
+        await session.set_mode(Mode.PAPER)
+        assert isinstance(session.broker, LiveBroker)
+
+        before = len(session.telemetry.events(50))
+        fill = await session.broker.apply_target(
+            "AAPL", 0.0001, 180.0, 10_000.0, order="market-on-close")
+    finally:
+        await session.detach_client()
+
+    assert fill is None
+    after = [e for e in session.telemetry.events(50) if e["source"] == "order"]
+    assert after, (
+        "set_mode built a broker with no telemetry attached — a refusal "
+        "through the ordinary mode-switch path never reaches the session's "
+        "own Activity log")
+
+
+@pytest.mark.asyncio
+async def test_set_mode_wires_telemetry_for_live_too_not_only_paper():
+    """The sibling branch. Paper and live construct LiveBroker on two
+    separate lines in set_mode, and a fix to one is not a fix to the other."""
+    venue = MockVenue()
+    session = TradingSession()
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    session.credential = type("C", (), {"name": "live-key",
+                                        "trade_enabled": True})()
+    try:
+        await session.set_mode(Mode.LIVE, phrase=LIVE_CONFIRMATION_PHRASE)
+        assert isinstance(session.broker, LiveBroker)
+        assert session.broker.armed
+
+        fill = await session.broker.apply_target(
+            "AAPL", 0.0001, 180.0, 10_000.0, order="market-on-close")
+    finally:
+        await session.detach_client()
+
+    assert fill is None
+    after = [e for e in session.telemetry.events(50) if e["source"] == "order"]
+    assert after, (
+        "the live-mode branch of set_mode built a broker with no telemetry "
+        "attached")

@@ -1836,7 +1836,8 @@ class TradingSession:
                 raise ModeSwitchRefused(
                     "no credential is attached, so there is no account to trade")
             tradeable = self.credential.trade_enabled
-            broker = LiveBroker(self.spec, self.client, self.credential.name)
+            broker = LiveBroker(self.spec, self.client, self.credential.name,
+                               telemetry=self.telemetry)
             broker.arm(phrase, tradeable)
             await broker.sync()
             self.broker = broker
@@ -1862,7 +1863,8 @@ class TradingSession:
                             and self.credential is not None)
             if live_capable:
                 broker = LiveBroker(self.spec, self.client,
-                                    self.credential.name, mode=Mode.PAPER)
+                                    self.credential.name, mode=Mode.PAPER,
+                                    telemetry=self.telemetry)
                 broker.arm_for_paper()
                 await broker.sync()
                 self.broker = broker

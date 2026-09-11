@@ -19,6 +19,7 @@ The guards that matter:
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -33,6 +34,9 @@ from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.broker")
+
+if TYPE_CHECKING:
+    from imperium.telemetry.streams import TelemetryHub
 
 #: The operator must type this exactly. Not a checkbox, not a click.
 LIVE_CONFIRMATION_PHRASE = "GO LIVE"
@@ -338,11 +342,19 @@ class LiveBroker(_BaseBroker):
     simulated = False
 
     def __init__(self, spec: VenueSpec, client: AlpacaClient,
-                 credential_name: str, *, mode: Mode = Mode.LIVE) -> None:
+                 credential_name: str, *, mode: Mode = Mode.LIVE,
+                 telemetry: "TelemetryHub | None" = None) -> None:
         super().__init__(spec)
         self.client = client
         self.credential_name = credential_name
         self._armed = False
+        #: Optional, because tests construct this broker directly without a
+        #: hub. When present, every branch below that would otherwise decline
+        #: an order silently -- a log.info() line nobody but a console window
+        #: ever sees -- also reaches the terminal's own Activity log. A
+        #: TRADING decision followed by nothing, with the only explanation in
+        #: a log file, reads as a bug even when the refusal is correct.
+        self.telemetry = telemetry
         # Instance attribute, shadowing the class one. The same order path
         # serves the venue's paper account and its live account -- that is the
         # point of it: the code that will one day move real money is the code
@@ -388,6 +400,22 @@ class LiveBroker(_BaseBroker):
     def disarm(self) -> None:
         self._armed = False
 
+    def _refuse(self, symbol: str, message: str) -> None:
+        """Log the refusal, and put it where the terminal can show it.
+
+        Every caller here already decided not to send an order; this is only
+        about making that decision visible. Without it, a decision that says
+        TRADING with a sizing reason attached, followed by no fill and no
+        explanation anywhere but a console window, is indistinguishable from
+        the order path being broken.
+        """
+        log.info("not sending an order for %s: %s", symbol, message)
+        if self.telemetry is not None:
+            from imperium.telemetry.streams import Level
+            self.telemetry.event(Level.WARN, "order",
+                                 f"{symbol}: order not sent — {message}")
+            self.telemetry.pulse(symbol, "refused", message, 0.3)
+
     async def sync(self) -> None:
         """Read the real account so the book starts from it, not from zero."""
         account = await self.client.account()
@@ -423,16 +451,16 @@ class LiveBroker(_BaseBroker):
         qty = abs(delta)
         if asset is not None:
             if not asset.tradable:
-                log.info("not sending an order for %s: the venue lists it as "
-                         "not tradable (status %s)", symbol, asset.status)
+                self._refuse(symbol, f"the venue lists it as not tradable "
+                                    f"(status {asset.status})")
                 return None
             if not asset.fractionable:
                 # A fractional quantity on a non-fractionable name is rejected,
                 # so it is floored here rather than discovered at the venue.
                 qty = qty.to_integral_value(rounding="ROUND_DOWN")
             if asset.min_order_size and qty < asset.min_order_size:
-                log.info("not sending an order for %s: %s is below the venue "
-                         "minimum %s", symbol, qty, asset.min_order_size)
+                self._refuse(symbol, f"{qty} is below the venue minimum "
+                                    f"{asset.min_order_size}")
                 return None
         if qty <= 0:
             return None
@@ -452,17 +480,17 @@ class LiveBroker(_BaseBroker):
             if asset_class is not AssetClass.US_EQUITY:
                 # Not a degraded fill -- a rejection. Refusing here keeps the
                 # error where it can be read rather than in a venue response.
-                log.info("not sending a %s order for %s: auction orders exist "
-                         "only for US equities", order, symbol)
+                self._refuse(symbol, f"{order} orders exist only for US "
+                                    f"equities")
                 return None
             if not qty == qty.to_integral_value():
                 # Auction orders take whole shares only. Rounding down is the
                 # only safe direction: rounding up buys more than was sized.
                 qty = qty.to_integral_value(rounding="ROUND_DOWN")
                 if qty <= 0:
-                    log.info("not sending a %s order for %s: it sizes to less "
-                             "than one whole share, and auctions do not take "
-                             "fractions", order, symbol)
+                    self._refuse(symbol, f"it sizes to less than one whole "
+                                        f"share, and {order} auctions do not "
+                                        f"take fractions")
                     return None
 
         coid = self.client.new_client_order_id("imp")
