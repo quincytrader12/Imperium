@@ -220,5 +220,27 @@ check('the_three_loud_kinds_are_distinct',
       new Set([dots.decision.background, dots.cap.background,
                dots.order.background, dots.scan.background]).size === 4);
 
+/* The half-second freeze.
+ *
+ * The cohort rotates every twenty seconds, which changes the symbol list and
+ * invalidated the network sprite. Rebuilding it allocated three fresh
+ * canvases: measured at a realistic 1100x700 on a 2x display, allocating them
+ * costs 193ms, clearing them costs 0ms, and drawing all 150 filaments costs
+ * 7ms. The work was never the drawing -- it was asking for sixteen megapixels
+ * of backing store twice a minute on the thread that paints the frame.
+ */
+const c6 = new window.Cluster(canvas, null);
+c6.resize();
+c6.setUniverse(Array.from({length: 60}, (_, i) => 'A' + i));
+c6.buildNetworkSprite();
+const pooled = c6.networkLayers.map(l => l.canvas);
+c6.setUniverse(Array.from({length: 60}, (_, i) => 'B' + i));
+c6.buildNetworkSprite();
+check('a rotation reuses the canvases rather than allocating new ones',
+      c6.networkLayers.every((l, i) => l.canvas === pooled[i]),
+      'the sprite canvases were re-created on a rotation');
+check('the redraw still produced the new universe',
+      c6.symbols.length === 60 && c6.symbols[0] === 'B0');
+
 console.log(JSON.stringify(results, null, 2));
 process.exit(results.every(r => r.pass) ? 0 : 1);

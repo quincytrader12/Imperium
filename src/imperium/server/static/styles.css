@@ -210,6 +210,15 @@ tbody tr:hover { background: #111a27; }
 .feed-reason.warn { color: var(--warn); }
 .feed-reason.bad  { color: var(--bad); }
 
+.modal-rule { border: 0; border-top: 1px solid var(--line); margin: 14px 0 10px; }
+.modal h3.sub { font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+                color: var(--dim); margin: 0 0 6px; display: flex; gap: 8px;
+                align-items: baseline; }
+.modal h3.sub .note { font-size: 9px; letter-spacing: .5px; color: var(--dimmer);
+                      text-transform: none; }
+.modal h3.sub .note.ok { color: var(--good); }
+.modal h3.sub .note.warn { color: var(--warn); }
+
 /* ---------- log ---------- */
 
 .log-line { padding: 1px 8px; border-bottom: 1px solid #0d121c; display: flex; gap: 7px; }

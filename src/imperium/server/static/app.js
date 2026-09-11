@@ -765,6 +765,10 @@
     $('xs-grid').innerHTML =
       cell('coins', (x.cohort || 0) + ' / ' + (x.minimum_cohort || 0),
            enough ? 'good' : 'warn', 'ranked / needed') +
+      // The funnel: listed by the venue, carried by the cohort, holding
+      // daily bars. Where the chain narrows is the fault.
+      cell('funnel', (x.listed || 0) + '\u2192' + (x.resident || 0) +
+           '\u2192' + (x.with_history || 0), '', 'priced / resident / history') +
       cell('premium', (x.beta_bps || 0).toFixed(2) + 'bp',
            x.credible ? 'good' : '', 'per unit of rank') +
       cell('t-stat', ((x.t_stat || 0) >= 0 ? '+' : '') + (x.t_stat || 0).toFixed(2),
@@ -1175,6 +1179,7 @@
   $('btn-conn').onclick = function () {
     $('conn-modal').hidden = false;
     loadConnections();
+    loadTelegram();
   };
   $('c-close').onclick = function () { $('conn-modal').hidden = true; };
 
@@ -1236,6 +1241,77 @@
       err.firstChild.textContent = e.message;
     });
   };
+
+  /* ---------- Telegram ---------- */
+
+  function tgError(message) {
+    var box = $('tg-error');
+    if (!box) return;
+    box.innerHTML = message ? '<div class="notice bad"></div>' : '';
+    if (message) box.firstChild.textContent = message;
+  }
+
+  function renderTelegram(st) {
+    var state = $('tg-state');
+    if (!state) return;
+    var linked = st && st.linked;
+    var stored = st && st.stored;
+    state.textContent = linked
+      ? 'connected ' + (st.bot || '') +
+        (st.failed ? ' · ' + st.failed + ' failed' : '')
+      : stored ? 'token stored — press Link' : 'not connected';
+    state.className = 'note ' + (linked ? 'ok' : stored ? 'warn' : '');
+    // Link is only useful once a token is stored; test only once linked.
+    if ($('tg-link')) $('tg-link').disabled = !stored;
+    if ($('tg-test')) $('tg-test').disabled = !linked;
+    if (st && st.last_error) tgError(st.last_error);
+  }
+
+  function loadTelegram() {
+    return fetch('/api/telegram').then(function (r) { return r.json(); })
+      .then(renderTelegram).catch(function () { /* panel still renders */ });
+  }
+
+  if ($('tg-check')) {
+    $('tg-check').onclick = function () {
+      tgError('');
+      post('/api/telegram', { token: $('tg-token').value.trim() })
+        .then(function (r) {
+          // The token is never echoed back, so clear the field the moment it
+          // is stored: a bearer token sitting in a DOM input is a bearer token
+          // in every screenshot of this panel.
+          $('tg-token').value = '';
+          tgError('');
+          $('tg-note').textContent =
+            'Stored ' + (r.bot || '') + '. Now open that bot in Telegram, ' +
+            'press Start, then press Link.';
+          return loadTelegram();
+        })
+        .catch(function (e) { tgError(e.message); });
+    };
+    $('tg-link').onclick = function () {
+      tgError('');
+      post('/api/telegram/link', {})
+        .then(function () {
+          $('tg-note').textContent =
+            'Linked. A confirmation has been sent to that chat.';
+          return loadTelegram();
+        })
+        .catch(function (e) { tgError(e.message); });
+    };
+    $('tg-test').onclick = function () {
+      tgError('');
+      post('/api/telegram/test', {}).then(function (r) {
+        if (!r.sent) tgError(r.error || 'the test message did not send');
+        else $('tg-note').textContent = 'Test message sent.';
+      }).catch(function (e) { tgError(e.message); });
+    };
+    $('tg-forget').onclick = function () {
+      tgError('');
+      fetch('/api/telegram', { method: 'DELETE' })
+        .then(function () { return loadTelegram(); });
+    };
+  }
 
   function alertErr(err) {
     var banner = $('banner');

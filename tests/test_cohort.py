@@ -381,3 +381,61 @@ async def test_a_held_position_still_outranks_crypto_for_a_stream_slot():
         assert not session.broker.positions[held].is_flat
 
         assert session._stream_priority()[0] == held
+
+
+@pytest.mark.asyncio
+async def test_every_coin_stays_resident_however_it_ranks():
+    """Reported as "the crypto tab says only one coin has daily data".
+
+    The cohort is ranked by dollar turnover and a few dozen coins rank far
+    below the large-cap equities, so one or two were resident at a time. A
+    cross-section of one cannot be ranked, so the crypto panel read "1 coin
+    has daily data, ranking needs 10" indefinitely and the strategy could
+    never start — not because it was wrong, but because it was never shown the
+    market it ranks within.
+
+    Crypto is also the only class a small account can trade around the clock,
+    being outside the pattern-day-trader rule, so it is the last thing that
+    should be rotated out for an equity that ranks higher on turnover.
+    """
+    from imperium.venues.assets import AssetClass, classify_symbol
+
+    async with _session(extra_equities=900) as (session, venue):
+        venue.list_extra_crypto(16)
+        await session.scan_universe()
+        coins = {s for s in session.ranked_universe
+                 if classify_symbol(s) is AssetClass.CRYPTO}
+        assert coins, "the fixture must list some coins"
+        # The fixture only proves anything if some coin ranks *below* the
+        # cohort cutoff on turnover. A coin that would be resident anyway
+        # cannot show that pinning does something.
+        head = set(session.ranked_universe[:COHORT_SIZE])
+        assert coins - head, (
+            "every coin ranks inside the cohort on its own, so this fixture "
+            "would pass with the pinning removed")
+
+        for _ in range(6):
+            session._cohort_rotated_at = 0.0
+            await session.rotate_cohort()
+            missing = coins - set(session.universe)
+            assert not missing, (
+                f"{len(missing)} of {len(coins)} coins were rotated out of the "
+                f"cohort — the cross-section cannot rank a market it cannot see")
+
+
+@pytest.mark.asyncio
+async def test_pinning_the_coins_does_not_stop_the_equity_walk():
+    """The guard on the fix. Coins are pinned, so they come out of the cohort's
+    budget -- if that were unbounded the walk through the equity market would
+    stall and most of the tape would never be reasoned about."""
+    async with _session(extra_equities=900) as (session, venue):
+        await session.scan_universe()
+        cursor = session._cohort_cursor
+
+        for _ in range(4):
+            session._cohort_rotated_at = 0.0
+            await session.rotate_cohort()
+
+        assert session._cohort_cursor > cursor, (
+            "the cursor stopped advancing once the coins were pinned")
+        assert len(session.universe) <= COHORT_SIZE

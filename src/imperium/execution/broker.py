@@ -338,11 +338,17 @@ class LiveBroker(_BaseBroker):
     simulated = False
 
     def __init__(self, spec: VenueSpec, client: AlpacaClient,
-                 credential_name: str) -> None:
+                 credential_name: str, *, mode: Mode = Mode.LIVE) -> None:
         super().__init__(spec)
         self.client = client
         self.credential_name = credential_name
         self._armed = False
+        # Instance attribute, shadowing the class one. The same order path
+        # serves the venue's paper account and its live account -- that is the
+        # point of it: the code that will one day move real money is the code
+        # that has been running for weeks against paper. Only the endpoint and
+        # the arming differ.
+        self.mode = mode
 
     @property
     def armed(self) -> bool:
@@ -362,6 +368,21 @@ class LiveBroker(_BaseBroker):
                 "A one-click button that arms real money is a button that arms "
                 "real money by accident."
             )
+        self._armed = True
+
+    def arm_for_paper(self) -> None:
+        """Arm against the venue's own paper account.
+
+        No confirmation phrase, and deliberately so. Requiring one would mean
+        the order path live trading depends on is exercised for the first time
+        with real money at stake, which is exactly backwards: a paper account
+        exists to be got wrong in. The protection here is the endpoint, not a
+        phrase -- the caller must have built this against the paper host.
+        """
+        if self.mode is not Mode.PAPER:
+            raise ModeSwitchRefused(
+                "arm_for_paper is only for the paper endpoint; live trading "
+                "needs the confirmation phrase")
         self._armed = True
 
     def disarm(self) -> None:

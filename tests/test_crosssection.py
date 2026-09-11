@@ -648,3 +648,55 @@ async def test_the_weight_ceiling_holds_when_the_volatility_estimate_says_it_nee
             f"{symbol} sized to {weight:.1%}, above the "
             f"{xs.MAX_CRYPTO_WEIGHT:.0%} ceiling that is supposed to hold "
             f"whatever the volatility estimate says")
+
+
+@pytest.mark.asyncio
+async def test_the_panel_names_which_step_of_the_funnel_is_short():
+    """Reported as "the crypto tab says only one coin has daily data".
+
+    That is the end of a chain: the venue lists dozens, the scan prices some,
+    the cohort carries some of those, and only those get daily bars. "One coin
+    has daily data" is the symptom under all three faults, and they have three
+    different fixes. The note has to name the step that is actually short.
+    """
+    from decimal import Decimal
+
+    from imperium.execution.broker import PaperBroker
+    from imperium.session import TradingSession
+    from imperium.venues import registry
+    from imperium.venues.alpaca.client import AlpacaClient
+    from mock_venue import KEY, SECRET, MockVenue
+
+    venue = MockVenue()                      # four coins in the seed list
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.broker.cash = Decimal("70")
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    try:
+        await session.scan_universe()
+        await session.refresh_daily_history(force=True)
+        block = session._cross_section_block()
+    finally:
+        await session.detach_client()
+
+    assert "priced" in session.cross_note, session.cross_note
+    # The whole chain is published, so the narrowing step is visible.
+    assert block["listed"] >= block["resident"] >= block["with_history"]
+    assert block["listed"] < xs.MIN_CROSS_SECTION
+
+
+@pytest.mark.asyncio
+async def test_every_coin_the_venue_lists_can_be_resident_at_once():
+    """The cross-section must not keep changing shape underneath the estimate.
+
+    The residency cap was thirty against a venue listing thirty-nine, so nine
+    coins rotated in and out — and a ranking whose membership changes every
+    twenty seconds is not a ranking of a market, it is a ranking of whatever
+    happened to be carried.
+    """
+    from imperium.session import CRYPTO_RESIDENT
+
+    assert CRYPTO_RESIDENT >= 39, (
+        f"only {CRYPTO_RESIDENT} coins can be resident, which is fewer than "
+        f"the venue lists — the cross-section would keep changing shape")

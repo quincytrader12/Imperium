@@ -389,6 +389,57 @@ class CredentialStore:
         self.save()
         return cred
 
+    def put_token(self, name: str, venue: str, token: str, *,
+                  note: str = "", chat: str = "") -> Credential:
+        """Store a bearer token that has no separate secret.
+
+        A Telegram bot token is one string, not a key and a secret, and
+        ``add`` rightly refuses a credential with half of a pair missing. Bending
+        it here -- a placeholder secret, say -- would put a fake value into the
+        redaction registry and misrepresent what is stored. This is the honest
+        shape instead: one credential, one token, and an optional chat that is
+        filled in once the operator has messaged the bot.
+
+        It lives in the same owner-only file behind the same permission checks
+        as the venue keys, because a bot token is a bearer credential: anyone
+        holding it can send as your bot and read everything sent to it.
+        """
+        name = name.strip()
+        token = token.strip()
+        if not name or not token:
+            raise CredentialError(
+                "a token credential needs a name and a token",
+                remedy="paste the token from @BotFather")
+        cred = Credential(name=name, venue=venue, api_key=token,
+                          secret=chat.strip(), trade_enabled=False, note=note)
+        self._creds[name] = cred
+        # Only the token. A chat id is not a secret, and registering it would
+        # redact an ordinary number out of every log line that mentions it.
+        register_secret(token)
+        self.save()
+        return cred
+
+    def token_for(self, name: str) -> str:
+        """The raw token, for in-process use only.
+
+        Never reachable from a response body: the handlers return ``masked()``.
+        This exists for the same reason the venue path reads the API key --
+        something has to hold the real value to make the call.
+        """
+        cred = self._creds.get(name)
+        return cred.api_key if cred else ""
+
+    def chat_for(self, name: str) -> str:
+        cred = self._creds.get(name)
+        return cred.secret if cred else ""
+
+    def set_chat(self, name: str, chat: str) -> Credential:
+        cred = self.require(name)
+        updated = replace(cred, secret=chat.strip())
+        self._creds[name] = updated
+        self.save()
+        return updated
+
     def set_trade_enabled(self, name: str, enabled: bool) -> Credential:
         cred = self.require(name)
         updated = replace(cred, trade_enabled=bool(enabled))

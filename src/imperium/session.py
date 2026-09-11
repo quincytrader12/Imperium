@@ -37,6 +37,7 @@ from imperium.execution import risk as risk_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
+from imperium.notify import telegram as tg
 from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
@@ -116,7 +117,15 @@ COHORT_SIZE = TRADED_UNIVERSE
 #: around the clock, so it is the only thing that can keep a live stream --
 #: and a lit data lamp -- while the equity market is shut; and the listing is
 #: tens of pairs, so residency is bounded by the market rather than by a guess.
-CRYPTO_RESIDENT = 30
+#: Coins kept resident regardless of where they rank on turnover.
+#:
+#: Raised to cover every pair the venue lists. At thirty, a venue listing
+#: thirty-nine left nine of them rotating in and out, which the
+#: cross-sectional strategy reads as a cross-section that keeps changing
+#: shape. Crypto is also the only class a small account can trade around the
+#: clock, being outside the pattern-day-trader rule, so it is the last thing
+#: that should be given up for an equity that ranks higher on turnover.
+CRYPTO_RESIDENT = 48
 
 #: How often the cohort rotates. One rotation costs a daily-bar request and a
 #: snapshot -- two against a budget of two hundred a minute -- so a twenty
@@ -202,6 +211,13 @@ class TradingSession:
         #: lists and what is actually trading.
         self.universe: list[str] = list(self.spec.seed_universe)
         self.paper_endpoint: bool = True
+        #: Telegram. Off until a token and a chat are linked. Every send is
+        #: best-effort and swallows its own failures: a notifier that can
+        #: raise into the trading loop is a notifier that can stop the book.
+        self.notifier = tg.Notifier()
+        #: Set by code that cannot await (the account absorber runs inside a
+        #: synchronous path); drained by the trading loop on the next tick.
+        self._pending_notice: str = ""
         self.market_clock: MarketClock = MarketClock()
         self.universe_scanned_at: float = 0.0
         #: How wide the last sweep actually looked, and how much of it carried
@@ -961,9 +977,27 @@ class TradingSession:
         if len(coins) < xs_mod.MIN_CROSS_SECTION:
             self.pooled_cross = None
             self.cross_state = xs_mod.MarketState()
-            self.cross_note = (
-                f"only {len(coins)} coins have daily history; ranking needs "
-                f"{xs_mod.MIN_CROSS_SECTION}")
+            listed = sum(1 for x in self.ranked_universe
+                         if classify_symbol(x) is AssetClass.CRYPTO)
+            resident = sum(1 for x in self.universe
+                           if classify_symbol(x) is AssetClass.CRYPTO)
+            # Name the step that is short, not just the end of the chain.
+            # "1 coin has daily history" is the symptom; whether the venue
+            # listed one, the scan priced one, or the cohort carried one are
+            # three different faults with three different fixes.
+            if listed < xs_mod.MIN_CROSS_SECTION:
+                self.cross_note = (
+                    f"the scan only priced {listed} coins of the venue's list; "
+                    f"ranking needs {xs_mod.MIN_CROSS_SECTION}")
+            elif resident < xs_mod.MIN_CROSS_SECTION:
+                self.cross_note = (
+                    f"{listed} coins priced but only {resident} are resident; "
+                    f"ranking needs {xs_mod.MIN_CROSS_SECTION}")
+            else:
+                self.cross_note = (
+                    f"{resident} coins resident but only {len(coins)} have "
+                    f"daily history yet; ranking needs "
+                    f"{xs_mod.MIN_CROSS_SECTION}")
             for engine in self.engines.values():
                 engine.pooled_cross = None
             return
@@ -1349,6 +1383,20 @@ class TradingSession:
             await self._act_on(decision)
         return len(slice_)
 
+    async def notify(self, text: str) -> bool:
+        """Send to Telegram if it is linked, and never let it matter if not.
+
+        Every caller is inside the trading loop, so this cannot raise and
+        cannot block for long: the notifier swallows its own failures and
+        holds a short timeout. A book that stops because a messaging API is
+        down is a worse outcome than a message that never arrives.
+        """
+        try:
+            return await self.notifier.send(text)
+        except Exception:                                  # pragma: no cover
+            log.exception("the notifier raised, which it must not")
+            return False
+
     async def _act_on(self, decision: Decision) -> None:
         if decision.verdict is not Verdict.TRADING:
             return
@@ -1399,8 +1447,17 @@ class TradingSession:
                 Level.INFO, "order",
                 f"{fill.side} {qty_text} {decision.symbol} at {px_text}"
                 + (" (simulated)" if fill.simulated else ""))
+            # A fill is one of the few things worth a phone buzzing for.
+            await self.notify(
+                f"{'SIMULATED ' if fill.simulated else ''}"
+                f"{fill.side.upper()} {qty_text} {decision.symbol} @ {px_text}\n"
+                f"{self.broker.mode.value} · {decision.strategy or 'strategy'}\n"
+                f"{decision.reason[:180]}")
 
     async def _tick(self) -> None:
+        if self._pending_notice:
+            notice, self._pending_notice = self._pending_notice, ""
+            await self.notify(notice)
         phase = self._update_session_phase()
         self._sync_trend_holdings()
         await self._drain_bars()
@@ -1433,6 +1490,12 @@ class TradingSession:
             self.day_start_equity = equity
         if self.allocator.check_daily_loss(self.day_start_equity) and self.running:
             self.telemetry.pulse("BOOK", "halt", self.allocator.halt_reason, 1.0)
+            # The book stopping itself is the other thing worth a buzz. Fired
+            # once per halt, not per tick: check_daily_loss returns True only
+            # on the transition.
+            self._pending_notice = (
+                f"🛑 BOOK HALTED\n{self.allocator.halt_reason}\n"
+                f"Exits still pass; no new exposure is opened.")
         self._equity_curve.append((time.time(), equity))
         if len(self._equity_curve) > 2000:
             self._equity_curve = self._equity_curve[-2000:]
@@ -1781,9 +1844,45 @@ class TradingSession:
                 Level.WARN, "mode",
                 f"LIVE trading armed on {self.credential.name!r} — real orders "
                 "will be sent")
+            await self.notify(
+                f"⚠️ LIVE trading armed on {self.credential.name}\n"
+                f"Real orders will now be sent with real money.")
         elif mode is Mode.PAPER:
-            self.broker = PaperBroker(self.spec)
-            self.telemetry.event(Level.INFO, "mode", "switched to paper trading")
+            # Real orders, to the venue's own paper account, over the same code
+            # path live trading uses. Until this existed "paper" meant a book
+            # simulated in this process, so the order path that live money
+            # depends on had never once been exercised -- the first real order
+            # would have been the first test of it, with money behind it.
+            #
+            # Guarded on the endpoint, not on a phrase: this may only ever arm
+            # itself when the client was built against the paper host.
+            live_capable = (self.client is not None
+                            and self.client.authenticated
+                            and self.paper_endpoint
+                            and self.credential is not None)
+            if live_capable:
+                broker = LiveBroker(self.spec, self.client,
+                                    self.credential.name, mode=Mode.PAPER)
+                broker.arm_for_paper()
+                await broker.sync()
+                self.broker = broker
+                self.telemetry.event(
+                    Level.GOOD, "mode",
+                    "paper trading against the venue's paper account — orders "
+                    "are really sent and really fill, with no real money "
+                    "behind them",
+                    detail="This is the same order path live trading uses. A "
+                           "fill here is evidence the program can place an "
+                           "order; a simulated one is not.")
+            else:
+                self.broker = PaperBroker(self.spec)
+                self.telemetry.event(
+                    Level.WARN, "mode",
+                    "paper trading is simulated in this process — no paper "
+                    "credential is attached, so nothing reaches the venue",
+                    detail="Attach a paper key in Connections and switch mode "
+                           "again to place real paper orders. A simulated fill "
+                           "does not prove the order path works.")
         else:
             self.broker = DryRunBroker(self.spec)
             self.telemetry.event(Level.INFO, "mode", "switched to dry run")
@@ -2071,7 +2170,22 @@ class TradingSession:
         """
         pooled = self.pooled_cross
         leaders = sorted(self.cross_scores.items(), key=lambda kv: -kv[1])[:5]
+        # The funnel, because "1 coin has daily data" is a symptom and the
+        # cause is always one step earlier: the venue lists dozens, the scan
+        # prices some of them, the cohort carries some of those, and only
+        # those get daily bars. Showing the whole chain turns "why is this
+        # stuck" into a number an operator can point at.
+        listed = sum(1 for x in self.ranked_universe
+                     if classify_symbol(x) is AssetClass.CRYPTO)
+        resident = sum(1 for x in self.universe
+                       if classify_symbol(x) is AssetClass.CRYPTO)
+        with_bars = sum(1 for x in self.universe
+                        if classify_symbol(x) is AssetClass.CRYPTO
+                        and self.engines.get(x) and self.engines[x].daily_bars)
         return {
+            "listed": listed,
+            "resident": resident,
+            "with_history": with_bars,
             "note": self.cross_note,
             "cohort_note": self.cross_note,
             # The cohort note when there is no estimate yet: "only 4 coins

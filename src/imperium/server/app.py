@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from imperium import config, logging_setup
 from imperium.diagnostics.layers import NetworkDiagnostic
+from imperium.notify import telegram
 from imperium.execution.broker import LIVE_CONFIRMATION_PHRASE, Mode, ModeSwitchRefused
 from imperium.security.credentials import CredentialError, CredentialStore
 from imperium.session import TradingSession
@@ -93,6 +94,21 @@ def validate_bind_host(host: str) -> str:
 
 
 # -- request models -------------------------------------------------------
+
+#: The credential-store entry the Telegram token lives under.
+#:
+#: A fixed name and a distinct venue, so it can never be confused with a
+#: trading key: nothing that walks the venue credentials picks it up, and the
+#: connections panel lists it separately.
+TELEGRAM_NAME = "telegram"
+TELEGRAM_VENUE = "telegram"
+
+
+class TelegramRequest(BaseModel):
+    # BotFather tokens look like 123456789:AAE... — bounded so a paste of the
+    # wrong thing entirely is refused before it reaches the network.
+    token: str = Field(min_length=20, max_length=256)
+
 
 class AddKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
@@ -165,6 +181,15 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                     Level.ERROR, "security",
                     f"INSECURE CREDENTIAL FILE: {report.detail}",
                     detail=report.remedy)
+            # Restore the Telegram link. Without this it is lost on every
+            # restart, and this program is meant to run for weeks and to
+            # restart itself when it crashes -- a notifier that silently
+            # unlinks on the one event worth notifying about is worse than
+            # none, because the silence reads as "nothing happened".
+            token = store.token_for(TELEGRAM_NAME)
+            if token:
+                state["session"].notifier.configure(
+                    token, store.chat_for(TELEGRAM_NAME))
 
         if state.get("store_error"):
             state["session"].store_error = state["store_error"]
@@ -281,6 +306,89 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
     async def delete_connection(name: str) -> JSONResponse:
         get_store().remove(name)
         return JSONResponse({"removed": name})
+
+    @app.get("/api/telegram")
+    async def telegram_status() -> JSONResponse:
+        """Status only. The token is never returned, masked or otherwise."""
+        session = get_session()
+        store = state.get("store")
+        cred = None
+        if store is not None:
+            cred = next((c for c in store.masked_list()
+                         if c.get("venue") == TELEGRAM_VENUE), None)
+        return JSONResponse({
+            **session.notifier.status(),
+            "bot": (cred or {}).get("note", ""),
+            "stored": cred is not None,
+        })
+
+    @app.post("/api/telegram")
+    async def telegram_connect(body: TelegramRequest) -> JSONResponse:
+        """Step one: check the token and remember it. No chat yet."""
+        session = get_session()
+        try:
+            identity = await telegram.identify(body.token.strip())
+        except telegram.TelegramError as exc:
+            raise HTTPException(400, detail=exc.operator_text()) from None
+        store = get_store()
+        # Stored beside the venue keys on purpose: same owner-only file, same
+        # permission checks, same masking on the way out. A bot token is a
+        # bearer credential and deserves the treatment the venue keys get,
+        # not a second and less careful store invented for it.
+        keep_chat = store.chat_for(TELEGRAM_NAME)
+        store.put_token(TELEGRAM_NAME, TELEGRAM_VENUE, body.token.strip(),
+                        note=f"@{identity.username}", chat=keep_chat)
+        session.notifier.configure(body.token.strip(), keep_chat)
+        session.telemetry.event(
+            Level.INFO, "security",
+            f"Telegram bot @{identity.username} stored (not linked to a chat yet)")
+        return JSONResponse({"bot": f"@{identity.username}",
+                             "name": identity.name, "linked": False})
+
+    @app.post("/api/telegram/link")
+    async def telegram_link() -> JSONResponse:
+        """Step two: read the chat id out of the message the operator sent.
+
+        This is the step every other integration makes people do by hand.
+        """
+        session = get_session()
+        store = get_store()
+        token = store.token_for(TELEGRAM_NAME)
+        if not token:
+            raise HTTPException(400, detail="paste the bot token first")
+        try:
+            chat_id = await telegram.discover_chat(token)
+        except telegram.TelegramError as exc:
+            raise HTTPException(400, detail=exc.operator_text()) from None
+        store.set_chat(TELEGRAM_NAME, chat_id)
+        session.notifier.configure(token, chat_id)
+        await session.notify(
+            "✅ IMPERIUM is linked.\nYou will get a message when an order "
+            "fills, when the book halts itself, and when live trading is armed."
+            "\nRefusals are not sent — this program refuses thousands of times "
+            "an hour by design.")
+        session.telemetry.event(Level.GOOD, "security",
+                                "Telegram linked to a chat")
+        return JSONResponse({"linked": True, **session.notifier.status()})
+
+    @app.post("/api/telegram/test")
+    async def telegram_test() -> JSONResponse:
+        session = get_session()
+        sent = await session.notify("IMPERIUM test message — the link works.")
+        return JSONResponse({"sent": sent,
+                             "error": session.notifier.last_error})
+
+    @app.delete("/api/telegram")
+    async def telegram_forget() -> JSONResponse:
+        session = get_session()
+        store = state.get("store")
+        if store is not None:
+            try:
+                store.remove(TELEGRAM_NAME)
+            except Exception:
+                pass
+        session.notifier.configure("", "")
+        return JSONResponse({"removed": True})
 
     @app.post("/api/attach")
     async def attach(body: AttachRequest) -> JSONResponse:

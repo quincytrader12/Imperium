@@ -258,6 +258,34 @@
       <button id="c-close">Close</button>
       <button id="c-add" class="primary">Store key</button>
     </div>
+
+    <!-- Telegram. Two steps, because the chat id — the thing every other
+         integration makes you find by hand — is read out of the message you
+         send the bot. -->
+    <hr class="modal-rule">
+    <h3 class="sub">Telegram notifications <span class="note" id="tg-state">not connected</span></h3>
+    <div class="notice compact">
+      1. In Telegram, message <b>@BotFather</b> → <b>/newbot</b> → copy the token.
+      2. Paste it below and press <b>Check token</b>.
+      3. Open your new bot in Telegram and press <b>Start</b>.
+      4. Press <b>Link</b> — the chat is read from that message, so there is no
+      chat ID to find.
+    </div>
+    <label for="tg-token">Bot token</label>
+    <input id="tg-token" type="password" autocomplete="off" spellcheck="false"
+           placeholder="123456789:AAE...">
+    <div id="tg-error"></div>
+    <div class="row">
+      <button id="tg-check">Check token</button>
+      <button id="tg-link" class="primary" disabled>Link</button>
+      <button id="tg-test" disabled>Send test</button>
+      <button id="tg-forget">Forget</button>
+    </div>
+    <div class="dimmer" id="tg-note" style="margin-top:6px">
+      Sent on fills, on the book halting itself, and when live trading is
+      armed. Refusals are never sent — this program refuses thousands of times
+      an hour by design.
+    </div>
   </div>
 </div>
 
