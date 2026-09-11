@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IMPERIUM</title>
+<!-- Inline so there is no second file to bundle, and so the browser stops
+     requesting /favicon.ico and logging a 404 in a shipped application. -->
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23071019"/><path d="M7 22 L12 12 L16 18 L20 8 L25 22" fill="none" stroke="%2335a7ff" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/></svg>'>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">IMPERIUM</div>
+
+  <div class="stat"><span class="k">Venue</span><span class="v" id="h-venue">—</span></div>
+  <div class="stat"><span class="k">Mode</span><span class="v" id="h-mode">—</span></div>
+  <div class="stat"><span class="k">Market</span><span class="v" id="h-market">—</span></div>
+  <div class="stat"><span class="k">Equity</span><span class="v num" id="h-equity">—</span></div>
+  <!-- The simulated book, shown only when it has diverged from the account.
+       In live mode they are the same number and this stays hidden. -->
+  <div class="stat" hidden><span class="k">Book</span><span class="v num" id="h-book">—</span></div>
+  <div class="stat"><span class="k">Realised</span><span class="v num" id="h-realised">—</span></div>
+  <div class="stat"><span class="k">Unrealised</span><span class="v num" id="h-unrealised">—</span></div>
+  <div class="stat"><span class="k">Gross</span><span class="v num" id="h-gross">—</span></div>
+  <div class="stat"><span class="k">Trading</span><span class="v num" id="h-trading">—</span></div>
+
+  <div class="lamps">
+    <span class="lamp" id="lamp-link"><i></i>link</span>
+    <span class="lamp" id="lamp-venue"><i></i>venue</span>
+    <span class="lamp" id="lamp-data"><i></i>data</span>
+    <span class="lamp" id="lamp-key"><i></i>key</span>
+    <span class="lamp" id="lamp-session"><i></i>session</span>
+  </div>
+
+  <div class="controls">
+    <button id="btn-start" class="primary">Start</button>
+    <button id="btn-stop" disabled>Stop</button>
+    <select id="sel-mode" title="Switching mode flattens the book first">
+      <option value="dry_run">dry run</option>
+      <option value="paper">paper</option>
+      <option value="live">LIVE</option>
+    </select>
+    <button id="btn-conn">Connections</button>
+    <a href="/diagnose" target="_blank" rel="noopener"><button>Diagnose</button></a>
+  </div>
+</header>
+
+<div id="banner" hidden></div>
+
+<main>
+  <!-- ---------------- left column ---------------- -->
+  <div id="left-panel">
+    <section class="panel" id="wl-panel">
+      <h2>Watchlist <span class="note" id="wl-note">—</span></h2>
+      <div class="scroll">
+        <table id="watchlist">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th class="num">Price</th>
+              <th class="num">24h</th>
+              <th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="wl-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Risk &amp; limits
+        <span class="note" id="risk-note">—</span>
+      </h2>
+      <div class="gauges" id="gauges"></div>
+      <!-- Only shown when the account is small enough that its size, rather
+           than the market, is what is deciding the limits. -->
+      <div class="notice compact scaled" id="scale-note" hidden></div>
+      <div class="limit-grid" id="limit-grid"></div>
+      <div class="halt-bar">
+        <button id="btn-halt" class="danger" title="Blocks new and increased exposure. Reductions and exits always pass.">Halt book</button>
+        <span class="dimmer" id="halt-state">a halt blocks new exposure; exits always pass</span>
+      </div>
+    </section>
+
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Regime census <span class="note" id="census-note">—</span></h2>
+      <div class="census" id="census"></div>
+    </section>
+
+    <!-- The multi-day trend. On a small account this is the strategy that
+         actually runs, because a position held across a close is not a day
+         trade -- so the day-trade budget is shown right beside it. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Multi-day trend <span class="note" id="tr-note">—</span></h2>
+      <div class="limit-grid" id="tr-grid"></div>
+      <div class="dimmer" id="tr-why" style="padding:0 9px 8px"></div>
+    </section>
+
+    <!-- The crypto cross-section. Its own panel because it is a different
+         estimate from the trend above: it ranks the coins against each other
+         rather than each coin against its own past, which is the form the
+         crypto momentum literature actually documents. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Crypto ranking <span class="note" id="xs-note">—</span></h2>
+      <div class="limit-grid" id="xs-grid"></div>
+      <div class="xs-leaders" id="xs-leaders"></div>
+      <div class="dimmer" id="xs-why" style="padding:0 9px 8px"></div>
+    </section>
+
+    <!-- The overnight drift strategy. Kept apart from the intraday panels
+         because it is a different trade: a different holding period, no stop
+         behind it, and its own order types. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Overnight drift <span class="note" id="on-note">—</span></h2>
+      <div class="phase-track" id="on-phase"></div>
+      <div class="limit-grid" id="on-grid"></div>
+      <div class="dimmer" id="on-verdict" style="padding:0 9px 8px"></div>
+    </section>
+  </div>
+
+  <!-- ---------------- neural cluster ---------------- -->
+  <section class="panel" id="cluster-panel">
+    <h2>Neural cluster
+      <span class="note" id="cluster-note">—</span>
+    </h2>
+    <div class="cluster-wrap" id="cluster-wrap">
+      <canvas id="cluster"></canvas>
+      <div id="tooltip" hidden></div>
+      <!-- The swatches are painted from the canvas's own palette at startup.
+           Written out here as hex they were a second copy of the same fact,
+           and a legend that disagrees with the field it explains is worse
+           than no legend. -->
+      <div class="cluster-legend" id="cluster-legend">
+        <span data-kind="scan"><i></i>scan</span>
+        <span data-kind="decision"><i></i>decision</span>
+        <span data-kind="refused"><i></i>refused</span>
+        <span data-kind="cap"><i></i>cap</span>
+        <span data-kind="order"><i></i>order</span>
+        <span data-kind="warmup"><i></i>warmup</span>
+        <span data-kind="halt"><i></i>halt</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------------- right column ---------------- -->
+  <div id="right-panel">
+    <!-- The tallest panel on the right by design: it is the one that answers
+         the question the operator actually has. -->
+    <section class="panel" style="flex:1 1 68%; min-height:220px">
+      <h2>Reasoning <span class="note" id="reason-note">why each symbol is or is not trading</span></h2>
+      <!-- The per-symbol reasons carry each symbol's own numbers, which makes
+           them useless for counting a hundred and fifty of them. This is the
+           same question asked of the whole cohort at once. -->
+      <p class="blockers" id="blockers">—</p>
+      <div class="scroll" id="reasoning"></div>
+    </section>
+
+    <section class="panel" id="health-panel">
+      <h2>Health <span class="note" id="health-note">—</span></h2>
+      <canvas id="ecg" width="340" height="46"></canvas>
+      <div class="health-grid">
+        <div>data age<b id="hz-age">—</b></div>
+        <div>reconnects<b id="hz-reconnects">—</b></div>
+        <div>errors<b id="hz-errors">—</b></div>
+        <!-- Continuous operation: how long this has actually been up, and
+             whether anything had to be restarted to keep it that way. -->
+        <div>uptime<b id="hz-uptime">—</b><i id="hz-uptime-note"></i></div>
+      </div>
+      <!-- Why the data lamp reads the way it does. A dark lamp covers a shut
+           market, a refused subscription and a socket that never connected;
+           the facts to tell them apart were already arriving and were being
+           discarded here. -->
+      <p class="feed-reason" id="hz-feed">—</p>
+    </section>
+
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Execution &amp; costs <span class="note" id="cost-note">—</span></h2>
+      <div class="limit-grid" id="cost-grid"></div>
+      <div id="cost-warn"></div>
+    </section>
+
+    <section class="panel" style="flex:1 1 auto; min-height:120px">
+      <h2>Positions <span class="note" id="pos-note">—</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Value</th><th class="num">P&amp;L</th></tr></thead>
+          <tbody id="pos-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ---------------- bottom ---------------- -->
+  <div id="bottom-panel">
+    <section class="panel">
+      <h2>Performance <span class="note" id="perf-note">—</span></h2>
+      <canvas id="pnl"></canvas>
+      <div class="stat-grid" id="stat-grid"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Journal <span class="note" id="exec-note">fills</span></h2>
+      <div class="scroll" style="flex:1 1 auto">
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Slip</th></tr></thead>
+          <tbody id="fill-body"></tbody>
+        </table>
+      </div>
+      <div class="limit-grid" id="exec-grid" style="border-top:1px solid var(--line)"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Activity <span class="note">events a human should read</span></h2>
+      <div class="scroll" id="log"></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <span class="built-by">IMPERIUM — built by <b>Quincy Gininda</b></span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-venue">venue —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-weight">weight —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-clock">clock —</span>
+  <span class="foot-sep">·</span>
+  <span class="dimmer" id="foot-work">—</span>
+  <span class="foot-right dimmer" id="foot-uptime">—</span>
+</footer>
+
+<!-- ---------------- connections modal ---------------- -->
+<div class="modal-backdrop" id="conn-modal" hidden>
+  <div class="modal">
+    <h3>Connections</h3>
+    <div id="conn-perm"></div>
+    <table style="margin-bottom:10px">
+      <thead><tr><th>Name</th><th>API key</th><th>Secret</th><th>Trade</th><th></th></tr></thead>
+      <tbody id="conn-body"></tbody>
+    </table>
+
+    <div class="notice">
+      A stored key cannot trade until you tick it here, and going live also
+      requires typing the confirmation phrase. Secrets are never sent back to
+      this page — not once, not for debugging.
+    </div>
+
+    <label for="c-name">Label</label>
+    <input id="c-name" placeholder="main" autocomplete="off">
+    <label for="c-key">API key</label>
+    <input id="c-key" type="password" autocomplete="off" spellcheck="false">
+    <label for="c-secret">API secret</label>
+    <input id="c-secret" type="password" autocomplete="off" spellcheck="false">
+    <div id="conn-error"></div>
+    <div class="row">
+      <button id="c-close">Close</button>
+      <button id="c-add" class="primary">Store key</button>
+    </div>
+
+    <!-- Telegram. Two steps, because the chat id — the thing every other
+         integration makes you find by hand — is read out of the message you
+         send the bot. -->
+    <hr class="modal-rule">
+    <h3 class="sub">Telegram notifications <span class="note" id="tg-state">not connected</span></h3>
+    <div class="notice compact">
+      1. In Telegram, message <b>@BotFather</b> → <b>/newbot</b> → copy the token.
+      2. Paste it below and press <b>Check token</b>.
+      3. Open your new bot in Telegram and press <b>Start</b>.
+      4. Press <b>Link</b> — the chat is read from that message, so there is no
+      chat ID to find.
+    </div>
+    <label for="tg-token">Bot token</label>
+    <input id="tg-token" type="password" autocomplete="off" spellcheck="false"
+           placeholder="123456789:AAE...">
+    <div id="tg-error"></div>
+    <div class="row">
+      <button id="tg-check">Check token</button>
+      <button id="tg-link" class="primary" disabled>Link</button>
+      <button id="tg-test" disabled>Send test</button>
+      <button id="tg-forget">Forget</button>
+    </div>
+    <div class="dimmer" id="tg-note" style="margin-top:6px">
+      Sent on fills, on the book halting itself, and when live trading is
+      armed. Refusals are never sent — this program refuses thousands of times
+      an hour by design.
+    </div>
+  </div>
+</div>
+
+<!-- ---------------- go-live modal ---------------- -->
+<div class="modal-backdrop" id="live-modal" hidden>
+  <div class="modal">
+    <h3>Arm live trading</h3>
+    <div class="notice bad">
+      This sends real orders against real money. A one-click button that arms
+      real money is a button that arms real money by accident — so type the
+      phrase below exactly.
+    </div>
+    <div class="notice">Switching mode flattens the current book first.</div>
+    <label for="live-phrase">Type <b>GO LIVE</b> to confirm</label>
+    <input id="live-phrase" autocomplete="off" spellcheck="false">
+    <div id="live-error"></div>
+    <div class="row">
+      <button id="live-cancel">Cancel</button>
+      <button id="live-go" class="danger">Arm live trading</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/fmt.js"></script>
+<script src="/static/cluster.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
