@@ -17,8 +17,10 @@ from decimal import Decimal
 import pytest
 
 from imperium.execution.broker import (
-    LIVE_CONFIRMATION_PHRASE, LiveBroker, Mode, ModeSwitchRefused, PaperBroker,
+    LIVE_CONFIRMATION_PHRASE, MARKET_ON_CLOSE, LiveBroker, Mode,
+    ModeSwitchRefused, PaperBroker,
 )
+from imperium.execution.portfolio import Verdict
 from imperium.session import TradingSession
 from imperium.venues import registry
 from imperium.venues.alpaca.client import AlpacaClient
@@ -310,3 +312,160 @@ async def test_set_mode_wires_telemetry_for_live_too_not_only_paper():
     assert after, (
         "the live-mode branch of set_mode built a broker with no telemetry "
         "attached")
+
+
+# ---------------------------------------------------------------------------
+# The same refusal, several hundred times an hour.
+#
+# The operator's follow-up: "the message repeated over and over in the
+# terminal window, why?" Because the scanner re-evaluates every symbol on a
+# cycle of a few seconds and these refusals are structural -- a position that
+# sizes to less than a whole share sizes the same way on the next pass, and on
+# every pass for the rest of the closing window.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_same_refusal_is_said_once_not_once_per_sweep():
+    """The operator's exact complaint, as an assertion."""
+    from imperium.telemetry.streams import TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+        # Thirty sweeps of the closing window, all refusing identically.
+        for _ in range(30):
+            fill = await broker.apply_target("AAPL", 0.0001, 180.0, 10_000.0,
+                                             order="market-on-close")
+            assert fill is None
+    finally:
+        await client.aclose()
+
+    events = [e for e in hub.events(80) if e["source"] == "order"]
+    assert len(events) == 1, (
+        f"the same refusal was reported {len(events)} times across 30 sweeps "
+        f"— this is the repetition the operator saw")
+
+
+@pytest.mark.asyncio
+async def test_a_different_refusal_on_the_same_symbol_is_still_reported():
+    """Deduplication must not swallow a change. A symbol that stops being
+    refused for one reason and starts being refused for another has told you
+    something, and it is a different something."""
+    from imperium.telemetry.streams import TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+        broker._refuse("AAPL", "it sizes to less than one whole share")
+        broker._refuse("AAPL", "it sizes to less than one whole share")
+        broker._refuse("AAPL", "the venue lists it as not tradable")
+    finally:
+        await client.aclose()
+
+    messages = [e["message"] for e in hub.events(20) if e["source"] == "order"]
+    assert len(messages) == 2, messages
+    assert any("whole share" in m for m in messages)
+    assert any("not tradable" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_two_symbols_refused_for_the_same_reason_are_both_reported():
+    """The dedupe is per symbol. Suppressing AG because AAPL was already
+    refused for the same reason would hide a whole symbol."""
+    from imperium.telemetry.streams import TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+        broker._refuse("AAPL", "it sizes to less than one whole share")
+        broker._refuse("SPY", "it sizes to less than one whole share")
+    finally:
+        await client.aclose()
+
+    symbols = {e["message"].split(":")[0]
+               for e in hub.events(20) if e["source"] == "order"}
+    assert symbols == {"AAPL", "SPY"}
+
+
+@pytest.mark.asyncio
+async def test_a_persistent_refusal_is_restated_with_what_was_suppressed():
+    """Silenced forever is its own kind of lie. A condition still true fifteen
+    minutes later is worth saying again, and saying how many were held back
+    tells the operator it was persistent rather than intermittent."""
+    from imperium.execution.broker import REFUSAL_REPEAT_SECONDS
+    from imperium.telemetry.streams import TelemetryHub
+
+    venue = MockVenue()
+    client = AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport)
+    hub = TelemetryHub()
+    try:
+        broker = LiveBroker(registry.get(registry.DEFAULT_VENUE), client,
+                            "k", mode=Mode.PAPER, telemetry=hub)
+        broker.arm_for_paper()
+        for _ in range(50):
+            broker._refuse("AAPL", "it sizes to less than one whole share")
+        # Wind the clock past the repeat window without waiting for it.
+        message, first_at, suppressed = broker._refusals["AAPL"]
+        broker._refusals["AAPL"] = (message,
+                                    first_at - REFUSAL_REPEAT_SECONDS - 1,
+                                    suppressed)
+        broker._refuse("AAPL", "it sizes to less than one whole share")
+    finally:
+        await client.aclose()
+
+    messages = [e["message"] for e in hub.events(20) if e["source"] == "order"]
+    assert len(messages) == 2, messages
+    restated = messages[0]
+    assert "unchanged" in restated
+    assert "49 more" in restated, restated
+
+
+@pytest.mark.asyncio
+async def test_a_refused_auction_order_is_not_recorded_as_an_overnight_hold():
+    """The worse of the two bugs.
+
+    The holding was recorded on submission rather than on fill -- correct, in
+    that an accepted auction order has not filled yet. But it did not check
+    that an order went out at all, so a refused one recorded a position nobody
+    owns: pinned in the cohort because held names are pinned, saved across
+    restarts, shown on screen as carried, and met at the next open by an exit
+    for a quantity of zero that quietly does nothing. It would never clear.
+    """
+    venue = MockVenue()
+    session = TradingSession()
+    session.client = AlpacaClient(KEY, SECRET, paper=True,
+                                  transport=venue.transport)
+    session.credential = type("C", (), {"name": "paper-key",
+                                        "trade_enabled": False})()
+    try:
+        await session.set_mode(Mode.PAPER)
+        quote = session.feed.quote("AAPL")
+        quote.last, quote.updated_at = 180.0, __import__("time").time()
+
+        decision = session.engine("AAPL").decision
+        decision.verdict = Verdict.TRADING
+        decision.symbol = "AAPL"
+        decision.target_weight = 0.0001          # sizes below one whole share
+        decision.entry_order = MARKET_ON_CLOSE
+        decision.hold = False
+
+        await session._act_on(decision)
+    finally:
+        await session.detach_client()
+
+    assert "AAPL" not in session.overnight_holdings, (
+        "a refused auction order was recorded as an overnight holding — the "
+        "book now believes it owns a position that was never opened")

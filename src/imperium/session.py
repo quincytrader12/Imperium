@@ -1430,10 +1430,22 @@ class TradingSession:
                                  detail=exc.remedy)
             self.telemetry.pulse(decision.symbol, "refused", exc.message, 0.9)
             return
-        if decision.entry_order == MARKET_ON_CLOSE and decision.target_weight > 0:
-            # Recorded on submission, not on fill: the closing auction has not
-            # happened yet, and a hold that is forgotten because the fill was
-            # still pending is a hold with no exit order behind it.
+        if (fill is not None and decision.entry_order == MARKET_ON_CLOSE
+                and decision.target_weight > 0):
+            # Recorded on submission, not on fill *price*: the closing auction
+            # has not happened yet, so the quantity and price on that Fill are
+            # provisional and reconcile() corrects them. But it is still only
+            # recorded when an order actually went out.
+            #
+            # Guarding on `fill is not None` because the broker can decline to
+            # send at all -- an auction order that sizes to less than a whole
+            # share, a name the venue has stopped trading, a quantity below the
+            # venue minimum. Without the guard those cases recorded an
+            # overnight holding for a position nobody owns: pinned in the
+            # cohort because held names are pinned, carried in the saved state
+            # across restarts, shown on screen as a carried position, and met
+            # at the next open by an exit for a quantity of zero that quietly
+            # does nothing. It would never clear.
             self.overnight_holdings[decision.symbol] = decision.target_weight
             self._save_overnight_state()
         if fill:

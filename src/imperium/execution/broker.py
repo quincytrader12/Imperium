@@ -41,6 +41,20 @@ if TYPE_CHECKING:
 #: The operator must type this exactly. Not a checkbox, not a click.
 LIVE_CONFIRMATION_PHRASE = "GO LIVE"
 
+#: How long a repeated order refusal stays quiet before being restated.
+#:
+#: The scanner re-evaluates every symbol on a cycle of a few seconds, and
+#: these refusals are structural -- a position that sizes to less than a whole
+#: share sizes the same way on the next pass, and on every pass for the rest
+#: of the closing window. Reported every time, that is one sentence several
+#: hundred times an hour in a log meant to be read.
+#:
+#: Restated rather than silenced: a condition still true fifteen minutes later
+#: is worth saying again, with a count of what was held back, because a
+#: message that vanishes forever after its first appearance is its own kind of
+#: lie.
+REFUSAL_REPEAT_SECONDS = 900.0
+
 
 #: The no-trade band: how far a position must drift from its target before it
 #: is worth paying a spread to correct.
@@ -355,6 +369,9 @@ class LiveBroker(_BaseBroker):
         #: TRADING decision followed by nothing, with the only explanation in
         #: a log file, reads as a bug even when the refusal is correct.
         self.telemetry = telemetry
+        #: symbol -> (message, when it was first said, how many were held back
+        #: since). See :meth:`_refuse`.
+        self._refusals: dict[str, tuple[str, float, int]] = {}
         # Instance attribute, shadowing the class one. The same order path
         # serves the venue's paper account and its live account -- that is the
         # point of it: the code that will one day move real money is the code
@@ -401,19 +418,45 @@ class LiveBroker(_BaseBroker):
         self._armed = False
 
     def _refuse(self, symbol: str, message: str) -> None:
-        """Log the refusal, and put it where the terminal can show it.
+        """Log the refusal once, and put it where the terminal can show it.
 
         Every caller here already decided not to send an order; this is only
-        about making that decision visible. Without it, a decision that says
+        about making that decision visible -- without it, a decision that says
         TRADING with a sizing reason attached, followed by no fill and no
         explanation anywhere but a console window, is indistinguishable from
         the order path being broken.
+
+        **Said once, not once per sweep.** These refusals are structural: a
+        position that sizes to less than a whole share will size to less than
+        a whole share again in six seconds, and again for the rest of the
+        closing window. The scanner re-evaluates every symbol on a cycle, so
+        an undeduplicated line here is the same sentence several hundred times
+        an hour -- which is how the operator met this message, and which
+        drowns the log it was added to.
+
+        Repeated after :data:`REFUSAL_REPEAT_SECONDS` rather than never, with
+        a count of what was suppressed. A condition that is still true an hour
+        later is worth restating; silently dropping it forever would trade one
+        wrong behaviour for another.
         """
-        log.info("not sending an order for %s: %s", symbol, message)
+        previous, first_at, suppressed = self._refusals.get(
+            symbol, ("", 0.0, 0))
+        now = time.time()
+        if message == previous and now - first_at < REFUSAL_REPEAT_SECONDS:
+            self._refusals[symbol] = (message, first_at, suppressed + 1)
+            return
+
+        tail = ""
+        if message == previous and suppressed:
+            tail = (f" (unchanged, and {suppressed:,} more since "
+                    f"{(now - first_at) / 60:.0f} minutes ago)")
+        self._refusals[symbol] = (message, now, 0)
+
+        log.info("not sending an order for %s: %s%s", symbol, message, tail)
         if self.telemetry is not None:
             from imperium.telemetry.streams import Level
             self.telemetry.event(Level.WARN, "order",
-                                 f"{symbol}: order not sent — {message}")
+                                 f"{symbol}: order not sent — {message}{tail}")
             self.telemetry.pulse(symbol, "refused", message, 0.3)
 
     async def sync(self) -> None:
