@@ -266,29 +266,46 @@ def test_headlines_with_no_tone_words_do_not_dilute_the_ones_that_have_them():
 
 # -- the desk ------------------------------------------------------------
 
-class _FakeClient:
-    def __init__(self, payload, *, raises: Exception | None = None):
-        self.payload, self.raises, self.calls = payload, raises, 0
+def _fake_source(payload, *, raises: Exception | None = None):
+    """A stand-in news source, with a call counter."""
+    state = {"calls": 0}
 
-    async def news(self, symbols, **kwargs):
-        self.calls += 1
-        if self.raises:
-            raise self.raises
-        return self.payload
+    async def fetch(symbols, *, now):
+        state["calls"] += 1
+        if raises:
+            raise raises
+        return payload
+
+    fetch.label = "fake"
+    fetch.state = state
+    return fetch
 
 
 @pytest.mark.asyncio
-async def test_the_desk_scores_what_the_venue_returns():
-    import datetime as dt
-    now = dt.datetime.now(tz=dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    desk = NewsDesk()
-    await desk.refresh(_FakeClient({
+async def test_the_desk_scores_what_the_source_returns():
+    desk = NewsDesk(source=_fake_source({
         "AAPL": [{"headline": "Apple shares surge on record beat",
-                  "created_at": now, "summary": "", "source": "benzinga"}],
-    }), ["AAPL", "MSFT"])
+                  "age_hours": 1.0, "summary": "", "source": "yahoo"}],
+    }))
+    await desk.refresh(["AAPL", "MSFT"])
     assert desk.sentiment("AAPL").score > 0
     assert desk.sentiment("AAPL").covered
     assert not desk.sentiment("MSFT").covered
+
+
+@pytest.mark.asyncio
+async def test_the_desk_also_reads_the_venue_shaped_rows():
+    """Prevents: the RSS switch silently breaking the venue source. The two
+    carry their dates differently -- an age from RSS, an ISO timestamp from
+    the venue -- and the desk has to read both."""
+    import datetime as dt
+    now = dt.datetime.now(tz=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    desk = NewsDesk(source=_fake_source({
+        "AAPL": [{"headline": "Apple shares surge on record beat",
+                  "created_at": now, "summary": "", "source": "benzinga"}],
+    }))
+    await desk.refresh(["AAPL"])
+    assert desk.sentiment("AAPL").score > 0
 
 
 @pytest.mark.asyncio
@@ -296,20 +313,42 @@ async def test_a_news_outage_is_absence_and_never_an_exception():
     """Prevents: a text API taking the trading loop down with it. The factor is
     secondary; its failure mode must be that positions are sized exactly as
     they were before it existed."""
-    desk = NewsDesk()
-    await desk.refresh(_FakeClient(None, raises=RuntimeError("boom")), ["AAPL"])
+    desk = NewsDesk(source=_fake_source(None, raises=RuntimeError("boom")))
+    await desk.refresh(["AAPL"])
     assert desk.last_error
     assert desk.sentiment("AAPL").tilt(0.25) == 0.25
 
 
 @pytest.mark.asyncio
 async def test_switching_the_factor_off_stops_it_asking_and_stops_it_tilting():
-    desk = NewsDesk()
+    source = _fake_source({})
+    desk = NewsDesk(source=source)
     desk.enabled = False
-    client = _FakeClient({})
-    await desk.refresh(client, ["AAPL"])
-    assert client.calls == 0
+    await desk.refresh(["AAPL"])
+    assert source.state["calls"] == 0
     assert desk.sentiment("AAPL").tilt(0.25) == 0.25
+
+
+@pytest.mark.asyncio
+async def test_the_desk_reads_news_without_a_venue_credential():
+    """Prevents the reason for the switch being undone. The default source
+    needs no key, so headlines are readable on first launch -- before a
+    credential has been attached, which is exactly when an operator is trying
+    to tell whether the program does anything at all."""
+    import inspect
+    from imperium.session import TradingSession
+
+    session = TradingSession()
+    assert session.client is None
+    signature = inspect.signature(NewsDesk.refresh)
+    assert "client" not in signature.parameters, (
+        "the desk should not need a venue client to read news")
+    source = _fake_source({"AAPL": [{"headline": "Apple surges on record beat",
+                                     "age_hours": 1.0}]})
+    session.newsdesk = NewsDesk(source=source)
+    await session.refresh_news(force=True)
+    assert source.state["calls"] == 1
+    assert session.newsdesk.sentiment("AAPL").covered
 
 
 def test_the_desk_does_not_go_back_to_the_venue_on_every_tick():

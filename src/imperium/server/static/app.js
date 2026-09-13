@@ -805,19 +805,23 @@
     var note = $('news-note');
     if (!note) return;
 
+    // The source is named on screen. This feed is a public one that can change
+    // without notice, so "which source, and when did it last answer" is the
+    // first thing an operator needs when the readings look wrong.
+    var src = n.source || 'news';
     if (!n.enabled) {
       note.textContent = 'off';
       note.className = 'note';
-    } else if (n.last_error) {
-      note.textContent = 'unavailable';
+    } else if (n.last_error || n.broken) {
+      note.textContent = src + ' \u00b7 ' + (n.broken ? 'silent' : 'unavailable');
       note.className = 'note warn';
     } else if (n.age === null || n.age === undefined) {
-      note.textContent = 'not read yet';
+      note.textContent = src + ' \u00b7 not read yet';
       note.className = 'note';
     } else {
-      note.textContent = 'read ' + (n.age < 90 ? Math.round(n.age) + 's'
-                                             : Math.round(n.age / 60) + 'm') +
-                        ' ago';
+      note.textContent = src + ' \u00b7 read ' +
+        (n.age < 90 ? Math.round(n.age) + 's' : Math.round(n.age / 60) + 'm') +
+        ' ago';
       note.className = 'note';
     }
 
@@ -847,6 +851,12 @@
       if (n.last_error) {
         why.textContent = 'Headlines could not be read: ' + n.last_error +
           '. Positions are sized exactly as they would be without the factor.';
+        why.className = 'warn';
+      } else if (n.broken) {
+        // Said loudly on purpose. The default source is a public feed that can
+        // change without notice, and when it does the symptom is silence --
+        // which looks exactly like a quiet news week unless something says so.
+        why.textContent = n.broken;
         why.className = 'warn';
       } else {
         why.textContent = 'Headline tone adjusts the size of a position the ' +

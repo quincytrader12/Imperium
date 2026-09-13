@@ -35,3 +35,27 @@ def client(venue):
 
     return AlpacaClient(KEY, SECRET, paper=True, transport=venue.transport,
                         max_retries=0)
+
+
+@pytest.fixture(autouse=True)
+def offline_news(monkeypatch):
+    """No test reaches the real news feed.
+
+    Autouse and unconditional, for the same reason ``isolated_home`` is. The
+    default news source is a public RSS feed on the open internet; a suite that
+    touches it is a suite whose result depends on somebody else's uptime, and
+    one that would hammer a stranger's server every time it ran. Tests that
+    exercise the source pass their own transport and are unaffected by this.
+    """
+    import httpx
+    from imperium.execution import newsdesk as newsdesk_mod
+
+    empty = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<rss><channel></channel></rss>"))
+    original = newsdesk_mod.yahoo_source
+
+    def offline(*, transport=None):
+        return original(transport=transport or empty)
+
+    monkeypatch.setattr(newsdesk_mod, "yahoo_source", offline)
+    yield

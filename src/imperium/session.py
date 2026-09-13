@@ -228,6 +228,7 @@ class TradingSession:
         #: nothing else -- see imperium.strategy.sentiment for
         #: why it is not allowed to be a gate.
         self.newsdesk = NewsDesk()
+        self._news_task: asyncio.Task[None] | None = None
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -1036,6 +1037,27 @@ class TradingSession:
         ordered += [s for s in self.universe if s not in seen]
         return ordered
 
+    def kick_news(self) -> None:
+        """Start a news refresh in the background, and do not wait for it.
+
+        **The trading loop never awaits this, and that is the whole point.**
+        A refresh is up to ``newsdesk.MAX_SYMBOLS`` requests to a third party
+        that this program does not control. Awaiting it puts a stranger's
+        latency on the critical path of the loop that also manages stops,
+        exits and the cohort rotation -- and the first version of this did
+        exactly that, which showed up as the loop failing to rotate its cohort
+        inside two seconds. A secondary factor must never be able to stall the
+        book.
+
+        At most one refresh is ever in flight. A second would double the
+        request count to answer the same question.
+        """
+        if not self.newsdesk.due():
+            return
+        if self._news_task is not None and not self._news_task.done():
+            return
+        self._news_task = asyncio.create_task(self.refresh_news())
+
     async def refresh_news(self, force: bool = False) -> None:
         """Re-read headlines for the symbols closest to being traded.
 
@@ -1044,18 +1066,31 @@ class TradingSession:
         are the ones holding a position or about to, not whichever tickers the
         cohort cursor happens to be sitting on.
         """
-        if self.client is None:
-            return
+        # No client check. The default news source is a public feed that needs
+        # no credential, so headlines are readable on first launch -- before a
+        # key is attached is exactly when an operator is watching the screen
+        # trying to tell whether the program does anything.
         if not force and not self.newsdesk.due():
             return
         before = self.newsdesk.refreshed_at
-        await self.newsdesk.refresh(self.client, self._stream_priority())
+        try:
+            await self.newsdesk.refresh(self._stream_priority())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                            # noqa: BLE001
+            # Belt and braces: the desk already swallows its own failures, and
+            # this runs detached where an escaping exception would be reported
+            # as an unretrieved task exception at interpreter shutdown rather
+            # than anywhere an operator would look.
+            log.warning("the news refresh raised: %s", exc)
+            return
         if self.newsdesk.last_error:
             return
         if not before and self.newsdesk.refreshed_at:
             self.telemetry.event(
                 Level.INFO, "news",
-                f"read {self.newsdesk.articles_seen} headlines; "
+                f"read {self.newsdesk.articles_seen} headlines from "
+                f"{self.newsdesk.source_name}; "
                 f"{self.newsdesk.symbols_covered} symbols have news",
                 detail="News adjusts position size by at most "
                        f"{int(sentiment_mod.MAX_TILT * 100)}%. It never admits "
@@ -1833,11 +1868,9 @@ class TradingSession:
                     await self.refresh_universe()
                     # Cheap: it returns immediately unless a day has passed.
                     await self.refresh_daily_history()
-                    # Slower again than this branch: the desk decides for
-                    # itself whether ten minutes have passed. Called from here
-                    # only so it shares the branch's once-a-minute ceiling and
-                    # never runs on the per-second path.
-                    await self.refresh_news()
+                    # Started, not awaited. See kick_news: a third party's
+                    # latency must never sit on this loop.
+                    self.kick_news()
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
                 # what has not been looked at yet.
@@ -1941,6 +1974,13 @@ class TradingSession:
             except asyncio.CancelledError:
                 pass
             self._loop_task = None
+        # A detached refresh outliving the session it belongs to would keep
+        # requesting headlines for a book nobody is trading.
+        if self._news_task is not None and not self._news_task.done():
+            self._news_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._news_task
+        self._news_task = None
         await self.feed.stop()
         self.telemetry.event(Level.INFO, "session", "session stopped")
 

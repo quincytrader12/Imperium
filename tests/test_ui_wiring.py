@@ -292,3 +292,11 @@ def test_the_news_panel_is_rendered_and_states_that_it_is_not_a_gate():
         assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
     assert "never admit a symbol" in APP_JS
     assert "after the cost gate" in APP_JS
+
+
+def test_the_news_panel_says_when_its_feed_has_gone_silent():
+    """Prevents an undocumented feed failing invisibly. Yahoo's RSS can change
+    without notice, and the symptom is no coverage -- which looks exactly like
+    a quiet news week on a panel that does not say otherwise."""
+    assert "n.broken" in APP_JS, "the silent-feed warning is never shown"
+    assert "n.source" in APP_JS, "the panel does not say which source it used"
