@@ -234,6 +234,26 @@ class MockVenue:
             if order is None:
                 return self._error(404, 40410000, "order not found")
             return self._json(order)
+        if path == "/v1beta1/news":
+            # Benzinga tags crypto unslashed: "BTCUSD", not "BTC/USD". A client
+            # that passes the slashed symbol through and then looks for it in
+            # the reply finds nothing and silently reports no coverage, which
+            # is the one failure mode of this endpoint that looks like a quiet
+            # market rather than a bug.
+            asked = [s for s in (params.get("symbols") or "").split(",") if s]
+            rows = []
+            for symbol in asked:
+                tag = symbol.replace("/", "").upper()
+                rows.append({
+                    "id": len(rows) + 1,
+                    "headline": f"{symbol} shares surge on record earnings beat",
+                    "summary": "The company raised guidance.",
+                    "source": "benzinga",
+                    "created_at": dt.datetime.now(dt.timezone.utc)
+                                    .isoformat().replace("+00:00", "Z"),
+                    "symbols": [tag],
+                })
+            return self._json({"news": rows, "next_page_token": None})
         if path.startswith("/v2/positions/") and request.method == "DELETE":
             return self._json({"symbol": path.rsplit("/", 1)[-1],
                                "status": "closed"})

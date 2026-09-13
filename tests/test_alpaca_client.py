@@ -224,3 +224,42 @@ async def test_an_unauthenticated_client_refuses_before_sending(venue):
         await client.account()
     assert "needs an API key" in excinfo.value.message
     await client.aclose()
+
+
+async def test_the_news_request_uses_the_query_parameters_the_venue_expects(
+        client, venue):
+    """Prevents the quietest possible failure in this client.
+
+    A wrong query parameter name -- ``symbol`` for ``symbols``, say -- does not
+    error. Alpaca answers 200 with the general news feed or an empty list, the
+    desk above scores nothing, every symbol reads "no news", and the factor is
+    silently dead. Nothing on the screen would say so, because "no news" is
+    also the honest answer most days.
+    """
+    await client.news(["AAPL", "MSFT"])
+    sent = venue.requests[-1]
+    assert sent.url.path == "/v1beta1/news"
+    params = dict(sent.url.params)
+    assert params["symbols"] == "AAPL,MSFT"
+    assert params["sort"] == "desc"
+    assert int(params["limit"]) > 0
+
+
+async def test_news_is_returned_under_the_symbol_that_was_asked_for(client):
+    """Prevents: crypto news being fetched and then thrown away.
+
+    The venue tags a crypto story "BTCUSD" while this program calls the pair
+    "BTC/USD". Looking the reply up under the slashed spelling finds nothing,
+    so the coins -- the one asset class a small account can trade around the
+    clock -- would be the ones that never got a reading.
+    """
+    grouped = await client.news(["AAPL", "BTC/USD"])
+    assert set(grouped) == {"AAPL", "BTC/USD"}
+    assert grouped["BTC/USD"][0]["headline"]
+
+
+async def test_a_news_outage_returns_what_it_has_rather_than_raising(client, venue):
+    """Prevents: a news failure reaching the scanner. News is secondary; its
+    outage must cost coverage, not a scan."""
+    venue.fail_next.append(lambda r: httpx.Response(500, json={"message": "nope"}))
+    assert await client.news(["AAPL"]) == {}
