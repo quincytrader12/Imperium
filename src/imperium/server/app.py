@@ -23,14 +23,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (FastAPI, HTTPException, Request, Response, WebSocket,
+                     WebSocketDisconnect)
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from imperium import config, logging_setup
 from imperium.diagnostics.layers import NetworkDiagnostic
-from imperium.notify import telegram
+from imperium.notify import telegram, voice
 from imperium.execution.broker import LIVE_CONFIRMATION_PHRASE, Mode, ModeSwitchRefused
 from imperium.security.credentials import CredentialError, CredentialStore
 from imperium.session import TradingSession
@@ -102,6 +103,23 @@ def validate_bind_host(host: str) -> str:
 #: connections panel lists it separately.
 TELEGRAM_NAME = "telegram"
 TELEGRAM_VENUE = "telegram"
+
+
+#: Where the ElevenLabs key lives in the credential store.
+VOICE_NAME = "elevenlabs"
+VOICE_VENUE = "elevenlabs"
+
+
+class VoiceKeyRequest(BaseModel):
+    # ElevenLabs keys are prefixed and of a known rough length; bounded so a
+    # paste of the wrong thing entirely is refused before it reaches the
+    # network.
+    api_key: str = Field(min_length=20, max_length=256)
+
+
+class VoiceChoiceRequest(BaseModel):
+    voice_id: str = Field(min_length=1, max_length=128)
+    voice_name: str = Field(default="", max_length=128)
 
 
 class TelegramRequest(BaseModel):
@@ -190,6 +208,16 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
             if token:
                 state["session"].notifier.configure(
                     token, store.chat_for(TELEGRAM_NAME))
+            # Same for the voice: a terminal that restarts itself must come
+            # back able to speak, or the silence after a restart reads as
+            # nothing having happened.
+            voice_key = store.token_for(VOICE_NAME)
+            if voice_key:
+                chosen = next((c for c in store.masked_list()
+                               if c.get("name") == VOICE_NAME), {})
+                state["session"].speaker.configure(
+                    voice_key, store.chat_for(VOICE_NAME),
+                    str(chosen.get("note") or ""))
 
         if state.get("store_error"):
             state["session"].store_error = state["store_error"]
@@ -306,6 +334,99 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
     async def delete_connection(name: str) -> JSONResponse:
         get_store().remove(name)
         return JSONResponse({"removed": name})
+
+    @app.get("/api/voice")
+    async def voice_status() -> JSONResponse:
+        """Status only. The key is never returned, masked or otherwise."""
+        session = get_session()
+        store = state.get("store")
+        stored = False
+        if store is not None:
+            stored = any(c.get("venue") == VOICE_VENUE
+                         for c in store.masked_list())
+        return JSONResponse({**session.speaker.status(), "stored": stored})
+
+    @app.post("/api/voice")
+    async def voice_connect(body: VoiceKeyRequest) -> JSONResponse:
+        """Check the key and remember it, and hand back the account's voices.
+
+        Listing the voices rather than baking in an id: they differ per
+        account, so a default written here would work on one machine and
+        nowhere else.
+        """
+        session = get_session()
+        key = body.api_key.strip()
+        try:
+            voices = await voice.list_voices(key)
+        except voice.VoiceError as exc:
+            raise HTTPException(400, detail=exc.operator_text()) from None
+        store = get_store()
+        chosen = store.chat_for(VOICE_NAME)          # the previously picked id
+        store.put_token(VOICE_NAME, VOICE_VENUE, key,
+                        note=session.speaker.voice_name, chat=chosen)
+        session.speaker.configure(key)
+        session.telemetry.event(
+            Level.INFO, "security",
+            f"ElevenLabs key stored ({len(voices)} voices available)")
+        return JSONResponse({
+            "voices": [{"voice_id": v.voice_id, "name": v.name}
+                       for v in voices],
+        })
+
+    @app.post("/api/voice/select")
+    async def voice_select(body: VoiceChoiceRequest) -> JSONResponse:
+        session = get_session()
+        store = get_store()
+        key = store.token_for(VOICE_NAME)
+        if not key:
+            raise HTTPException(400, detail="paste the ElevenLabs key first")
+        store.set_chat(VOICE_NAME, body.voice_id)
+        store.put_token(VOICE_NAME, VOICE_VENUE, key,
+                        note=body.voice_name, chat=body.voice_id)
+        session.speaker.configure(key, body.voice_id, body.voice_name)
+        return JSONResponse(session.speaker.status())
+
+    @app.get("/api/voice/script")
+    async def voice_script() -> JSONResponse:
+        """The briefing as text, without spending a character of quota.
+
+        Worth its own endpoint: it is how an operator checks what it would say
+        before paying to hear it, and how this gets debugged without audio.
+        """
+        return JSONResponse({"script": get_session().briefing()})
+
+    @app.post("/api/voice/speak")
+    async def voice_speak() -> Response:
+        """The briefing as audio.
+
+        Synthesised here rather than in the page: the browser never sees the
+        key. Putting it in the page to save a hop would put it in every
+        browser cache, devtools session and screenshot of this terminal.
+        """
+        session = get_session()
+        if not session.speaker.enabled:
+            raise HTTPException(
+                400, detail="no ElevenLabs key and voice are set up yet")
+        audio = await session.speaker.speak(session.briefing())
+        if audio is None:
+            raise HTTPException(
+                502, detail=session.speaker.last_error or "speech failed")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/voice")
+    async def voice_forget() -> JSONResponse:
+        session = get_session()
+        store = state.get("store")
+        if store is not None:
+            try:
+                store.remove(VOICE_NAME)
+            except Exception:
+                pass
+        session.speaker.configure("", "", "")
+        session.speaker.voice_id = ""
+        session.speaker.api_key = ""
+        return JSONResponse({"removed": True})
 
     @app.get("/api/telegram")
     async def telegram_status() -> JSONResponse:

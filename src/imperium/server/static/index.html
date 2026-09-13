@@ -42,6 +42,7 @@
       <option value="paper">paper</option>
       <option value="live">LIVE</option>
     </select>
+    <button id="btn-speak" title="Speak a briefing">&#9658; Brief me</button>
     <button id="btn-conn">Connections</button>
     <a href="/diagnose" target="_blank" rel="noopener"><button>Diagnose</button></a>
   </div>
@@ -286,6 +287,30 @@
       armed. Refusals are never sent — this program refuses thousands of times
       an hour by design.
     </div>
+
+    <!-- Speech. The key never reaches this page: the server synthesises the
+         audio and hands back the bytes. -->
+    <hr class="modal-rule">
+    <h3 class="sub">Voice <span class="note" id="v-state">not connected</span></h3>
+    <div class="notice compact">
+      1. In ElevenLabs, open <b>Profile → API Key</b> and copy it.
+      2. Paste it below and press <b>Check key</b>.
+      3. Pick a voice, then press <b>Speak</b> to hear a briefing.
+      Speech happens when you ask for it — never on a timer.
+    </div>
+    <label for="v-key">ElevenLabs API key</label>
+    <input id="v-key" type="password" autocomplete="off" spellcheck="false"
+           placeholder="sk_...">
+    <label for="v-voice">Voice</label>
+    <select id="v-voice" disabled><option>paste a key first</option></select>
+    <div id="v-error"></div>
+    <div class="row">
+      <button id="v-check">Check key</button>
+      <button id="v-speak" class="primary" disabled>Speak</button>
+      <button id="v-script">Read script</button>
+      <button id="v-forget">Forget</button>
+    </div>
+    <pre class="v-script" id="v-script-out" hidden></pre>
   </div>
 </div>
 

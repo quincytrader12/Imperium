@@ -1180,6 +1180,7 @@
     $('conn-modal').hidden = false;
     loadConnections();
     loadTelegram();
+    loadVoice();
   };
   $('c-close').onclick = function () { $('conn-modal').hidden = true; };
 
@@ -1313,6 +1314,119 @@
     };
   }
 
+  /* ---------- voice ---------- */
+
+  /* One Audio element, reused. A fresh one per briefing leaves the previous
+   * still playing, so two presses of Speak talk over each other. */
+  var briefingAudio = null;
+
+  function vError(message) {
+    var box = $('v-error');
+    if (!box) return;
+    box.innerHTML = message ? '<div class="notice bad"></div>' : '';
+    if (message) box.firstChild.textContent = message;
+  }
+
+  function renderVoice(st) {
+    var state = $('v-state');
+    if (!state) return;
+    var on = st && st.enabled;
+    state.textContent = on
+      ? 'ready' + (st.voice ? ' · ' + st.voice : '') +
+        (st.failed ? ' · ' + st.failed + ' failed' : '')
+      : (st && st.stored) ? 'key stored — pick a voice' : 'not connected';
+    state.className = 'note ' + (on ? 'ok' : (st && st.stored) ? 'warn' : '');
+    if ($('v-speak')) $('v-speak').disabled = !on;
+    if ($('btn-speak')) $('btn-speak').disabled = !on;
+    if (st && st.last_error) vError(st.last_error);
+  }
+
+  function loadVoice() {
+    return fetch('/api/voice').then(function (r) { return r.json(); })
+      .then(renderVoice).catch(function () { /* the panel still renders */ });
+  }
+
+  function speakBriefing() {
+    vError('');
+    var button = $('btn-speak');
+    if (button) button.disabled = true;
+    return fetch('/api/voice/speak', { method: 'POST' })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (e) {
+            throw new Error(e.detail || 'speech failed');
+          });
+        }
+        return r.blob();
+      })
+      .then(function (blob) {
+        if (briefingAudio) {
+          briefingAudio.pause();
+          URL.revokeObjectURL(briefingAudio.src);
+        }
+        briefingAudio = new Audio(URL.createObjectURL(blob));
+        return briefingAudio.play();
+      })
+      .catch(function (e) { vError(e.message || String(e)); })
+      .then(function () { return loadVoice(); });
+  }
+
+  if ($('btn-speak')) {
+    $('btn-speak').disabled = true;
+    $('btn-speak').onclick = speakBriefing;
+  }
+
+  if ($('v-check')) {
+    $('v-check').onclick = function () {
+      vError('');
+      post('/api/voice', { api_key: $('v-key').value.trim() })
+        .then(function (r) {
+          /* Cleared the moment it is stored: a bearer key sitting in a DOM
+           * input is a bearer key in every screenshot of this panel. */
+          $('v-key').value = '';
+          var select = $('v-voice');
+          select.innerHTML = '';
+          (r.voices || []).forEach(function (v) {
+            var option = document.createElement('option');
+            option.value = v.voice_id;
+            option.textContent = v.name;
+            select.appendChild(option);
+          });
+          select.disabled = false;
+          if (select.options.length) select.onchange();
+          return loadVoice();
+        })
+        .catch(function (e) { vError(e.message); });
+    };
+    $('v-voice').onchange = function () {
+      var select = $('v-voice');
+      if (!select.options.length) return;
+      post('/api/voice/select', {
+        voice_id: select.value,
+        voice_name: select.options[select.selectedIndex].textContent
+      }).then(renderVoice).catch(function (e) { vError(e.message); });
+    };
+    $('v-speak').onclick = speakBriefing;
+    $('v-script').onclick = function () {
+      vError('');
+      fetch('/api/voice/script').then(function (r) { return r.json(); })
+        .then(function (r) {
+          var out = $('v-script-out');
+          out.textContent = r.script || '';
+          out.hidden = false;
+        });
+    };
+    $('v-forget').onclick = function () {
+      vError('');
+      fetch('/api/voice', { method: 'DELETE' })
+        .then(function () {
+          $('v-voice').innerHTML = '<option>paste a key first</option>';
+          $('v-voice').disabled = true;
+          return loadVoice();
+        });
+    };
+  }
+
   function alertErr(err) {
     var banner = $('banner');
     banner.hidden = false;
@@ -1321,6 +1435,10 @@
   }
 
   connect();
+  /* Read once at startup, so the header's Brief me button is usable without
+   * opening Connections first. A stored key survives restarts, and a button
+   * that stays dead until an unrelated panel is opened reads as broken. */
+  loadVoice();
   requestAnimationFrame(animate);
   /* ---------- collapsible panels ---------- */
 

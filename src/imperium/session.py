@@ -37,7 +37,9 @@ from imperium.execution import risk as risk_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
+from imperium.notify import briefing as brief_mod
 from imperium.notify import telegram as tg
+from imperium.notify import voice as voice_mod
 from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
@@ -215,6 +217,11 @@ class TradingSession:
         #: best-effort and swallows its own failures: a notifier that can
         #: raise into the trading loop is a notifier that can stop the book.
         self.notifier = tg.Notifier()
+        #: Speech. Off until a key and a voice are chosen. Like the notifier,
+        #: every call swallows its own failure: a terminal that stops because
+        #: a text-to-speech API is down would be a far worse outcome than a
+        #: briefing nobody hears.
+        self.speaker = voice_mod.Speaker()
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -1382,6 +1389,15 @@ class TradingSession:
                 continue
             await self._act_on(decision)
         return len(slice_)
+
+    def briefing(self) -> str:
+        """What the terminal would say out loud right now.
+
+        Built from the same snapshot the browser renders, so the spoken
+        version cannot drift from the screen: there is one description of the
+        session's state and two ways of presenting it.
+        """
+        return brief_mod.build(self.snapshot())
 
     async def notify(self, text: str) -> bool:
         """Send to Telegram if it is linked, and never let it matter if not.
