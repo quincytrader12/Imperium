@@ -300,3 +300,17 @@ def test_the_news_panel_says_when_its_feed_has_gone_silent():
     a quiet news week on a panel that does not say otherwise."""
     assert "n.broken" in APP_JS, "the silent-feed warning is never shown"
     assert "n.source" in APP_JS, "the panel does not say which source it used"
+
+
+def test_a_refused_data_socket_shows_its_remedy_on_screen():
+    """Prevents the fix for a dark data lamp living only in a tooltip.
+
+    A refused data socket is the one fault that stops this terminal being
+    useful at all, and the operator report that prompted this had them
+    checking their API key and their Alpaca plan — neither of which was the
+    problem. The thing to actually do belongs on the screen.
+    """
+    assert 'id="hz-feed-remedy"' in INDEX, "the remedy element is not on the page"
+    assert "hz-feed-remedy" in APP_JS, "the remedy is never written to"
+    assert "f.remedy" in APP_JS, "the remedy is never read from the snapshot"
+    assert ".feed-remedy" in STYLES, "the remedy has no styling"

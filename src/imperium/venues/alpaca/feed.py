@@ -63,6 +63,103 @@ class Quote:
         return time.time() - self.updated_at if self.updated_at else float("inf")
 
 
+#: What each of Alpaca's data-stream error codes actually means, and what an
+#: operator can do about it.
+#:
+#: This table exists because the code it replaced printed *one guessed cause*
+#: for every code -- "the key must be valid and the plan must include the iex
+#: feed" -- regardless of what the venue had said. For the commonest rejection
+#: of all, 406, that sentence is not merely unhelpful but wrong in both halves:
+#: the key is fine and the plan is fine, and the operator is sent to check two
+#: things that were never the problem while the real one (a second copy of this
+#: program still holding the one connection the account is allowed) goes
+#: unmentioned.
+#:
+#: One correction worth stating plainly, because the old message had it
+#: backwards: IEX is the *free* feed, included with every Alpaca account, paper
+#: and live alike. No plan needs to be bought to stream it. A subscription is
+#: what SIP needs, and a plan complaint on an IEX connection means something
+#: else is wrong.
+STREAM_ERRORS: dict[int, tuple[str, str]] = {
+    400: ("the subscribe request was malformed",
+          "A bug in this program rather than anything on the account. Please "
+          "report it with the code and this message."),
+    401: ("the stream was used before it authenticated",
+          "A bug in this program's handshake ordering. Please report it."),
+    402: ("the key and secret were not accepted",
+          "Copy both halves again from the Alpaca dashboard under Home → API "
+          "Keys. A key stops working the moment it is regenerated, and the "
+          "secret is shown only once when it is created. Paper keys stream "
+          "market data perfectly well, so a paper key is not the problem."),
+    403: ("this connection had already authenticated",
+          "Usually harmless and usually transient. If it repeats, close every "
+          "other copy of this program and start one."),
+    404: ("the connection did not authenticate in time",
+          "Normally a slow or intercepted network. Check whether a VPN, "
+          "corporate proxy or security suite is inspecting websocket traffic."),
+    405: ("more symbols were requested than the plan allows",
+          "Handled automatically: the cap is halved and the subscription "
+          "retried."),
+    406: ("this Alpaca account already has a live market data connection",
+          "Alpaca allows ONE at a time, and this is by far the commonest "
+          "cause of a dark data lamp. Close any other copy of IMPERIUM "
+          "(check Task Manager for a second IMPERIUM.exe), any notebook, "
+          "script or third-party app using the same key, and any Alpaca "
+          "dashboard page showing live prices. A connection from a run that "
+          "has only just exited can take up to half a minute to be released, "
+          "so restarting immediately will hit this too."),
+    407: ("this program could not keep up with the stream and was dropped",
+          "The machine is overloaded or the connection is slow. It will "
+          "reconnect with fewer symbols if the venue keeps refusing."),
+    408: ("this account is not enabled for v2 market data",
+          "Open the Alpaca dashboard once and accept any outstanding market "
+          "data agreement, then restart."),
+    409: ("the plan does not include the feed that was asked for",
+          "The 'sip' feed needs a paid Alpaca subscription. The 'iex' feed is "
+          "free on every account and is what this program asks for by "
+          "default, so seeing this on an IEX connection means the account is "
+          "restricted in some other way -- check for an outstanding market "
+          "data agreement on the dashboard."),
+    500: ("the venue reported an internal error",
+          "Nothing to do at this end. This program keeps retrying, and "
+          "Alpaca's status page will say if it is widespread."),
+}
+
+#: How long to wait before retrying after error 406.
+#:
+#: Long, because retrying a connection limit cannot succeed: the limit is held
+#: by something else and will not be released by asking again a second later.
+#: A tight retry loop here produces a wall of identical errors that buries the
+#: one line explaining what to close, and looks like a misbehaving client from
+#: the venue's side.
+CONNECTION_LIMIT_BACKOFF = 30.0
+
+
+class FeedRejected(Exception):
+    """The data stream refused the connection, with the venue's own reason.
+
+    Carries the code so that the loop can treat a connection limit differently
+    from a bad key, and so the operator can quote a number rather than a
+    paraphrase.
+    """
+
+    def __init__(self, code: Any, venue_message: str) -> None:
+        self.code = code if isinstance(code, int) else None
+        self.venue_message = venue_message or "unknown error"
+        cause, remedy = STREAM_ERRORS.get(
+            self.code or -1,
+            ("the data feed refused the connection", ""))
+        self.cause = cause
+        self.remedy = remedy
+        super().__init__(self.operator_text())
+
+    def operator_text(self) -> str:
+        code = f" (code {self.code})" if self.code is not None else ""
+        said = (f' Alpaca said "{self.venue_message}".'
+                if self.venue_message.lower() not in self.cause.lower() else "")
+        return f"{self.cause}{code}.{said}"
+
+
 class MarketFeed:
     """Subscribes to bar and quote streams for a set of symbols.
 
@@ -83,6 +180,11 @@ class MarketFeed:
         self.errors = 0
         self.last_message_at: float = 0.0
         self.last_error: str = ""
+        #: What to do about ``last_error``, when the venue named a
+        #: cause this program has a remedy for. Kept beside the
+        #: error rather than folded into it so the panel can show
+        #: the fault and the fix with different weight.
+        self.last_remedy: str = ""
         #: How many symbols this plan will stream at once.
         #:
         #: Alpaca's basic plan caps concurrent subscriptions; the paid plans
@@ -270,6 +372,7 @@ class MarketFeed:
                     self._live[asset_class] = True
                     self.connected = any(self._live.values())
                     self.last_error = ""
+                    self.last_remedy = ""
                     backoff = 1.0
                     self.telemetry.event(
                         Level.GOOD, "feed",
@@ -296,6 +399,27 @@ class MarketFeed:
             except asyncio.CancelledError:
                 self._sockets.pop(asset_class, None)
                 raise
+            except FeedRejected as exc:
+                # The venue answered and said no. That is a different thing
+                # from a dropped socket and gets the venue's own reason and a
+                # remedy, not a Python class name -- an operator reading
+                # "RuntimeError" on a trading terminal learns nothing except
+                # that something inside broke.
+                self._sockets.pop(asset_class, None)
+                self._live[asset_class] = False
+                self.connected = any(self._live.values())
+                self.errors += 1
+                self.last_error = exc.operator_text()
+                self.last_remedy = exc.remedy
+                self.telemetry.event(
+                    Level.ERROR, "feed",
+                    f"{asset_class.value} data refused: {exc.cause}",
+                    detail=exc.remedy or exc.operator_text())
+                if exc.code == 406:
+                    # Asking again in a second cannot work: the one connection
+                    # this account is allowed is held by something else.
+                    backoff = CONNECTION_LIMIT_BACKOFF
+                    self._report_self_contention(asset_class)
             except Exception as exc:
                 # A dropped socket is an event, not an exception. It must never
                 # kill this loop or reach the UI as a traceback.
@@ -304,6 +428,7 @@ class MarketFeed:
                 self.connected = any(self._live.values())
                 self.errors += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
+                self.last_remedy = ""
                 self.telemetry.event(
                     Level.WARN, "feed",
                     f"{asset_class.value} data disconnected",
@@ -322,6 +447,45 @@ class MarketFeed:
             except asyncio.TimeoutError:
                 pass
 
+    def _report_self_contention(self, refused: AssetClass) -> None:
+        """Say so when the thing holding the connection is us.
+
+        Alpaca serves equities and crypto from different endpoints, so this
+        program opens a socket to each. Accounts are limited in how many
+        market data connections they may hold at once, and where that limit is
+        one, the second of our own two sockets is refused by the first.
+
+        That case is worth separating from every other 406 because the remedy
+        is completely different. "Close the other copy of IMPERIUM" is useless
+        advice when there is no other copy -- the operator goes looking for a
+        process that does not exist, which is the same wild goose chase the
+        old guessed message sent them on, in a new costume. Detected with
+        certainty rather than inferred: a stream of ours is live at the moment
+        another of ours is refused.
+        """
+        holder = next((cls.value for cls, live in self._live.items()
+                       if live and cls is not refused), "")
+        if not holder:
+            return
+        self.last_error = (
+            f"this Alpaca account allows one market data connection at a "
+            f"time, and IMPERIUM's own {holder} stream is using it, so the "
+            f"{refused.value} stream was refused")
+        self.last_remedy = (
+            f"Nothing else on this machine is at fault -- do not go looking "
+            f"for a second copy. The {holder} stream is live and those "
+            f"symbols are priced normally; {refused.value} symbols keep their "
+            f"daily bars and the once-a-minute snapshot sweep, so the "
+            f"daily-bar strategies still trade them and only the intraday "
+            f"one cannot. To stream {refused.value} instead, scan only that "
+            f"asset class -- or ask Alpaca about a plan with more than one "
+            f"concurrent connection.")
+        self.telemetry.event(
+            Level.WARN, "feed",
+            f"the {refused.value} stream lost the account's single data "
+            f"connection to the {holder} stream",
+            detail=self.last_remedy)
+
     async def _handshake(self, ws, asset_class: AssetClass,
                          symbols: list[str]) -> None:
         """Authenticate, then subscribe. A bad key shows up only here."""
@@ -334,12 +498,8 @@ class MarketFeed:
             for msg in messages:
                 msg_type = msg.get("T")
                 if msg_type == "error":
-                    raise RuntimeError(
-                        f"the data feed rejected the connection: "
-                        f"{msg.get('msg', 'unknown error')} "
-                        f"(code {msg.get('code')}). A paper key works on the "
-                        f"data feed, but the key must be valid and the plan "
-                        f"must include the '{self.feed}' feed.")
+                    raise FeedRejected(msg.get("code"),
+                                       str(msg.get("msg", "")))
                 if msg_type == "success" and msg.get("msg") == "authenticated":
                     # Only as many as the plan allows. Alpaca rejects an
                     # over-limit subscription *whole* -- the response is error
@@ -355,7 +515,7 @@ class MarketFeed:
                         "quotes": wanted,
                     }))
                     return
-        raise RuntimeError("the data feed did not answer the auth handshake")
+        raise FeedRejected(404, "no answer to the auth handshake")
 
     def _handle_stream_error(self, msg: dict[str, Any]) -> None:
         """Act on an error the stream sends after the subscription.
@@ -393,9 +553,13 @@ class MarketFeed:
             self._resubscribe.set()
             return
 
+        rejection = FeedRejected(code, text)
+        self.last_error = rejection.operator_text()
+        self.last_remedy = rejection.remedy
         self.telemetry.event(Level.WARN, "feed",
-                             f"the data stream reported an error: {text}",
-                             detail=f"code {code}")
+                             f"the data stream reported an error: "
+                             f"{rejection.cause}",
+                             detail=rejection.remedy or f"code {code}")
 
     @staticmethod
     def _decode(raw: str | bytes) -> list[dict[str, Any]]:

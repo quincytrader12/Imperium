@@ -2257,6 +2257,10 @@ class TradingSession:
                 "errors": self.feed.errors,
                 "age": None if not math.isfinite(age) else round(age, 1),
                 "last_error": self.feed.last_error,
+                # The fix, when the venue named a cause that has one. Sent
+                # separately from the error so the panel can show what is
+                # wrong and what to do about it with different weight.
+                "remedy": getattr(self.feed, "last_remedy", ""),
                 # The dark-lamp explanation. Computed here because the reason
                 # depends on the market clock and the session state, neither of
                 # which the feed knows about.

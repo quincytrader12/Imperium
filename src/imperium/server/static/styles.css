@@ -602,3 +602,17 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
    identically-coloured numbers makes the reader parse each one. */
 .news-pos b { color: var(--good, #46d67a); }
 .news-neg b { color: var(--bad, #ff5f56); }
+
+/* The remedy for a refused data socket. Deliberately readable rather than
+   dim: it is the one piece of text on this screen that an operator is meant
+   to act on immediately, and the terminal's usual muted styling would bury
+   it next to the fault it explains. */
+.feed-remedy {
+  margin: 4px 9px 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--warn, #e8b339);
+  background: rgba(232, 179, 57, 0.07);
+  color: var(--fg, #cfe3ef);
+  font-size: 11px;
+  line-height: 1.45;
+}

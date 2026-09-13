@@ -511,6 +511,17 @@
       fr.className = 'feed-reason ' + level;
       fr.title = f.last_error || '';
     }
+    /* The fix, on screen rather than buried in a tooltip nobody hovers.
+     * A refused data socket is the one fault that stops the terminal doing
+     * anything useful, and the operator cannot act on a cause they have to
+     * hunt for. Shown only when the venue named a cause this program has a
+     * remedy for, so it stays absent in normal running. */
+    var frx = $('hz-feed-remedy');
+    if (frx) {
+      var remedy = (f.connected === false && f.remedy) ? f.remedy : '';
+      frx.textContent = remedy;
+      frx.hidden = !remedy;
+    }
     $('hz-reconnects').textContent = h.reconnects;
     $('hz-errors').textContent = h.errors;
 
