@@ -297,6 +297,21 @@ def build(snapshot: dict[str, Any], *, now: dt.datetime | None = None) -> str:
         say(f"The crypto ranking is not measurable yet. "
             f"{cross.get('explain') or ''}")
 
+    # 8b. What the headlines contributed. Said as a factor, because that is
+    #     what it is -- a briefing that announces "sentiment is positive" on a
+    #     trading terminal invites the listener to think it decided something.
+    news = snapshot.get("news") or {}
+    if news.get("enabled") and news.get("covered"):
+        leaders = news.get("leaders") or []
+        loud = [l for l in leaders if abs(float(l.get("score") or 0)) >= 0.2]
+        if loud:
+            top = loud[0]
+            way = "positive" if float(top["score"]) > 0 else "negative"
+            say(f"Of the symbols with news, {say_ticker(str(top['symbol']))} "
+                f"reads most strongly {way}. Headlines adjust position size by "
+                f"up to {news.get('max_tilt_pct', 0)} percent and never decide "
+                f"whether a symbol is traded.")
+
     # 9. Anything actually wrong. Last, because a health line read before the
     #    book is a health line nobody waits for.
     feed = snapshot.get("feed") or {}

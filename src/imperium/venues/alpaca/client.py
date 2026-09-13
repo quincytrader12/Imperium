@@ -52,6 +52,18 @@ RATE_LIMIT_PER_MINUTE = 200
 #: inside every limit in the path.
 SNAPSHOT_BATCH = 200
 
+#: Symbols per news request.
+#:
+#: Smaller than the bar batch on purpose. The news endpoint returns whole
+#: articles rather than one row per symbol, so a wide request answers with a
+#: page of stories that is mostly about the few symbols that happen to be in
+#: the news -- and the rest of the batch gets nothing from a request that has
+#: already spent its page. Fifty symbols keeps the page usefully spread.
+NEWS_BATCH = 50
+
+#: The venue's own ceiling on articles per page.
+NEWS_MAX_LIMIT = 50
+
 
 class VenueError(Exception):
     """A venue-level failure carrying an operator-facing remedy."""
@@ -592,6 +604,54 @@ class AlpacaClient:
                 continue
             for symbol, rows in (payload or {}).get("bars", {}).items():
                 out[symbol] = rows or []
+        return out
+
+    async def news(self, symbols: list[str], *, limit: int = 50,
+                   start: dt.datetime | None = None,
+                   batch: int = NEWS_BATCH) -> dict[str, list[dict[str, Any]]]:
+        """Recent headlines, grouped by the symbols each one is tagged with.
+
+        One endpoint serves both asset classes here, unlike bars and snapshots
+        -- ``/v1beta1/news`` takes equities and crypto in the same request. The
+        crypto tags come back unslashed ("BTCUSD" for "BTC/USD"), so they are
+        mapped back onto the symbols that were asked for; a caller should not
+        have to know the venue's spelling to find its own symbol in the result.
+
+        A failure here returns what it has rather than raising. News is a
+        secondary factor by design and a news outage must not stop the scanner:
+        the desk above this reads an empty result as "no coverage", which is
+        already the normal case for most of the crypto pairs.
+        """
+        wanted: dict[str, str] = {}
+        for symbol in symbols:
+            wanted[symbol.replace("/", "").upper()] = symbol
+        out: dict[str, list[dict[str, Any]]] = {}
+
+        ordered = list(symbols)
+        for at in range(0, len(ordered), max(1, batch)):
+            group = ordered[at:at + max(1, batch)]
+            params: dict[str, Any] = {
+                "symbols": ",".join(group),
+                "limit": max(1, min(limit, NEWS_MAX_LIMIT)),
+                "sort": "desc",
+                # Headlines without a body are mostly wire duplicates and
+                # index-rebalance notices; they cost quota and say nothing.
+                "exclude_contentless": "true",
+            }
+            if start is not None:
+                params["start"] = start.astimezone(dt.timezone.utc).isoformat()
+            try:
+                payload = await self._request("GET", "/v1beta1/news",
+                                              params=params, data_api=True)
+            except VenueError as exc:
+                log.warning("news for %d symbols failed: %s", len(group),
+                            exc.message)
+                continue
+            for row in (payload or {}).get("news") or []:
+                for tag in row.get("symbols") or []:
+                    symbol = wanted.get(str(tag).replace("/", "").upper())
+                    if symbol is not None:
+                        out.setdefault(symbol, []).append(row)
         return out
 
     async def snapshots(self, symbols: list[str], *,

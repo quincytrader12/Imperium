@@ -796,6 +796,69 @@
     }
   }
 
+  /* News sentiment. The panel's job is as much to state the factor's limits
+   * as to show its readings: an operator who sees a "sentiment" panel on a
+   * trading terminal will reasonably assume it decides something, and here it
+   * decides nothing except how big an already-approved position is. */
+  function renderNews(s) {
+    var n = s.news || {};
+    var note = $('news-note');
+    if (!note) return;
+
+    if (!n.enabled) {
+      note.textContent = 'off';
+      note.className = 'note';
+    } else if (n.last_error) {
+      note.textContent = 'unavailable';
+      note.className = 'note warn';
+    } else if (n.age === null || n.age === undefined) {
+      note.textContent = 'not read yet';
+      note.className = 'note';
+    } else {
+      note.textContent = 'read ' + (n.age < 90 ? Math.round(n.age) + 's'
+                                             : Math.round(n.age / 60) + 'm') +
+                        ' ago';
+      note.className = 'note';
+    }
+
+    $('news-grid').innerHTML =
+      cell('headlines', fmtNum(n.articles || 0, 0), '', 'last 7 days') +
+      cell('covered', (n.covered || 0) + ' / ' + (n.scored || 0),
+           (n.covered || 0) > 0 ? 'good' : '', 'symbols with news') +
+      cell('max tilt', '\u00b1' + (n.max_tilt_pct || 0) + '%', '',
+           'on size only') +
+      cell('role', 'factor', '', 'never a gate');
+
+    var host = $('news-leaders');
+    if (host) {
+      var leaders = n.leaders || [];
+      host.innerHTML = leaders.length
+        ? leaders.map(function (l) {
+            var cls = l.score > 0 ? 'news-pos' : (l.score < 0 ? 'news-neg' : '');
+            return '<span class="' + cls + '"><b>' +
+                   l.symbol.replace('/USD', '') + '</b> ' +
+                   (l.score > 0 ? '+' : '') + l.score + '</span>';
+          }).join('')
+        : '';
+    }
+
+    var why = $('news-why');
+    if (why) {
+      if (n.last_error) {
+        why.textContent = 'Headlines could not be read: ' + n.last_error +
+          '. Positions are sized exactly as they would be without the factor.';
+        why.className = 'warn';
+      } else {
+        why.textContent = 'Headline tone adjusts the size of a position the ' +
+          'strategy has already decided to take, by at most ' +
+          (n.max_tilt_pct || 0) + '%. It is applied after the cost gate, so ' +
+          'it can never admit a symbol, refuse one, or change the direction ' +
+          'of a trade.';
+        why.className = 'dimmer';
+      }
+    }
+  }
+
   function renderTrend(s) {
     var t = s.trend;
     if (!t) return;
@@ -1088,6 +1151,7 @@
     renderCensus(s);
     renderTrend(s);
     renderCrossSection(s);
+    renderNews(s);
     renderOvernight(s);
     renderCosts(s);
     renderStats(s);

@@ -119,6 +119,21 @@
       <div class="limit-grid" id="on-grid"></div>
       <div class="dimmer" id="on-verdict" style="padding:0 9px 8px"></div>
     </section>
+
+    <!-- News sentiment, last in the rail on purpose.
+         Everything above decides *whether* a trade happens; this only decides
+         how big one that is already happening should be. The rail is ordered
+         by that distinction rather than by novelty, so the panels an operator
+         scrolls past first are the ones that can refuse a trade. It is also
+         deliberately not placed among the gates: a factor whose limits live
+         only in the source is a factor the operator will assume is doing more
+         than it is, so the panel states them on screen. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>News sentiment <span class="note" id="news-note">—</span></h2>
+      <div class="limit-grid" id="news-grid"></div>
+      <div class="xs-leaders" id="news-leaders"></div>
+      <div class="dimmer" id="news-why" style="padding:0 9px 8px"></div>
+    </section>
   </div>
 
   <!-- ---------------- neural cluster ---------------- -->

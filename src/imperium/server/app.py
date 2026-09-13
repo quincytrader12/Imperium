@@ -25,6 +25,7 @@ from typing import Any
 
 from fastapi import (FastAPI, HTTPException, Request, Response, WebSocket,
                      WebSocketDisconnect)
+from starlette.websockets import WebSocketState
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -154,6 +155,33 @@ class HaltRequest(BaseModel):
     reason: str = "halted by the operator"
 
 
+#: The RuntimeError messages a send raises when the client has already gone.
+#:
+#: Matched on text because that is all the server gives: neither layer raises a
+#: typed disconnect on the send path. Both layers are listed because a closing
+#: socket can fail at either -- Starlette's own check fires when it has already
+#: written the close frame, uvicorn's when the close reached the protocol first
+#: -- and an earlier version of this matched only uvicorn's, which left the
+#: commoner of the two still printing a traceback.
+_CLOSED_SOCKET_MARKERS = (
+    "websocket.close",          # uvicorn: send after 'websocket.close'
+    "websocket.disconnect",     # uvicorn: send after the client's disconnect
+    "once a close message",     # starlette: send after it sent the close
+    "is not connected",         # starlette: the socket is no longer accepted
+)
+
+
+def _is_closed_socket(exc: RuntimeError) -> bool:
+    """Whether this RuntimeError is just a socket the client already closed.
+
+    Narrow on purpose. Any other RuntimeError from a send is a real fault and
+    is re-raised: swallowing those would trade a noisy log for a silent one,
+    which is the worse of the two.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _CLOSED_SOCKET_MARKERS)
+
+
 def create_app(session: TradingSession | None = None) -> FastAPI:
     state: dict[str, Any] = {}
 
@@ -211,6 +239,35 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
             # Same for the voice: a terminal that restarts itself must come
             # back able to speak, or the silence after a restart reads as
             # nothing having happened.
+            # Re-attach the key that was attached last time.
+            #
+            # Stored keys always persisted; what did not was the *attachment*,
+            # so every restart came back with no account, no balance and no
+            # live data until somebody opened Connections and clicked attach.
+            # On a program built to restart itself unattended that is not a
+            # small annoyance, it is a terminal that quietly stops trading
+            # until a human notices.
+            remembered = TradingSession.remembered_credential()
+            venue_keys = [c["name"] for c in store.masked_list()
+                          if c.get("venue") not in (TELEGRAM_VENUE, VOICE_VENUE)]
+            wanted = (remembered if remembered in venue_keys
+                      else venue_keys[0] if len(venue_keys) == 1 else "")
+            if wanted:
+                try:
+                    await state["session"].attach_credential(store, wanted)
+                    state["session"].telemetry.event(
+                        Level.INFO, "security",
+                        f"re-attached the credential {wanted!r} from the last "
+                        f"session")
+                except Exception as exc:            # noqa: BLE001
+                    # A key that no longer works must not stop the terminal
+                    # starting; it must say so and carry on unattached.
+                    state["session"].telemetry.event(
+                        Level.WARN, "security",
+                        f"could not re-attach {wanted!r}: {exc}",
+                        detail="Attach it again in Connections, or store a "
+                               "new key if this one was revoked.")
+
             voice_key = store.token_for(VOICE_NAME)
             if voice_key:
                 chosen = next((c for c in store.masked_list()
@@ -627,7 +684,29 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                     # failed to deliver rather than skipping past it.
                     log.exception("snapshot failed")
                     payload = {"ts": time.time(), "error": str(exc)}
-                await ws.send_json(payload)
+
+                # A closed tab is not an error.
+                #
+                # This loop only ever sends; it never awaits receive(), so it
+                # is never handed the `websocket.disconnect` that would raise
+                # WebSocketDisconnect. The first it learns of a closed socket
+                # is the next send, and uvicorn answers that with a bare
+                # RuntimeError -- "Unexpected ASGI message 'websocket.send',
+                # after sending 'websocket.close'". Left uncaught it printed a
+                # five-frame traceback at ERROR every time an operator
+                # refreshed the page or closed the tab, which trains the eye
+                # to skip the log that real faults are written to.
+                if (ws.client_state is not WebSocketState.CONNECTED
+                        or ws.application_state is not WebSocketState.CONNECTED):
+                    break
+                try:
+                    await ws.send_json(payload)
+                except RuntimeError as exc:
+                    # The race the state check above cannot close: the client
+                    # can go between the check and the send.
+                    if _is_closed_socket(exc):
+                        break
+                    raise
                 # Checked on the frame the operator is already paying for. A
                 # dead trading loop cannot notice itself, and every other
                 # indicator on screen -- session running, feed live, health

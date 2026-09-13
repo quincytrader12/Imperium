@@ -31,6 +31,7 @@ from imperium.execution.risk import VIABLE_POSITION_NOTIONAL, RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
 from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import regime as regime_mod
+from imperium.strategy.sentiment import Sentiment
 from imperium.strategy.regime import Regime, RegimeVerdict
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy.overnight import (
@@ -107,6 +108,19 @@ class Decision:
     trend_min_hold_days: float = 0.0
     trend_days_held: float = 0.0
     trend_phase: str = ""
+    #: The news factor's contribution, recorded whether or not it changed
+    #: anything. A factor that is only visible when it moves the number is one
+    #: nobody can audit: "no news" and "news said nothing" have to be as
+    #: legible as "news made this position bigger".
+    news_score: float = 0.0
+    news_label: str = "no news"
+    news_articles: int = 0
+    news_headline: str = ""
+    news_note: str = ""
+    #: How much the tilt actually changed the weight, as a percentage. Not
+    #: derivable from ``news_score`` alone, because the viable-notional floor
+    #: and the per-symbol cap can absorb part or all of it.
+    news_tilt_pct: float = 0.0
 
     @property
     def warming_up(self) -> bool:
@@ -171,6 +185,12 @@ class Decision:
             "trend_min_hold_days": round(self.trend_min_hold_days, 1),
             "trend_days_held": round(self.trend_days_held, 1),
             "trend_phase": self.trend_phase,
+            "news_score": round(self.news_score, 3),
+            "news_label": self.news_label,
+            "news_articles": self.news_articles,
+            "news_headline": self.news_headline,
+            "news_note": self.news_note,
+            "news_tilt_pct": round(self.news_tilt_pct, 1),
             "distance": round(self.distance_to_trading, 4),
         }
 
@@ -224,6 +244,11 @@ class SymbolEngine:
         #: coins the venue lists, what a unit of that rank has been worth, and
         #: whether the market is in the state momentum crashes in.
         self.pooled_cross: xs_mod.PooledCrossSection | None = None
+        #: The news desk's current reading for this symbol. Written by the
+        #: session before each decision and defaulted to "nothing known",
+        #: so an engine constructed without a desk behaves exactly as it
+        #: did before the factor existed.
+        self.news: Sentiment = Sentiment(symbol=symbol)
         self.cross_state: xs_mod.MarketState = xs_mod.MarketState()
         self.cross_score: float = 0.0
         self.cross_rank: int = 0
@@ -255,6 +280,42 @@ class SymbolEngine:
         return regime_mod.thresholds_for(self.asset.calibration_key)
 
     def evaluate(self) -> Decision:
+        """Evaluate one closed bar, then note what the news contributed.
+
+        The note is added here rather than in each strategy path so that a
+        path added later cannot forget it. A decision that does not say what
+        every input did to it is a decision an operator has to take on trust,
+        and this one is specifically the input they did not ask for.
+        """
+        d = self._decide()
+        # Stamped on every decision, on every path. The tilt only applies where
+        # a position is being sized, but the *reading* is true regardless -- and
+        # a held position reporting "no news" when there is news would be the
+        # panel lying about the input rather than merely omitting it.
+        d.news_score = self.news.score
+        d.news_label = self.news.label
+        d.news_articles = self.news.articles
+        d.news_headline = self.news.headline
+        d.news_note = self.news.explain()
+        if d.verdict is Verdict.TRADING and d.news_note and d.raw_weight:
+            if abs(d.news_tilt_pct) >= 1.0:
+                direction = "larger" if d.news_tilt_pct > 0 else "smaller"
+                d.reason = (f"{d.reason}; {d.news_note}, making the position "
+                            f"{abs(d.news_tilt_pct):.0f}% {direction}")
+            elif abs(d.news_score) >= 0.1:
+                # Scored clearly, and still moved nothing -- which means the
+                # per-symbol cap or the viable-notional floor took the whole
+                # tilt. Naming that is the difference between the operator
+                # concluding the factor is broken and understanding that a
+                # limit above it is binding.
+                d.reason = (f"{d.reason}; {d.news_note}, which the position "
+                            f"limits absorbed without changing the size")
+            else:
+                d.reason = (f"{d.reason}; {d.news_note}, too close to neutral "
+                            f"to change the size")
+        return d
+
+    def _decide(self) -> Decision:
         """Evaluate one closed bar. Emits a pulse for work actually done."""
         closes = self.series.closes()
         bars_seen = int(closes.size)
@@ -412,8 +473,10 @@ class SymbolEngine:
             self.telemetry.pulse(self.symbol, "refused", sized.reason, intensity=0.2)
             return d
 
+        self._tilt_for_news(d)
+
         # The clamp. Not optional, not guarded by hasattr.
-        clamped = self.allocator.clamp(self.symbol, sized.weight)
+        clamped = self.allocator.clamp(self.symbol, d.raw_weight)
         d.target_weight = clamped.weight
         d.clamp_binding = clamped.binding
         d.clamp_reason = clamped.reason
@@ -429,7 +492,7 @@ class SymbolEngine:
 
         d.verdict = Verdict.TRADING
         if clamped.reduced:
-            d.reason = (f"{signal.reason}; sized to {sized.weight:.1%} then "
+            d.reason = (f"{signal.reason}; sized to {d.raw_weight:.1%} then "
                         f"reduced to {clamped.weight:.1%} by the "
                         f"{clamped.binding}")
             self.telemetry.pulse(self.symbol, "cap", d.reason,
@@ -459,6 +522,54 @@ class SymbolEngine:
         account can trade crypto continuously and equities only across sessions.
         """
         return self.asset.asset_class is not AssetClass.CRYPTO
+
+    def _tilt_for_news(self, d: Decision) -> None:
+        """Let the headlines adjust the size, and nothing else.
+
+        Called at one point in every strategy path: after the cost gate has
+        admitted the trade and after the strategy has sized it, but before the
+        portfolio clamp. That position in the sequence is the design, not an
+        implementation detail. Applied any earlier, a positive tilt would
+        inflate the expected edge that the cost gate is comparing against the
+        spread, and the factor would quietly become the thing that decides
+        whether a trade happens at all -- which is exactly what it is not for.
+
+        What it cannot do, by construction: change the sign of a position,
+        create one where the strategy wanted none, remove one the strategy
+        wanted, or move the weight by more than
+        ``sentiment.MAX_TILT``. What it can do: make a position that is already
+        being opened somewhat larger or smaller, and say so on the panel.
+        """
+        sentiment = self.news
+        d.news_score = sentiment.score
+        d.news_label = sentiment.label
+        d.news_articles = sentiment.articles
+        d.news_headline = sentiment.headline
+        d.news_note = sentiment.explain()
+        d.news_tilt_pct = 0.0
+
+        before = d.raw_weight
+        if not sentiment.covered or before == 0.0:
+            return
+
+        after = sentiment.tilt(before)
+
+        # Two limits the tilt is not allowed to breach, because they are not
+        # preferences -- they are the reasons a position is worth holding at
+        # all. A tilt down must not shrink a position under the notional below
+        # which the fees eat it, and a tilt up must not carry it over the
+        # per-symbol cap.
+        equity = self.allocator.equity
+        if equity > 0:
+            floor = VIABLE_POSITION_NOTIONAL / equity
+            if abs(before) >= floor > abs(after):
+                after = math.copysign(floor, before)
+        cap = self.limits.max_position_weight
+        if abs(after) > cap:
+            after = math.copysign(cap, after)
+
+        d.raw_weight = after
+        d.news_tilt_pct = ((after / before) - 1.0) * 100.0
 
     def _decide_trend(self, d: Decision, closes: np.ndarray) -> Decision:
         """Carry a multi-day trend, for at least as long as its costs require.
@@ -614,6 +725,8 @@ class SymbolEngine:
             self.decision = d
             return d
 
+        self._tilt_for_news(d)
+
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight
         d.clamp_binding = clamped.binding
@@ -763,6 +876,8 @@ class SymbolEngine:
             d.reason = d.sizing_reason
             self.decision = d
             return d
+
+        self._tilt_for_news(d)
 
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight
@@ -922,6 +1037,8 @@ class SymbolEngine:
         # Entered on this close and exited on the next open, which is not a day
         # trade. The PDT ceiling therefore does not apply to it -- see
         # PortfolioAllocator.clamp.
+        self._tilt_for_news(d)
+
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight
         d.clamp_binding = clamped.binding

@@ -596,3 +596,9 @@ footer span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 @media (prefers-reduced-motion: reduce) {
   .scanning i { animation: none; opacity: 1; }
 }
+
+/* News sentiment leaders. Green and red rather than the terminal's usual
+   single accent: the sign is the whole content of the reading, and a row of
+   identically-coloured numbers makes the reader parse each one. */
+.news-pos b { color: var(--good, #46d67a); }
+.news-neg b { color: var(--bad, #ff5f56); }

@@ -41,8 +41,10 @@ from imperium.notify import briefing as brief_mod
 from imperium.notify import telegram as tg
 from imperium.notify import voice as voice_mod
 from imperium.strategy import crosssection as xs_mod
+from imperium.execution.newsdesk import NewsDesk
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
+from imperium.strategy import sentiment as sentiment_mod
 from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
@@ -222,6 +224,10 @@ class TradingSession:
         #: a text-to-speech API is down would be a far worse outcome than a
         #: briefing nobody hears.
         self.speaker = voice_mod.Speaker()
+        #: Headlines, scored. A factor on position size and
+        #: nothing else -- see imperium.strategy.sentiment for
+        #: why it is not allowed to be a gate.
+        self.newsdesk = NewsDesk()
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -362,7 +368,58 @@ class TradingSession:
             e.session_phase = self.session_phase
             self.engines[symbol] = e
             self.allocator.observe(symbol)
+        # Refreshed on every fetch rather than pushed at refresh time. Engines
+        # are cached and the desk is not, so pushing would leave an engine
+        # built between two refreshes reading "no news" until the next one --
+        # and "no news" is a claim about the world, not about the wiring.
+        e.news = self.newsdesk.sentiment(symbol)
         return e
+
+    def _remember_attached(self, name: str) -> None:
+        """Record which key is attached, merging into the existing state.
+
+        Read-modify-write rather than overwrite: the same file carries the
+        overnight and trend holdings, and clobbering those to save a name
+        would lose the book across a restart.
+        """
+        try:
+            config.ensure_home()
+            path = config.state_path()
+            payload: dict[str, Any] = {}
+            try:
+                loaded = json.loads(path.read_text(encoding=config.TEXT_ENCODING))
+                if isinstance(loaded, dict):
+                    payload = loaded
+            except (OSError, ValueError):
+                payload = {}
+            payload["attached"] = name
+            path.write_text(json.dumps(payload, indent=2),
+                            encoding=config.TEXT_ENCODING)
+            try:
+                path.chmod(0o600)
+            except (OSError, NotImplementedError):
+                pass
+        except OSError:
+            # Best effort, like every other write to this file. Failing to
+            # remember a name must never stop a key being attached.
+            pass
+
+    @staticmethod
+    def remembered_credential() -> str:
+        """The name of the key that was attached when this last ran.
+
+        Read before a session exists, so it is a static method: the server
+        uses it at startup to re-attach without the operator going back to
+        Connections. Only ever a name -- the key itself stays in the
+        credential file.
+        """
+        try:
+            payload = json.loads(
+                config.state_path().read_text(encoding=config.TEXT_ENCODING))
+        except (OSError, ValueError):
+            return ""
+        name = payload.get("attached") if isinstance(payload, dict) else ""
+        return str(name or "")
 
     async def attach_credential(self, store: CredentialStore,
                                 name: str | None) -> None:
@@ -383,6 +440,10 @@ class TradingSession:
                                        feed=self.spec.default_feed)
             return
         cred = store.require(name)
+        # Written now rather than at the next overnight save: a session that
+        # attaches a key and is closed an hour later must still come back
+        # attached.
+        self._remember_attached(cred.name)
         self.credential = cred
         self.client = AlpacaClient(cred.api_key, cred.secret,
                                    paper=self.paper_endpoint,
@@ -825,6 +886,11 @@ class TradingSession:
             path.write_text(json.dumps(
                 {"overnight_holdings": self.overnight_holdings,
                  "trend_holdings": self.trend_holdings,
+                 # The *name* of the attached key, never the key itself.
+                 # Restoring this is what stops an operator re-pasting
+                 # credentials on every restart of a program designed to
+                 # restart itself.
+                 "attached": self.credential.name if self.credential else "",
                  "saved_at": time.time()}, indent=2), encoding="utf-8")
             try:
                 path.chmod(0o600)
@@ -969,6 +1035,31 @@ class TradingSession:
         seen |= set(crypto)
         ordered += [s for s in self.universe if s not in seen]
         return ordered
+
+    async def refresh_news(self, force: bool = False) -> None:
+        """Re-read headlines for the symbols closest to being traded.
+
+        Priority-ordered rather than universe-ordered: the desk covers at most
+        ``newsdesk.MAX_SYMBOLS``, and the symbols worth spending that budget on
+        are the ones holding a position or about to, not whichever tickers the
+        cohort cursor happens to be sitting on.
+        """
+        if self.client is None:
+            return
+        if not force and not self.newsdesk.due():
+            return
+        before = self.newsdesk.refreshed_at
+        await self.newsdesk.refresh(self.client, self._stream_priority())
+        if self.newsdesk.last_error:
+            return
+        if not before and self.newsdesk.refreshed_at:
+            self.telemetry.event(
+                Level.INFO, "news",
+                f"read {self.newsdesk.articles_seen} headlines; "
+                f"{self.newsdesk.symbols_covered} symbols have news",
+                detail="News adjusts position size by at most "
+                       f"{int(sentiment_mod.MAX_TILT * 100)}%. It never admits "
+                       "or refuses a symbol.")
 
     def _refresh_cross_section(self) -> None:
         """Rank the crypto cross-section, and measure what the ranking pays.
@@ -1742,6 +1833,11 @@ class TradingSession:
                     await self.refresh_universe()
                     # Cheap: it returns immediately unless a day has passed.
                     await self.refresh_daily_history()
+                    # Slower again than this branch: the desk decides for
+                    # itself whether ten minutes have passed. Called from here
+                    # only so it shares the branch's once-a-minute ceiling and
+                    # never runs on the per-second path.
+                    await self.refresh_news()
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
                 # what has not been looked at yet.
@@ -2049,6 +2145,7 @@ class TradingSession:
             # The crypto ranking. Its own block because it is a different
             # estimate from the trend premium above: relative, not absolute.
             "cross_section": self._cross_section_block(),
+            "news": self.newsdesk.panel(),
             # Why the book is not trading, counted. See _blockers.
             "blockers": self._blockers(),
             "universe_scan": {

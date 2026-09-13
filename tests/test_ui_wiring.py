@@ -275,3 +275,20 @@ def test_the_verdict_chip_cannot_be_clipped_silently():
     scrolling the panel sideways to find out which one it is."""
     assert "#watchlist .v-chip" in STYLES
     assert "text-overflow: ellipsis" in STYLES
+
+
+def test_the_news_panel_is_rendered_and_states_that_it_is_not_a_gate():
+    """Prevents two separate failures at once.
+
+    The first is the one this file exists for: a panel whose ids the server
+    fills and the page never shows. The second is specific to this factor --
+    an operator who sees "News sentiment" on a trading terminal will assume it
+    decides what gets traded, because on most trading terminals something
+    called that does. It does not here, and the panel has to say so on screen
+    rather than only in the source.
+    """
+    assert "renderNews(s)" in APP_JS, "the news panel is never rendered"
+    for element in ("news-note", "news-grid", "news-leaders", "news-why"):
+        assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
+    assert "never admit a symbol" in APP_JS
+    assert "after the cost gate" in APP_JS
