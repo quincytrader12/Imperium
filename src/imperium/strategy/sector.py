@@ -233,6 +233,37 @@ def trail_stop(previous_stop: float, lower_band_today: float) -> float:
     return max(float(previous_stop), today)
 
 
+@dataclass(frozen=True)
+class StopStep:
+    """The outcome of one day for a held position."""
+
+    exited: bool
+    #: The stop in force from tomorrow. NaN once the position is closed.
+    stop: float
+
+
+def step_position(close_today: float, stop_carried_in: float,
+                  lower_band_today: float) -> StopStep:
+    """Test the stop, then trail it. In that order, always.
+
+    The ordering is the rule, so it is a function rather than a convention two
+    call sites are trusted to remember. Reversed, a position whose band rose
+    today would be measured against a level it never had the chance to trade
+    against: with a carried stop of 100, a close of 105 and a band that has
+    risen to 110, the correct answer is "no exit, and the stop becomes 110
+    tomorrow", while trailing first answers "exit at 105" -- a trade that
+    should not have happened, on a stop that did not exist when the day began.
+
+    That case is rare, because the band usually falls on the days a position is
+    in trouble. Rare is not never: the forty-day low rises whenever an old low
+    rolls out of the window, and it can do that on a down day.
+    """
+    if exit_signal(close_today, stop_carried_in):
+        return StopStep(exited=True, stop=float("nan"))
+    return StopStep(exited=False,
+                    stop=trail_stop(stop_carried_in, lower_band_today))
+
+
 def exit_signal(close_today: float, stop_carried_in: float) -> bool:
     """Whether a held position is stopped out on today's close.
 
@@ -312,3 +343,28 @@ def needs_rebalance(current_qty: float, target_qty: float,
     if current <= 0:
         return True
     return abs(float(target_qty) - float(current_qty)) / current >= threshold
+
+def scale_buys_to_budget(buys: dict[str, float],
+                         budget: float) -> tuple[dict[str, float], float]:
+    """Shrink a set of buys proportionally to fit the cash available.
+
+    Two rules meet here. The brief's execution section says that when buying
+    power is short, new buys are scaled down proportionally and the fact is
+    logged -- proportionally, so the mix the strategy chose survives rather
+    than being decided by whichever symbol the loop reached first. And the
+    leverage cap has to bind on the book *actually held*, not merely on the
+    target vector: the rebalance threshold deliberately leaves a drifted
+    position alone, so targets can sum inside the cap while the realised
+    exposure sits above it. Capping only the targets let a sleeve configured
+    never to borrow quietly borrow, which a test caught.
+
+    Returns the scaled buys and the factor applied, so a caller can say it
+    happened instead of silently trading something smaller than it decided.
+    """
+    wanted = float(sum(v for v in buys.values() if v > 0))
+    if wanted <= 0 or budget >= wanted:
+        return dict(buys), 1.0
+    if budget <= 0:
+        return {}, 0.0
+    factor = budget / wanted
+    return {s: v * factor for s, v in buys.items()}, factor

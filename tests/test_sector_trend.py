@@ -273,3 +273,38 @@ def test_the_rebalance_threshold_skips_small_changes(current, target, expected):
 def test_opening_a_new_position_is_never_suppressed_by_the_threshold():
     """Entries and exits always execute; only a held symbol is throttled."""
     assert sector.needs_rebalance(0.0, 5.0, 0.25) is True
+
+
+# -- the order of the exit test and the stop trail ------------------------
+
+def test_the_stop_is_tested_before_it_is_trailed():
+    """The discriminating case, and the reason this is a function.
+
+    Carried stop 100, today's close 105, today's lower band risen to 110.
+    Testing first: no exit, and the stop becomes 110 tomorrow. Trailing first:
+    the stop is 110 before the test, 105 is below it, and the position is
+    closed on a level that did not exist when the day began.
+
+    The forty-day low rises whenever an old low rolls out of the window, so
+    this is rare rather than impossible -- which is exactly the kind of bug
+    that survives a random backtest and shows up on a real account.
+    """
+    step = sector.step_position(close_today=105.0, stop_carried_in=100.0,
+                                lower_band_today=110.0)
+    assert step.exited is False
+    assert step.stop == pytest.approx(110.0)
+
+
+def test_a_real_break_of_the_carried_stop_still_exits():
+    """So the test above cannot be satisfied by a rule that never exits."""
+    step = sector.step_position(close_today=95.0, stop_carried_in=100.0,
+                                lower_band_today=110.0)
+    assert step.exited is True
+    assert math.isnan(step.stop)
+
+
+def test_a_surviving_position_keeps_its_stop_when_the_band_falls():
+    step = sector.step_position(close_today=105.0, stop_carried_in=100.0,
+                                lower_band_today=80.0)
+    assert step.exited is False
+    assert step.stop == pytest.approx(100.0)
