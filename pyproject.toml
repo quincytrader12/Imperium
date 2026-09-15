@@ -36,3 +36,8 @@ packages = ["src/imperium"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:imperium.*"]
+
+[dependency-groups]
+dev = [
+    "pypdf>=6.18.1",
+]
