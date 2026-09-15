@@ -1,0 +1,241 @@
+name: test and build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # The full suite on both platforms. The Windows run is not redundant: the
+    # platform default text encoding there is cp1252, and a single non-ASCII
+    # character in a file read without an explicit encoding fails only there.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Run the test suite
+        run: python -m pytest tests/ -q
+
+      - name: Every text file must be readable as UTF-8
+        shell: python
+        run: |
+          # The Windows default is cp1252. A file read without an explicit
+          # encoding fails only on Windows, and only at runtime, which is how a
+          # build that passed everywhere it was tested breaks on release.
+          import pathlib, sys
+          bad = []
+          for pattern in ("**/*.py", "**/*.js", "**/*.css", "**/*.html",
+                          "**/*.json", "**/*.md", "**/*.yml"):
+              for path in pathlib.Path(".").glob(pattern):
+                  if ".venv" in path.parts or ".git" in path.parts:
+                      continue
+                  try:
+                      path.read_text(encoding="utf-8")
+                  except UnicodeDecodeError as exc:
+                      bad.append(f"{path}: {exc}")
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("all text files decode as UTF-8")
+
+      - name: Every text read in source must name its encoding
+        shell: python
+        run: |
+          # A text read that names no explicit codec uses the platform default,
+          # which is cp1252 on Windows.
+          # (Careful: a comment containing the six letters c-o-d-i-n-g followed
+          #  by '=' or ':' is a PEP 263 declaration and Python will try to load
+          #  the next word as a codec. That exact mistake made this job fail.)
+          import pathlib, re, sys
+          offenders = []
+          # (?<![.\w]) so that webbrowser.open / opener.open / socket.open are
+          # not mistaken for builtins opening a text file.
+          pattern = re.compile(r"\.read_text\((?![^)]*encoding)|"
+                               r"(?<![.\w])open\((?![^)]*(?:encoding|['\"]w?b))")
+          for path in pathlib.Path("src").rglob("*.py"):
+              for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                  if pattern.search(line) and "encoding" not in line:
+                      offenders.append(f"{path}:{i}: {line.strip()}")
+          if offenders:
+              print("text opened without an explicit encoding:")
+              print("\n".join(offenders))
+              sys.exit(1)
+          print("every text read names its encoding")
+
+  build-windows:
+    # PyInstaller does not cross-compile: a Windows .exe must be built on a
+    # Windows runner. Gated on the tests, so a red suite cannot ship a binary.
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Confirm the calibration is present before packaging
+        shell: python
+        run: |
+          # The classifier refuses to run uncalibrated, deliberately. Shipping a
+          # build without this file produces an executable that starts and then
+          # declines to trade anything, for a reason that looks like a bug.
+          import pathlib, sys
+          p = pathlib.Path("src/imperium/strategy/null_calibration.json")
+          if not p.exists():
+              sys.exit("null_calibration.json is missing; run 'imperium calibrate'")
+          print(f"calibration present ({p.stat().st_size} bytes)")
+
+      - name: Build the folder application
+        # The build people actually run. A one-file executable unpacks ~27MB
+        # into %TEMP% on every launch, which Defender scans every time and
+        # frequently quarantines; a folder build executes in place and starts
+        # immediately.
+        run: pyinstaller --clean --noconfirm packaging/imperium-folder.spec
+
+      - name: Verify the folder build serves its own page and assets
+        run: python packaging/verify_build.py dist/IMPERIUM/IMPERIUM.exe
+
+      - name: Assemble the distributable folder
+        shell: pwsh
+        run: |
+          Copy-Item packaging/Start-IMPERIUM.bat dist/IMPERIUM/ -Force
+          Copy-Item packaging/Run-IMPERIUM-247.bat dist/IMPERIUM/ -Force
+          Copy-Item README.md dist/IMPERIUM/README.txt -Force
+          Remove-Item dist/IMPERIUM/imperium-startup.log -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/IMPERIUM/* -DestinationPath dist/IMPERIUM-windows.zip -Force
+          Write-Output "zip: $([math]::Round((Get-Item dist/IMPERIUM-windows.zip).Length / 1MB, 1)) MB"
+
+      - name: Build the single-file executable
+        # Kept for anyone who wants one file and is willing to allow it past
+        # Defender. Built second so a failure here cannot cost the folder build.
+        run: pyinstaller --clean --noconfirm packaging/imperium.spec
+
+      - name: Verify the single-file executable
+        # The check that matters: a build that lost --add-data starts, serves
+        # the API, and 404s its own page. PyInstaller calls that a success.
+        run: python packaging/verify_build.py dist/IMPERIUM.exe
+
+      - name: Record the SHA-256 of both
+        id: hash
+        shell: pwsh
+        run: |
+          $zh = (Get-FileHash dist/IMPERIUM-windows.zip -Algorithm SHA256).Hash.ToLower()
+          $zs = [math]::Round((Get-Item dist/IMPERIUM-windows.zip).Length / 1MB, 1)
+          $eh = (Get-FileHash dist/IMPERIUM.exe -Algorithm SHA256).Hash.ToLower()
+          $es = [math]::Round((Get-Item dist/IMPERIUM.exe).Length / 1MB, 1)
+          Write-Output "zip_sha=$zh"  >> $env:GITHUB_OUTPUT
+          Write-Output "zip_size=$zs" >> $env:GITHUB_OUTPUT
+          Write-Output "exe_sha=$eh"  >> $env:GITHUB_OUTPUT
+          Write-Output "exe_size=$es" >> $env:GITHUB_OUTPUT
+          Write-Output "zip $zs MB $zh"
+          Write-Output "exe $es MB $eh"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: IMPERIUM-windows
+          path: |
+            dist/IMPERIUM-windows.zip
+            dist/IMPERIUM.exe
+          if-no-files-found: error
+
+      - name: Publish the executable as a downloadable release
+        # An Actions artifact is a zip that only a signed-in user can fetch. A
+        # release asset is a direct, permanent link to the .exe itself, which is
+        # what someone who just wants to run the program actually needs.
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-latest-build"
+          $notes = @"
+          Windows build of the IMPERIUM trading terminal — built by Quincy Gininda.
+          Commit ``${{ github.sha }}`` on ``${{ github.ref_name }}``.
+
+          ## Download this one: ``IMPERIUM-windows.zip`` (${{ steps.hash.outputs.zip_size }} MB)
+
+          1. Download the **.zip**, right-click it, Properties, tick **Unblock**, OK.
+          2. Extract it anywhere (Desktop is fine). Do not run it from inside the zip.
+          3. Double-click **Start-IMPERIUM.bat** for a single run you watch,
+             or **Run-IMPERIUM-247.bat** to keep it running all day and
+             overnight, restarting it if it ever exits.
+
+          Your browser opens at http://127.0.0.1:8787/ . The window stays open and
+          shows the URL; close it or press Ctrl+C to stop.
+
+          SHA-256 ``${{ steps.hash.outputs.zip_sha }}``
+
+          ## If it does not start
+
+          The folder contains **imperium-startup.log** after any attempt. That file
+          says what happened. The most common cause by far is Microsoft Defender
+          removing the file — check Windows Security, Protection history.
+
+          ## Options
+
+              Start-IMPERIUM.bat --port 9000    serve on another port
+              IMPERIUM.exe --no-browser         start without opening a browser
+              IMPERIUM.exe --help
+
+          It binds 127.0.0.1 only and there is no flag to change that: the process
+          holds API keys and has no authentication of its own.
+
+          No key is needed to start — the watchlist and scanner run without one.
+          A stored key cannot trade until it is separately enabled and the
+          confirmation phrase is typed.
+
+          ## ``IMPERIUM.exe`` (single file, ${{ steps.hash.outputs.exe_size }} MB)
+
+          Also attached for anyone who wants one file. It unpacks itself to %TEMP%
+          on every launch, which is slower and is the usual reason Defender
+          quarantines it, so prefer the zip.
+          SHA-256 ``${{ steps.hash.outputs.exe_sha }}``
+
+          Both are unsigned, so SmartScreen warns on first run: More info -> Run
+          anyway, or check the SHA-256 above.
+
+          Both were built on a Windows runner and then launched by
+          packaging/verify_build.py, which requires each to serve its own page, its
+          static assets, its API and a diagnostics verdict before the build passes.
+          "@
+          # A rolling tag, so the download link stays stable across builds.
+          gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag 2>$null
+          gh release create $tag dist/IMPERIUM-windows.zip dist/IMPERIUM.exe `
+            --repo $env:GITHUB_REPOSITORY `
+            --target ${{ github.sha }} `
+            --title "IMPERIUM for Windows (latest build)" `
+            --notes "$notes" `
+            --prerelease
+          Write-Output "Released: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$tag"
