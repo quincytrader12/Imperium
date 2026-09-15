@@ -9,6 +9,7 @@ title IMPERIUM - trading terminal
 cd /d "%~dp0"
 
 echo Starting IMPERIUM...
+echo Settings: "%USERPROFILE%\.imperium\settings.txt"  ^(edit, save, restart^)
 echo.
 "%~dp0IMPERIUM.exe" %*
 

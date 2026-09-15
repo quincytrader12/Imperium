@@ -209,6 +209,20 @@ def main() -> int:
     logging_setup.configure()
     try:
         config.ensure_home()
+        # The packaged application's only configuration point.
+        #
+        # This is the entry the .exe actually runs -- cli.main() is for a
+        # source checkout -- so loading settings there and not here would have
+        # meant the file worked for developers and did nothing for the people
+        # it was written for. Before run_server, because every strategy reads
+        # its configuration once when the session is constructed.
+        applied, refused = config.load_settings()
+        if applied:
+            print(f"settings.txt set: {', '.join(applied)}")
+        for name in refused:
+            print(f"settings.txt: {name!r} is not a setting IMPERIUM knows; "
+                  f"ignored")
+        print(f"Settings file: {config.settings_path()}")
         # CI launches this to verify the build; opening a browser on a headless
         # runner is at best noise and at worst a hang.
         open_browser = not (args.no_browser or os.environ.get("IMPERIUM_NO_BROWSER"))

@@ -50,3 +50,123 @@ def ensure_home() -> Path:
     d = home_dir()
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     return d
+
+def settings_path() -> Path:
+    return home_dir() / "settings.txt"
+
+
+#: What the settings file says when it is created.
+#:
+#: Written out in full, with every option commented and its default shown,
+#: because the alternative is an empty file that tells an operator nothing.
+#: This program is shipped as a Windows executable launched from a batch file:
+#: there is no shell to export a variable in, and "set SECTOR_TREND_ENABLED=1"
+#: is not an instruction anybody can act on when the thing they double-clicked
+#: is an icon. A file next to their API keys is somewhere they can find.
+SETTINGS_TEMPLATE = """\
+# IMPERIUM settings
+#
+# One SETTING=value per line. Lines starting with # are ignored.
+# Save the file and restart IMPERIUM for a change to take effect.
+#
+# This file lives beside your credentials and is read at startup. A real
+# environment variable, if you set one, always wins over what is written here.
+
+# ---------------------------------------------------------------- Sector Trend
+# A separate sleeve that trades 19 liquid sector ETFs on Donchian/Keltner
+# breakouts, once a day, using its own slice of the account. Off by default:
+# run scripts/backtest_sector_trend.py and read the result before arming it.
+#
+# Note on small accounts: Alpaca refuses a fractional buy under $1.00. At the
+# default 0.20 allocation, an account under about $130 will have the sleeve
+# skip its more volatile ETFs -- the panel says which and why.
+
+# SECTOR_TREND_ENABLED=false
+# SECTOR_TREND_ALLOCATION=0.20
+# SECTOR_TREND_MAX_LEVERAGE=1.0
+# SECTOR_TREND_TARGET_VOL=0.015
+# SECTOR_TREND_REBALANCE_THRESHOLD=0.25
+# SECTOR_TREND_EXEC_MODE=near_close
+# SECTOR_TREND_RUN_TIME_ET=15:45
+# SECTOR_TREND_UNIVERSE=XLF,XLK,XLE,XLV,XLI,XBI,XLU,XLP,XLY,KRE,XLB,XLC,XRT,XOP,XLRE,XHB,KBE,XME,KIE
+"""
+
+#: Settings this file is allowed to define.
+#:
+#: An allow-list rather than "anything that looks like a variable". This file
+#: is read into the process environment, and a typo'd or hostile line should
+#: not be able to set PATH, a proxy, or anything else the rest of the program
+#: trusts the environment for.
+SETTABLE = frozenset({
+    "SECTOR_TREND_ENABLED",
+    "SECTOR_TREND_ALLOCATION",
+    "SECTOR_TREND_UNIVERSE",
+    "SECTOR_TREND_TARGET_VOL",
+    "SECTOR_TREND_MAX_LEVERAGE",
+    "SECTOR_TREND_REBALANCE_THRESHOLD",
+    "SECTOR_TREND_EXEC_MODE",
+    "SECTOR_TREND_RUN_TIME_ET",
+})
+
+
+def parse_settings(text: str) -> tuple[dict[str, str], list[str]]:
+    """Settings from the file's text, and the names it refused.
+
+    Pure, so the parsing can be tested without a filesystem. Returns only names
+    in :data:`SETTABLE`; everything else is reported as refused rather than
+    silently dropped, because a setting that does nothing and says nothing is
+    the worst of the three possible outcomes.
+    """
+    found: dict[str, str] = {}
+    refused: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip().upper()
+        value = value.strip().strip('"').strip("'")
+        if name in SETTABLE:
+            found[name] = value
+        elif name:
+            refused.append(name)
+    return found, refused
+
+
+def load_settings() -> tuple[list[str], list[str]]:
+    """Apply the settings file to the environment. Returns (applied, refused).
+
+    Names only, never values, because this returns straight into a log line.
+
+    A real environment variable wins: someone who has gone to the trouble of
+    setting one in a shell means it, and a file quietly overriding them would
+    be the kind of surprise that costs an hour to find.
+
+    Creates the file with everything commented out if it does not exist, so
+    that the answer to "where do I set this" is a file that already exists and
+    explains itself.
+    """
+    path = settings_path()
+    try:
+        if not path.exists():
+            ensure_home()
+            path.write_text(SETTINGS_TEMPLATE, encoding=TEXT_ENCODING)
+            try:
+                path.chmod(0o600)
+            except (OSError, NotImplementedError):
+                pass
+            return [], []
+        text = path.read_text(encoding=TEXT_ENCODING)
+    except OSError:
+        # A settings file that cannot be read must not stop the terminal
+        # starting. Defaults are a working configuration.
+        return [], []
+
+    found, refused = parse_settings(text)
+    applied = []
+    for name, value in found.items():
+        if name in os.environ:
+            continue
+        os.environ[name] = value
+        applied.append(name)
+    return sorted(applied), sorted(set(refused))

@@ -17,6 +17,8 @@ REM      running, but a closed lid overrides that on most machines.
 REM
 REM  Stop it with Ctrl+C, twice: once for the terminal, once for this loop.
 REM ======================================================================
+echo Settings: "%USERPROFILE%\.imperium\settings.txt"  ^(edit, save, restart^)
+
 
 title IMPERIUM - running continuously
 cd /d "%~dp0"

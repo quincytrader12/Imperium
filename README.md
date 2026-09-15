@@ -553,6 +553,21 @@ every order carries a `sectrend-` client order id.
 **It is off until you turn it on.** `SECTOR_TREND_ENABLED` defaults to `false`.
 Run the backtest first.
 
+### Where to change any of this
+
+`%USERPROFILE%\.imperium\settings.txt` on Windows, `~/.imperium/settings.txt`
+elsewhere — the same folder as your API keys. IMPERIUM creates it on first run
+with every option listed and commented out, so it is already there when you go
+looking. Uncomment a line, save, restart.
+
+```ini
+# SECTOR_TREND_ENABLED=false     <- delete the # and set it to true
+```
+
+A real environment variable, if you set one, wins over the file. The file can
+only set the options below: a line naming anything else is ignored and logged,
+so a typo costs a setting rather than being mistaken for one that worked.
+
 ### Configuration
 
 | Variable | Default | Meaning |

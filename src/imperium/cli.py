@@ -261,6 +261,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging_setup.configure(logging.DEBUG if args.verbose else logging.INFO)
     config.ensure_home()
+    # Before anything reads a setting. Every strategy's configuration is read
+    # once at construction, so a file loaded after that would appear to do
+    # nothing -- which is the hardest kind of configuration bug to see.
+    applied, refused = config.load_settings()
+    if applied:
+        logging.getLogger("imperium").info(
+            "settings.txt set: %s", ", ".join(applied))
+    for name in refused:
+        logging.getLogger("imperium").warning(
+            "settings.txt: %r is not a setting this program knows; ignored",
+            name)
     try:
         return int(args.func(args) or 0)
     except KeyboardInterrupt:

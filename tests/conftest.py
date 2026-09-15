@@ -59,3 +59,35 @@ def offline_news(monkeypatch):
 
     monkeypatch.setattr(newsdesk_mod, "yahoo_source", offline)
     yield
+
+
+@pytest.fixture(autouse=True)
+def clean_settings_environment():
+    """No test may leak a setting into the next one.
+
+    ``config.load_settings`` writes into the real ``os.environ``, which is
+    process-wide and outlives the test that caused it. Without this, a test
+    that enables the sector sleeve silently arms it for every test that runs
+    afterwards, and a test asserting the default behaviour fails or passes
+    depending on alphabetical order — which is exactly the kind of failure
+    that gets "fixed" by weakening the assertion.
+
+    Autouse and unconditional, like ``isolated_home``, and for the same
+    reason: correctness here must not depend on a test remembering to opt in.
+    """
+    import os
+
+    from imperium import config
+
+    watched = set(config.SETTABLE) | {"IMPERIUM_HOME"}
+    before = {name: os.environ.get(name) for name in watched}
+    for name in config.SETTABLE:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

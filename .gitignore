@@ -12,3 +12,11 @@ dist/
 .imperium/
 *.log
 uv.lock
+
+# Agent skills installed with `npx skills add`. Local tooling rather than
+# product code, and .claude/skills is a tree of symlinks -- which git can
+# store but Windows checkouts handle badly, and this repo builds a Windows
+# executable. Remove these three lines if you want the skills versioned.
+.agents/
+.claude/skills/
+skills-lock.json
