@@ -324,7 +324,12 @@ def test_an_empty_book_says_so_plainly_rather_than_trailing_off():
         ]},
     ))
 
-    assert "The book is flat" in script
+    # Per book since the briefing was reordered: equities and crypto are
+    # different books with different calendars, so "flat" is said about each
+    # rather than once about a total that merges them. The intent is
+    # unchanged -- an empty book states itself rather than being passed over.
+    assert "No equity positions are open." in script
+    assert "No crypto positions are open." in script
     assert "Nothing holds one of the 2 position slots" in script
     assert "Nothing is being traded." in script
     # The labels are written for a table column and must be turned into
@@ -387,3 +392,84 @@ async def test_the_session_builds_its_briefing_from_its_own_snapshot():
 
     assert script.startswith("Good ")
     assert "IMPERIUM" in script
+
+
+# -- the running order the operator asked for -----------------------------
+
+BRIEF_SNAPSHOT = {
+    "running": True, "mode": "paper", "simulated": True, "equity": 70.0,
+    "account": {"currency": "USD"},
+    "feed": {"connected": True, "streamed": 30},
+    "positions": [{"symbol": "AAPL", "value": 12.0, "asset_class": "us_equity"},
+                  {"symbol": "BTC/USD", "value": 9.0, "asset_class": "crypto"}],
+    "market": {"is_open": True},
+    "news": {"enabled": True, "covered": 6, "max_tilt_pct": 20,
+             "leaders": [{"symbol": "NVDA", "score": 0.62}]},
+    "cross_section": {"credible": True, "leaders": [{"symbol": "ETH/USD"}],
+                      "cohort": 30},
+    "sector": {"enabled": True, "holding": 2, "universe": 19,
+               "sleeve_equity": 14.0, "symbols": ["XLK", "XLF"], "note": ""},
+    "universe_scan": {"ranked": 1500, "size": 48, "cohort_passes": 3},
+    "watchlist": [], "limits": {"max_concurrent_positions": 5},
+    "blockers": {"trading": 0, "counts": [{"blocker": "costs", "symbols": 40}]},
+}
+
+
+def test_the_briefing_follows_the_operators_running_order():
+    """Health, news, equities, crypto, the ETF sleeve, then what is scanning.
+
+    A running order rather than a ranking: is the machine working, what is the
+    news, then each book in turn, and finally the live activity — which is
+    last because it is the part that will have changed by the time they ask
+    again. Asserted on the positions of the section markers so a section
+    cannot quietly migrate.
+    """
+    from imperium.notify import briefing
+
+    text = briefing.build(BRIEF_SNAPSHOT)
+    markers = ["Running in paper mode", "News:", "Equities.",
+               "Crypto, which trades", "Sector ETFs:", "The scanner is walking"]
+    at = [text.index(m) for m in markers]
+    assert at == sorted(at), (
+        "the briefing sections are out of order: "
+        + ", ".join(f"{m}@{p}" for m, p in zip(markers, at)))
+
+
+def test_each_book_is_reported_separately():
+    """Equities and crypto are different books with different calendars, and
+    the briefing must not merge them into one position count."""
+    from imperium.notify import briefing
+
+    text = briefing.build(BRIEF_SNAPSHOT)
+    assert "1 equity position" in text
+    assert "1 crypto position" in text
+
+
+def test_the_etf_sleeve_says_it_is_off_rather_than_saying_nothing():
+    """Silence about a sleeve reads as a sleeve with nothing to report."""
+    from imperium.notify import briefing
+
+    snapshot = dict(BRIEF_SNAPSHOT, sector={"enabled": False})
+    assert "sector ETF sleeve is switched off" in briefing.build(snapshot)
+
+
+def test_terminal_health_comes_before_anything_it_would_invalidate():
+    """A disconnected feed makes every number after it suspect, so it is said
+    near the top rather than as a footnote."""
+    from imperium.notify import briefing
+
+    snapshot = dict(BRIEF_SNAPSHOT,
+                    feed={"connected": False, "reason": "the data socket is "
+                                                        "not connected"})
+    text = briefing.build(snapshot)
+    assert text.index("not connected") < text.index("Equities.")
+
+
+def test_two_items_are_spoken_without_a_comma_before_the_and():
+    """"X, and Y" is how a list of three or more ends. For exactly two it is a
+    stumble, and this is read aloud."""
+    from imperium.notify.briefing import say_list
+
+    assert say_list(["A", "B"]) == "A and B"
+    assert say_list(["A", "B", "C"]) == "A, B, and C"
+    assert say_list(["A"]) == "A"

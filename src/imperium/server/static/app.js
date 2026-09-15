@@ -22,6 +22,28 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  /* Write markup only when it has actually changed.
+   *
+   * Every panel here rebuilds its list from the whole snapshot once a second,
+   * which is the simplest thing that can work and was fine when the lists were
+   * short. With a hundred and fifty symbols scanned it measured as roughly
+   * three and a half thousand DOM nodes destroyed and recreated every second --
+   * a hitch the profiler sees as one long task and an operator sees as the
+   * panel stalling. Most of those rebuilds produce byte-identical markup: the
+   * watchlist does not change because one symbol's pulse arrived.
+   *
+   * Comparing the string first turns the unchanged case into a string compare
+   * and no DOM work at all. It stays correct by construction -- identical
+   * markup means an identical tree -- and it is the whole fix, because the
+   * expensive part was never building the string. */
+  function setHTML(el, html) {
+    if (!el) return false;
+    if (el.__lastHTML === html) return false;
+    el.__lastHTML = html;
+    el.innerHTML = html;
+    return true;
+  }
+
   var state = {
     snapshot: null,
     rows: {},          // symbol -> {tr, cells}
@@ -354,7 +376,7 @@
           '<span class="metrics">' + metrics + '</span>' +
         '</div>');
     });
-    host.innerHTML = html.join('');
+    setHTML(host, html.join(''));
   }
 
   function esc(s) {
@@ -369,25 +391,25 @@
     $('pos-note').textContent = s.positions.length
       ? s.positions.length + ' open' : 'flat';
     if (!s.positions.length) {
-      body.innerHTML = '<tr><td colspan="4" class="dimmer">no open positions</td></tr>';
+      setHTML(body, '<tr><td colspan="4" class="dimmer">no open positions</td></tr>');
       return;
     }
-    body.innerHTML = s.positions.map(function (p) {
+    setHTML(body, s.positions.map(function (p) {
       var cls = p.unrealised > 0 ? 'up' : p.unrealised < 0 ? 'down' : 'muted';
       return '<tr><td>' + esc(p.symbol) + '</td>' +
         '<td class="num">' + fmtNum(p.quantity, 6) + '</td>' +
         '<td class="num">' + fmtMoney(p.value) + '</td>' +
         '<td class="num ' + cls + '">' + fmtMoney(p.unrealised) + '</td></tr>';
-    }).join('');
+    }).join(''));
   }
 
   function renderFills(s) {
     var body = $('fill-body');
     if (!s.fills.length) {
-      body.innerHTML = '<tr><td colspan="5" class="dimmer">no fills yet</td></tr>';
+      setHTML(body, '<tr><td colspan="5" class="dimmer">no fills yet</td></tr>');
       return;
     }
-    body.innerHTML = s.fills.map(function (f) {
+    setHTML(body, s.fills.map(function (f) {
       var slip = f.slippage_bps || 0;
       var slipTone = slip > 5 ? 'down' : slip <= 0 ? 'up' : 'muted';
       return '<tr><td class="dimmer">' + fmtTime(f.ts) + '</td>' +
@@ -397,7 +419,7 @@
         '<td class="num">' + esc(f.quantity) + '</td>' +
         '<td class="num">' + esc(f.price) + '</td>' +
         '<td class="num ' + slipTone + '">' + slip.toFixed(1) + '</td></tr>';
-    }).join('');
+    }).join(''));
   }
 
   /* Did crossing cost what the cost gate assumed? The gate admits a symbol on a
@@ -446,13 +468,13 @@
      * second is a layout pass the terminal cannot afford, and for most seconds
      * there is nothing new to show. */
     if (s.delta && !(s.events || []).length && $('log').childElementCount) return;
-    $('log').innerHTML = state.events.map(function (e) {
+    setHTML($('log'), state.events.map(function (e) {
       return '<div class="log-line ' + e.level + '">' +
         '<span class="t">' + fmtTime(e.ts) + '</span>' +
         '<span class="m">' + esc(e.message) +
         (e.detail ? ' <span class="d">— ' + esc(e.detail) + '</span>' : '') +
         '</span></div>';
-    }).join('');
+    }).join(''));
   }
 
   /* ---------- canvas ---------- */
@@ -682,8 +704,7 @@
             (dd.pct * 100).toFixed(2) + '% of ' + (dd.limit * 100).toFixed(0) + '%',
             ddTone);
 
-    $('limit-grid').innerHTML =
-      cell('budget / sym', (s.per_symbol_budget * 100).toFixed(1) + '%') +
+    setHTML($('limit-grid'), cell('budget / sym', (s.per_symbol_budget * 100).toFixed(1) + '%') +
       cell('position cap', (L.max_position_weight * 100).toFixed(0) + '%') +
       cell('buying power', fmtMoney(L.buying_power),
            '', (L.buying_power_reserve * 100).toFixed(0) + '% held') +
@@ -692,7 +713,7 @@
       cell('ATR stop', L.atr_stop_multiple + 'x') +
       cell('day trades', L.day_trade_count + ' / ' + L.pdt_max_day_trades,
            L.pdt_blocked ? 'bad' : '',
-           s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit');
+           s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit'));
 
     /* On a small account "why is it not trading" is almost always the size of
      * the account, and the answer is arithmetic rather than a fault. Shown
@@ -741,7 +762,7 @@
     var total = Object.keys(census).reduce(function (a, k) { return a + census[k]; }, 0);
     var order = ['trending', 'mean_reverting', 'indeterminate', 'contradicted',
                  'warming_up'];
-    $('census').innerHTML = order.map(function (k) {
+    setHTML($('census'), order.map(function (k) {
       var n = census[k] || 0;
       var pct = total ? (100 * n / total) : 0;
       return '<div class="census-row">' +
@@ -749,7 +770,7 @@
         '<span class="c-track"><i class="c-fill" style="width:' + pct.toFixed(1) +
         '%;background:' + REGIME_COLOR[k] + '"></i></span>' +
         '<span class="c-count">' + n + '</span></div>';
-    }).join('');
+    }).join(''));
     // "Warming up" resolves itself; the rest are decisions. Say which is which.
     var warming = census.warming_up || 0;
     $('census-note').textContent = warming
@@ -773,8 +794,7 @@
     note.className = 'note' + (x.panic ? ' xs-panic' : '');
 
     var enough = (x.cohort || 0) >= (x.minimum_cohort || 0);
-    $('xs-grid').innerHTML =
-      cell('coins', (x.cohort || 0) + ' / ' + (x.minimum_cohort || 0),
+    setHTML($('xs-grid'), cell('coins', (x.cohort || 0) + ' / ' + (x.minimum_cohort || 0),
            enough ? 'good' : 'warn', 'ranked / needed') +
       // The funnel: listed by the venue, carried by the cohort, holding
       // daily bars. Where the chain narrows is the fault.
@@ -787,17 +807,17 @@
            x.credible ? 'credible' : 'not yet') +
       cell('sample', fmtNum(x.observations || 0, 0), '', 'coin-days') +
       cell('market', x.panic ? 'panic' : 'ordinary', x.panic ? 'warn' : '',
-           x.panic ? 'nothing opened' : 'momentum ok');
+           x.panic ? 'nothing opened' : 'momentum ok'));
 
     var host = $('xs-leaders');
     if (host) {
       var leaders = x.leaders || [];
-      host.innerHTML = leaders.length
+      setHTML(host, leaders.length
         ? leaders.map(function (l) {
             return '<span><b>' + l.symbol.replace('/USD', '') + '</b> ' +
                    (l.score > 0 ? '+' : '') + l.score + 'σ</span>';
           }).join('')
-        : '';
+        : '');
     }
 
     var why = $('xs-why');
@@ -837,7 +857,7 @@
       cells += cell(n.replace(/_/g, ' '), (shares[n] * 100).toFixed(0) + '%',
                     '', '$' + fmtNum((c.allocated || {})[n] || 0, 2));
     });
-    $('cap-grid').innerHTML = cells;
+    setHTML($('cap-grid'), cells);
 
     var why = $('cap-why');
     if (why) {
@@ -882,8 +902,7 @@
       note.className = 'note';
     }
 
-    $('st-grid').innerHTML =
-      cell('sleeve', '$' + fmtNum(st.sleeve_equity || 0, 2),
+    setHTML($('st-grid'), cell('sleeve', '$' + fmtNum(st.sleeve_equity || 0, 2),
            '', (st.allocation * 100).toFixed(0) + '% of equity') +
       // Sub-labels kept short: three cells share a 300px rail and the longer
       // wording ran into its neighbour at that width.
@@ -892,18 +911,18 @@
       cell('gross', ((st.gross_weight || 0) * 100).toFixed(0) + '%',
            st.capped ? 'warn' : '',
            st.capped ? 'cap binds' : 'of sleeve') +
-      cell('runs', fmtNum(st.runs || 0, 0), '', 'daily, ' + (st.exec_mode || ''));
+      cell('runs', fmtNum(st.runs || 0, 0), '', 'daily, ' + (st.exec_mode || '')));
 
     var host = $('st-holdings');
     if (host) {
       var syms = st.symbols || [];
-      host.innerHTML = syms.length
+      setHTML(host, syms.length
         ? syms.map(function (sym) {
             var stop = (st.stops || {})[sym];
             return '<span><b>' + sym + '</b>' +
                    (stop !== undefined ? ' stop ' + stop : '') + '</span>';
           }).join('')
-        : '';
+        : '');
     }
 
     var why = $('st-why');
@@ -957,25 +976,24 @@
       note.className = 'note';
     }
 
-    $('news-grid').innerHTML =
-      cell('headlines', fmtNum(n.articles || 0, 0), '', 'last 7 days') +
+    setHTML($('news-grid'), cell('headlines', fmtNum(n.articles || 0, 0), '', 'last 7 days') +
       cell('covered', (n.covered || 0) + ' / ' + (n.scored || 0),
            (n.covered || 0) > 0 ? 'good' : '', 'symbols with news') +
       cell('max tilt', '\u00b1' + (n.max_tilt_pct || 0) + '%', '',
            'on size only') +
-      cell('role', 'factor', '', 'never a gate');
+      cell('role', 'factor', '', 'never a gate'));
 
     var host = $('news-leaders');
     if (host) {
       var leaders = n.leaders || [];
-      host.innerHTML = leaders.length
+      setHTML(host, leaders.length
         ? leaders.map(function (l) {
             var cls = l.score > 0 ? 'news-pos' : (l.score < 0 ? 'news-neg' : '');
             return '<span class="' + cls + '"><b>' +
                    l.symbol.replace('/USD', '') + '</b> ' +
                    (l.score > 0 ? '+' : '') + l.score + '</span>';
           }).join('')
-        : '';
+        : '');
     }
 
     var why = $('news-why');
@@ -1060,11 +1078,11 @@
       ? o.mean_bps.toFixed(2) + 'bp/night · t=' + o.t_stat.toFixed(1)
       : (o.measured ? 'sample too thin to act on' : 'not yet measured');
 
-    $('on-phase').innerHTML = PHASES.map(function (p) {
+    setHTML($('on-phase'), PHASES.map(function (p) {
       var on = o.phase === p.k;
       return '<span class="phase' + (on ? ' on' : '') + '" title="' +
         esc(p.hint) + '">' + esc(p.label) + '</span>';
-    }).join('');
+    }).join(''));
 
     /* The drift is shown against the cost of capturing it, never alone. On its
      * own a few basis points a night reads as free money; next to a round trip
@@ -1121,12 +1139,12 @@
                        b.sell_side_bps.toFixed(1) + 'bp', feeTone,
                        b.assumed ? 'assumed' : 'confirmed');
     });
-    $('cost-grid').innerHTML = perClass +
+    setHTML($('cost-grid'), perClass +
       cell('safety multiple', c.safety_multiple + 'x') +
       cell('adv. selection', c.adverse_selection_fraction.toFixed(2),
            'warn', 'assumed') +
       cell('spreads live', c.spreads_measured + '/' + c.spreads_total,
-           c.spreads_measured < c.spreads_total ? 'warn' : 'good');
+           c.spreads_measured < c.spreads_total ? 'warn' : 'good'));
 
     var parts = [];
     if (c.cheapest) parts.push('cheapest ' + c.cheapest.symbol + ' ' +
@@ -1310,9 +1328,16 @@
     cluster.setPositions(pos);
     cluster.ingest(s.pulses);
 
+    /* The health figure is shown only when it is doing something. On a
+     * machine that keeps up it stays at 1 and saying so every second would be
+     * noise; on one that does not, it is the explanation for a panel that has
+     * quietly gone sparser. */
+    var health = cluster.health === undefined ? 1 : cluster.health;
     $('cluster-note').textContent =
       cluster.orbs.length + ' orbs / ' + cluster.orbBudget() + ' budget · ' +
-      cluster.pulseRate.toFixed(1) + ' pulses/s';
+      cluster.pulseRate.toFixed(1) + ' pulses/s' +
+      (health < 0.98 ? ' · eased to ' + Math.round(health * 100) +
+                       '% for this machine' : '');
   }
 
   function animate(now) {
@@ -1322,6 +1347,9 @@
      * hot one -- and browsers throttle background rAF unevenly, so relying on
      * them to do it produces stutter on return rather than a clean resume. */
     if (!document.hidden) cluster.frame(now);
+    /* Exposed so the panel's self-limiting can be verified from outside
+     * rather than taken on trust. */
+    window.__cluster_health = cluster.health;
     requestAnimationFrame(animate);
   }
 

@@ -42,6 +42,63 @@
     halt:     [255, 92, 108]
   };
 
+  /* ---------- pre-rendered glow sprites ----------
+   *
+   * Every glow in this panel used to be a fresh createRadialGradient, built
+   * inside the draw loop, once per node and once per orb, sixty times a
+   * second. A CPU profile put 464ms of every twelve seconds into
+   * createRadialGradient and addColorStop alone, with another 515ms in the
+   * fills those gradients backed — on a fast Linux container, headless. On a
+   * Windows laptop running the packaged build that is the half-second stutter
+   * the panel was reported to have.
+   *
+   * A radial falloff does not depend on where it is drawn or how big it is,
+   * only on its colour and its profile. So each one is rendered once into a
+   * small offscreen canvas and then stamped with drawImage, scaled to size and
+   * faded with globalAlpha. Seven colours times two profiles is fourteen
+   * canvases, built once, and the draw loop stops allocating entirely. */
+  var SPRITE_RADIUS = 48;
+
+  /* The two falloff shapes in use, as [offset, relativeAlpha] stops. The alpha
+   * here is the *profile*; the actual opacity comes from globalAlpha at draw
+   * time, which is what lets one sprite serve every brightness. */
+  var HALO_PROFILE = [[0, 1], [1, 0]];
+  var BLOOM_PROFILE = [[0, 0.85], [0.35, 0.22], [1, 0]];
+
+  var spriteCache = {};
+
+  function glowSprite(col, profile, key) {
+    var id = key + ':' + col[0] + ',' + col[1] + ',' + col[2];
+    var found = spriteCache[id];
+    if (found) return found;
+
+    var size = SPRITE_RADIUS * 2;
+    var c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    var g = c.getContext('2d');
+    var grad = g.createRadialGradient(SPRITE_RADIUS, SPRITE_RADIUS, 0,
+                                      SPRITE_RADIUS, SPRITE_RADIUS,
+                                      SPRITE_RADIUS);
+    for (var i = 0; i < profile.length; i++) {
+      grad.addColorStop(profile[i][0],
+        'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + profile[i][1] + ')');
+    }
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+    spriteCache[id] = c;
+    return c;
+  }
+
+  /* Stamp a sprite centred on (x, y) with the given visible radius. */
+  function stampGlow(ctx, sprite, x, y, radius, alpha) {
+    if (!(radius > 0) || !(alpha > 0)) return;
+    var previous = ctx.globalAlpha;
+    ctx.globalAlpha = Math.min(1, alpha);
+    ctx.drawImage(sprite, x - radius, y - radius, radius * 2, radius * 2);
+    ctx.globalAlpha = previous;
+  }
+
   /* The visible radius of an orb is its bloom, not its core. The budget below
    * is computed against this, which is what actually fills the panel. */
   var CORE_RADIUS = 2.0;
@@ -127,11 +184,48 @@
     });
   }
 
+  /* How far the budget may be cut when the machine cannot keep up, and how
+   * quickly it moves. Slow to relax, quick to cut: a panel that recovers its
+   * budget eagerly oscillates between smooth and stuttering, which is more
+   * distracting than simply running smaller. */
+  var MIN_HEALTH = 0.25;
+  var HEALTH_CUT = 0.90;
+  var HEALTH_RECOVER = 1.02;
+
+  /* A frame slower than this is taken as evidence the machine is struggling.
+   * 24ms rather than 16.7: a browser that misses the odd vsync is normal and
+   * should not shrink the panel. */
+  var SLOW_FRAME_MS = 24;
+
+  /* Keep the budget in step with what the machine can actually draw.
+   *
+   * The budget was purely geometric -- panel area divided by the area of one
+   * orb -- which answers "how many fit" and says nothing about "how many can
+   * be drawn sixty times a second". On the machine this was written on that is
+   * the same question. On a laptop running the packaged build with a weak GPU
+   * it is not, and the panel was measured carrying nearly four hundred orbs,
+   * each stamping a large translucent sprite over the ones beneath it.
+   *
+   * Since the hardware that struggles is not the hardware available to test
+   * on, the panel measures itself instead: sustained slow frames shrink the
+   * budget, sustained fast ones let it back up. An operator on a fast machine
+   * never sees this do anything. */
+  Cluster.prototype.observeFrame = function (frameMs) {
+    if (this.health === undefined) this.health = 1;
+    if (!(frameMs > 0) || frameMs > 400) return;   // a tab-switch is not lag
+    if (frameMs > SLOW_FRAME_MS) {
+      this.health = Math.max(MIN_HEALTH, this.health * HEALTH_CUT);
+    } else if (this.health < 1) {
+      this.health = Math.min(1, this.health * HEALTH_RECOVER);
+    }
+  };
+
   Cluster.prototype.orbBudget = function () {
     var bloom = CORE_RADIUS * BLOOM_MULTIPLE;
     var discArea = Math.PI * bloom * bloom;
     var panelArea = Math.max(1, this.w * this.h);
     var budget = Math.floor((panelArea * COVERAGE_LIMIT) / discArea);
+    budget = Math.floor(budget * (this.health === undefined ? 1 : this.health));
     return Math.max(MIN_ORBS, Math.min(MAX_ORBS, budget));
   };
 
@@ -369,14 +463,8 @@
          * light that hides both the filaments under it and the orbs crossing
          * them. Growth has to be legible, not loud. */
         var halo = r * (1.8 + m * 1.3);
-        var g = ctx.createRadialGradient(x, y, 0, x, y, halo);
         var a = (0.04 + m * 0.10 + fresh * 0.26);
-        g.addColorStop(0, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a + ')');
-        g.addColorStop(1, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(x, y, halo, 0, Math.PI * 2);
-        ctx.fill();
+        stampGlow(ctx, glowSprite(col, HALO_PROFILE, 'halo'), x, y, halo, a);
       }
 
       ctx.beginPath();
@@ -581,6 +669,9 @@
 
   Cluster.prototype.frame = function (now) {
     var dt = Math.min(0.1, (now - this.lastFrame) / 1000);
+    // Measured before anything is drawn, so the reading is the gap the
+    // operator actually saw rather than the cost of this frame's work.
+    this.observeFrame(now - this.lastFrame);
     this.lastFrame = now;
     this.resize();
     var ctx = this.ctx;
@@ -651,14 +742,7 @@
       var bloom = core * BLOOM_MULTIPLE;
       var a = isHover ? Math.min(1, alpha * 2.1) : alpha;
 
-      var g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, bloom);
-      g.addColorStop(0, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + (a * 0.85) + ')');
-      g.addColorStop(0.35, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + (a * 0.22) + ')');
-      g.addColorStop(1, 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, bloom, 0, Math.PI * 2);
-      ctx.fill();
+      stampGlow(ctx, glowSprite(col, BLOOM_PROFILE, 'bloom'), p.x, p.y, bloom, a);
 
       ctx.fillStyle = 'rgba(240,252,255,' + Math.min(1, a * 1.1) + ')';
       ctx.beginPath();

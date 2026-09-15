@@ -278,3 +278,44 @@ def test_the_summary_names_what_moved():
     text = summarise(result, SleeveLedger())
     assert "Sector Trend" in text
     assert "order" in text
+
+
+# -- the sleeve stays in its own panel ------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_sleeve_never_puts_its_etfs_in_the_scanner_cluster():
+    """The neural cluster is the scanner's picture: which symbols it is
+    walking, at the rate it walks them. The sector sleeve does not take part
+    in that sweep — it trades a fixed list once a day — so an orb for XLK
+    would assert the scanner had reached it, which is false, and would park a
+    permanent mark in a field whose whole meaning is turnover."""
+    import numpy as np
+    from imperium.session import TradingSession
+    from imperium.strategy.sector_config import SectorTrendConfig
+
+    session = TradingSession()
+    session.sector.config = SectorTrendConfig(enabled=True, universe=SYMBOLS)
+
+    class _Client:
+        async def bars(self, symbols, **kwargs):
+            closes = _breakout(SYMBOLS)
+            return {s: [{"c": c} for c in closes[s]] for s in SYMBOLS}
+
+    session.client = _Client()
+    before = session.telemetry.latest_pulse_seq
+    await session.run_sector_sleeve()
+
+    fresh = session.telemetry.pulse_window(limit=500, since=before)
+    assert not [p for p in fresh if p.get("symbol") in SYMBOLS], (
+        "the sleeve pulsed its ETFs into the scanner's cluster")
+
+
+def test_the_sleeves_etfs_are_not_in_the_scanned_universe():
+    """The other half: they must not appear in the watchlist either. The
+    sleeve owns its universe; the scanner owns its own."""
+    from imperium.session import TradingSession
+    from imperium.strategy.sector_config import DEFAULT_UNIVERSE
+
+    session = TradingSession()
+    overlap = set(session.universe) & set(DEFAULT_UNIVERSE)
+    assert not overlap, f"sector ETFs leaked into the scanner: {sorted(overlap)}"

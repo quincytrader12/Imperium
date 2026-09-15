@@ -1107,10 +1107,17 @@ class TradingSession:
                 Level.INFO if result.intentions else Level.WARN, "sector",
                 sector_summarise(result, runner.ledger),
                 detail=result.note)
-        for intention in result.intentions:
-            self.telemetry.pulse(intention.symbol, "decision",
-                                 f"{intention.reason}: {intention.detail}",
-                                 0.6)
+        # Deliberately no pulses.
+        #
+        # A pulse puts an orb in the neural cluster, and the cluster is the
+        # scanner's picture: the symbols it is walking, at the rate it walks
+        # them. The sector sleeve does not participate in that sweep at all --
+        # it trades a fixed list of nineteen ETFs once a day, on its own
+        # capital, in its own panel. Its symbols appearing among the scanned
+        # ones would say the scanner had reached them, which is not true, and
+        # would put a handful of permanent orbs in a field whose whole meaning
+        # is turnover. The sleeve reports in the left rail; the cluster stays
+        # the scanner's.
 
     def kick_news(self) -> None:
         """Start a news refresh in the background, and do not wait for it.
