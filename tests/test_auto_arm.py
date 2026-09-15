@@ -165,6 +165,9 @@ async def test_arming_does_not_halt_the_book_on_a_loss_it_never_took():
     # gain big enough to swamp the re-basing leaves the check reading a profit
     # either way, and the test would pass with the bug still in place.
     session.broker.cash = decimal.Decimal("9999")
+    # The venue's balance as well as the book: arming reads the account,
+    # and the daily-loss reference is measured on the book.
+    session.account_equity = 9999.0
 
     await session._tick()
     assert session.sector.enabled is False
@@ -172,6 +175,7 @@ async def test_arming_does_not_halt_the_book_on_a_loss_it_never_took():
 
     # One dollar up, and over the line. The account gained; nothing was lost.
     session.broker.cash = decimal.Decimal("10000")
+    session.account_equity = 10000.0
     await session._tick()
 
     assert session.sector.enabled is True
@@ -194,6 +198,7 @@ async def test_a_real_loss_across_an_arming_still_halts_the_book():
         next_close=dt.datetime(2026, 3, 4, 21, tzinfo=dt.timezone.utc))
     session.sector.config = SectorTrendConfig(arm_at_equity=10_000.0)
     session.broker.cash = decimal.Decimal("10000")
+    session.account_equity = 10000.0
 
     await session._tick()
     assert session.sector.enabled is True
@@ -206,6 +211,67 @@ async def test_a_real_loss_across_an_arming_still_halts_the_book():
 
     assert session.allocator.halted
     assert session.allocator.halt_source == "daily_loss"
+
+
+@pytest.mark.asyncio
+async def test_it_does_not_arm_on_the_simulated_book():
+    """Caught by looking at a running terminal, not by a test.
+
+    A dry-run book opens at a default ten thousand dollars. Arming read the
+    book rather than the account, so a terminal with no key attached at all
+    armed the sleeve on its first tick -- against money that does not exist,
+    persisted to the state file, and never disarming. An operator starting at
+    fifty dollars would have found a strategy running that their balance had
+    never reached the threshold for.
+    """
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.broker.cash = decimal.Decimal("10000")   # the simulation
+    session.account_equity = 0.0                     # nothing read yet
+    session.market_clock = MarketClock(
+        is_open=True,
+        timestamp=dt.datetime(2026, 3, 4, 15, tzinfo=dt.timezone.utc),
+        next_close=dt.datetime(2026, 3, 4, 21, tzinfo=dt.timezone.utc))
+    session.sector.config = SectorTrendConfig(arm_at_equity=200.0)
+
+    await session._tick()
+
+    assert session.sector.enabled is False
+    assert session.sector.ledger.armed_on == ""
+    assert session.capital.share_for(ENGINE) == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_it_arms_once_the_venue_reports_a_balance_past_the_threshold():
+    """The other half: a real balance does arm it, on the tick it is read."""
+    session = TradingSession()
+    session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
+    session.broker.cash = decimal.Decimal("10000")
+    session.market_clock = MarketClock(
+        is_open=True,
+        timestamp=dt.datetime(2026, 3, 4, 15, tzinfo=dt.timezone.utc),
+        next_close=dt.datetime(2026, 3, 4, 21, tzinfo=dt.timezone.utc))
+    session.sector.config = SectorTrendConfig(arm_at_equity=200.0)
+
+    session.account_equity = 199.0
+    await session._tick()
+    assert session.sector.enabled is False
+
+    session.account_equity = 214.80
+    await session._tick()
+    assert session.sector.enabled is True
+    assert session.sector.ledger.armed_at_equity == pytest.approx(214.80)
+
+
+def test_an_unread_balance_is_not_treated_as_zero_growth():
+    """arming_equity returns zero while the account is unknown, and zero never
+    reaches a threshold -- so "not read yet" and "too small" produce the same
+    inaction, which is the safe one."""
+    session = TradingSession()
+    session.account_equity = 0.0
+    assert session.arming_equity() == 0.0
+    session.account_equity = 214.80
+    assert session.arming_equity() == pytest.approx(214.80)
 
 
 def test_the_panel_distinguishes_configured_from_self_armed():

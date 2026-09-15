@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from imperium import config, logging_setup
 from imperium.diagnostics.layers import NetworkDiagnostic
+from imperium.notify import ask as ask_mod
 from imperium.notify import telegram, voice
 from imperium.execution.broker import LIVE_CONFIRMATION_PHRASE, Mode, ModeSwitchRefused
 from imperium.security.credentials import CredentialError, CredentialStore
@@ -121,6 +122,13 @@ class VoiceKeyRequest(BaseModel):
 class VoiceChoiceRequest(BaseModel):
     voice_id: str = Field(min_length=1, max_length=128)
     voice_name: str = Field(default="", max_length=128)
+
+
+class AskRequest(BaseModel):
+    # A spoken question, transcribed. Bounded because it is echoed back in the
+    # reply and, when spoken, billed per character: an unbounded question is an
+    # unbounded bill and an unbounded thing to read out.
+    question: str = Field(min_length=1, max_length=300)
 
 
 class TelegramRequest(BaseModel):
@@ -470,6 +478,43 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                 502, detail=session.speaker.last_error or "speech failed")
         return Response(content=audio, media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/ask")
+    async def ask_question(body: AskRequest) -> JSONResponse:
+        """Answer a question from the snapshot. Text only, no quota spent.
+
+        Separate from the speaking endpoint on purpose: this is how the
+        question is answered when the voice is not set up, how it is tested,
+        and how an operator sees what it *would* say before paying to hear it.
+        """
+        session = get_session()
+        answer = ask_mod.respond(body.question, session.snapshot())
+        return JSONResponse(answer.as_dict())
+
+    @app.post("/api/ask/speak")
+    async def ask_aloud(body: AskRequest) -> Response:
+        """The answer as audio.
+
+        Synthesised here rather than in the page, for the same reason as the
+        briefing: the browser never sees the ElevenLabs key.
+
+        The answer is computed first and the question is not sent anywhere. A
+        question is whatever the operator said in their own room, and the only
+        thing that leaves this machine is the sentence built from their own
+        snapshot.
+        """
+        session = get_session()
+        answer = ask_mod.respond(body.question, session.snapshot())
+        if not session.speaker.enabled:
+            raise HTTPException(
+                400, detail="no ElevenLabs key and voice are set up yet")
+        audio = await session.speaker.speak(answer.text)
+        if audio is None:
+            raise HTTPException(
+                502, detail=session.speaker.last_error or "speech failed")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Imperium-Intent": answer.intent})
 
     @app.delete("/api/voice")
     async def voice_forget() -> JSONResponse:

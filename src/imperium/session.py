@@ -1563,6 +1563,24 @@ class TradingSession:
     def equity(self) -> float:
         return float(self.broker.equity(self.prices()))
 
+    def arming_equity(self) -> float:
+        """The balance the sleeve is allowed to arm itself on. Zero means wait.
+
+        The venue's own figure, and never the book's. In dry run and paper the
+        book is a simulation that opens at a default ten thousand dollars, so
+        arming on it fired on the very first tick of a terminal with no key
+        attached at all -- the sleeve switched itself on against money that
+        does not exist, wrote that to the state file, and never disarms. An
+        operator starting at fifty dollars would have found a strategy running
+        that they never reached the threshold for.
+
+        Zero until the account has actually been read. Waiting is correct here:
+        the threshold is a statement about real money, and there is no honest
+        answer to "has it reached two hundred dollars" before the balance is
+        known.
+        """
+        return float(self.account_equity) if self.account_equity > 0 else 0.0
+
     def capital_claims(self) -> list[Claim]:
         """What each sleeve is asking for. The engine does not appear: it takes
         whatever the sleeves leave, so that capital a disabled sleeve is not
@@ -1821,7 +1839,7 @@ class TradingSession:
         await self._reconcile_book()
         # Before the split is taken: arming changes the split, and the engine
         # must be told its new share on the same tick rather than one later.
-        armed = self.sector.consider_arming(self.equity(), trading_day())
+        armed = self.sector.consider_arming(self.arming_equity(), trading_day())
         if armed:
             self.telemetry.event(Level.WARN, "sector", armed)
             self.telemetry.pulse("BOOK", "decision",

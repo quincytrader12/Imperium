@@ -1644,6 +1644,119 @@
     $('btn-speak').onclick = speakBriefing;
   }
 
+  /* ---------- asking it a question ----------
+   *
+   * Recognition happens in the browser, answering happens on the server, and
+   * the answer is spoken by the same path as the briefing.
+   *
+   * The microphone never reaches the network. SpeechRecognition on Chrome and
+   * Edge does send audio to Google's service to transcribe it -- that is the
+   * browser's own behaviour and the notice below says so -- but nothing in
+   * this program records, stores or forwards it, and the question itself is
+   * answered entirely from the local snapshot. Where the API is absent the
+   * button is removed rather than left to fail on click.
+   */
+  var Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var listener = null;
+  var askAudio = null;
+
+  function askStrip(heard, said, tone) {
+    var strip = $('ask-strip');
+    if (!strip) return;
+    strip.hidden = false;
+    strip.className = tone || '';
+    setHTML($('ask-heard'), '');
+    $('ask-heard').textContent = heard ? '\u201c' + heard + '\u201d' : '';
+    $('ask-said').textContent = said || '';
+  }
+
+  if ($('ask-close')) {
+    $('ask-close').onclick = function () { $('ask-strip').hidden = true; };
+  }
+
+  function askServer(question) {
+    askStrip(question, 'thinking\u2026', 'thinking');
+    /* The text answer first, always. It is what appears on screen, it costs
+     * nothing, and it is the whole feature when no voice is connected -- so a
+     * failure to synthesise must not also lose the answer. */
+    return post('/api/ask', { question: question })
+      .then(function (reply) {
+        askStrip(question, reply.answer,
+                 reply.understood ? '' : 'unsure');
+        if (!$('btn-speak') || $('btn-speak').disabled) return null;
+        return fetch('/api/ask/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: question })
+        }).then(function (r) { return r.ok ? r.blob() : null; });
+      })
+      .then(function (blob) {
+        if (!blob) return null;
+        if (askAudio) {
+          askAudio.pause();
+          URL.revokeObjectURL(askAudio.src);
+        }
+        askAudio = new Audio(URL.createObjectURL(blob));
+        return askAudio.play();
+      })
+      .catch(function (e) {
+        askStrip(question, e.message || String(e), 'unsure');
+      });
+  }
+
+  function startListening() {
+    if (!Recognition) return;
+    if (listener) { listener.stop(); return; }
+    listener = new Recognition();
+    listener.lang = 'en-US';
+    /* One question, one answer. Continuous recognition on an always-on
+     * terminal is a microphone left open all day, which is not a thing to do
+     * quietly on somebody's machine. */
+    listener.continuous = false;
+    listener.interimResults = false;
+    listener.maxAlternatives = 1;
+
+    var button = $('btn-ask');
+    if (button) { button.classList.add('listening'); button.textContent = '\u25cf Listening'; }
+    askStrip('', 'listening\u2026', 'thinking');
+
+    listener.onresult = function (event) {
+      var said = (event.results[0][0].transcript || '').trim();
+      if (said) askServer(said);
+    };
+    listener.onerror = function (event) {
+      var why = event.error === 'not-allowed'
+        ? 'the browser blocked the microphone \u2014 allow it for this page'
+        : event.error === 'no-speech' ? 'I did not hear anything'
+        : 'speech recognition failed: ' + event.error;
+      askStrip('', why, 'unsure');
+    };
+    listener.onend = function () {
+      listener = null;
+      if (button) {
+        button.classList.remove('listening');
+        button.textContent = '\ud83c\udfa4 Ask';
+      }
+    };
+    try {
+      listener.start();
+    } catch (e) {
+      listener = null;
+      askStrip('', 'could not start listening: ' + (e.message || e), 'unsure');
+    }
+  }
+
+  if ($('btn-ask')) {
+    if (!Recognition) {
+      /* Removed, not disabled. A greyed-out button invites a click and then
+       * explains nothing; an absent one is simply a browser without the
+       * feature, which is the truth. */
+      $('btn-ask').remove();
+    } else {
+      $('btn-ask').onclick = startListening;
+    }
+  }
+
   if ($('v-check')) {
     $('v-check').onclick = function () {
       vError('');

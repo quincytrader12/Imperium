@@ -48,12 +48,25 @@
       <option value="live">LIVE</option>
     </select>
     <button id="btn-speak" title="Speak a briefing">&#9658; Brief me</button>
+    <!-- Ask it a question out loud. Hidden by script where the browser has no
+         speech recognition, rather than shown and broken. -->
+    <button id="btn-ask" title="Ask a question out loud">&#127908; Ask</button>
     <button id="btn-conn">Connections</button>
     <a href="/diagnose" target="_blank" rel="noopener"><button>Diagnose</button></a>
   </div>
 </header>
 
 <div id="banner" hidden></div>
+
+<!-- What it heard and what it answered. Shown as text as well as spoken,
+     because a misheard question is otherwise invisible: the operator hears a
+     confident answer to a question they did not ask and has no way to tell.
+     Also the whole feature, for anyone without the voice set up. -->
+<div id="ask-strip" hidden>
+  <span id="ask-heard" class="ask-heard"></span>
+  <span id="ask-said" class="ask-said"></span>
+  <button id="ask-close" class="ask-close" title="Dismiss">&times;</button>
+</div>
 
 <main>
   <!-- ---------------- left column ---------------- -->

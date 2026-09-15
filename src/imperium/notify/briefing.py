@@ -123,6 +123,70 @@ def _percent(value: float) -> str:
     return f"{value * 100:.1f} percent"
 
 
+def say_percent(value: float) -> str:
+    """A fraction as a spoken percentage, without a pointless decimal.
+
+    "80.0 percent" read aloud is "eighty point zero percent", which is a
+    machine talking. Whole percentages lose the decimal; fractional ones keep
+    one place, because the difference between 4.0 and 4.5 percent of an
+    account is worth hearing.
+    """
+    pct = value * 100
+    if abs(pct - round(pct)) < 0.05:
+        return f"{int(round(pct))} percent"
+    return f"{pct:.1f} percent"
+
+
+def say_number(value: float) -> str:
+    """A count or a plain figure, said rather than printed."""
+    if abs(value - round(value)) < 0.005:
+        return f"{int(round(value)):,}"
+    return f"{value:,.2f}"
+
+
+def plural(noun: str) -> str:
+    """The plural of the nouns this program counts.
+
+    Not a general pluraliser -- English does not have one -- but enough for
+    the vocabulary here: scans, decisions, refusals, orders, stories,
+    symbols, errors, positions. It exists because "14 storys" is what a naive
+    `noun + "s"` produces, and it is read out loud.
+    """
+    if noun.endswith("y") and noun[-2:-1] not in "aeiou":
+        return noun[:-1] + "ies"
+    if noun.endswith(("s", "x", "z", "ch", "sh")):
+        return noun + "es"
+    return noun + "s"
+
+
+def say_count(number: int, noun: str) -> str:
+    """"one scan", "four scans", "no scans".
+
+    Zero becomes "no", not "0". A listener hears "zero orders sent" as a
+    reading off a dial; "no orders sent" is the sentence a person would say,
+    and this is meant to be listened to.
+    """
+    if number == 0:
+        return f"no {plural(noun)}"
+    if number == 1:
+        return f"one {noun}"
+    return f"{number:,} {plural(noun)}"
+
+
+def say_basis_points(value: float) -> str:
+    """Basis points spelled out.
+
+    "4.12bp" read literally is "four point one two bee pee". Spoken in full it
+    is a unit an operator recognises, and the number rounds to one place
+    because a second decimal of a basis point is below anything this program
+    can measure.
+    """
+    if abs(value - round(value)) < 0.05:
+        whole = int(round(value))
+        return f"{whole} basis point{'' if whole == 1 else 's'}"
+    return f"{value:.1f} basis points"
+
+
 def admissions(snapshot: dict[str, Any]) -> str:
     """Which symbols hold a concurrency slot, and why they hold it.
 

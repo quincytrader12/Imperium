@@ -527,6 +527,49 @@ behaving correctly. So:
 - The reasoning panel gives, per symbol, expected edge against round-trip cost —
   the answer to *"it says TRADING, so why is there no position"*.
 
+### Asking it out loud
+
+Press **Ask**, say a question, and it answers in the same voice as the
+briefing. What it heard and what it said appear as text under the header too,
+because a misheard question is otherwise invisible — you would hear a confident
+answer to a question you did not ask with no way to tell.
+
+Questions it knows:
+
+| Ask | It tells you |
+| --- | --- |
+| *what's looking good* | What is admitted, or the closest miss and what stopped it |
+| *what have you found so far* | Scans, decisions, refusals and orders, counted |
+| *why aren't you trading* | The blockers panel, spoken |
+| *what do I own* | Open positions and what they are worth together |
+| *how much money do I have* | The balance, in dollars and in your second currency |
+| *how am I doing today* | The day, against the day's loss budget |
+| *what's the news saying* | Stories scored, and which symbols lead |
+| *what about the ETFs* | The Sector Trend sleeve, or what would switch it on |
+| *are you healthy* | The health score and what is dragging it down |
+| *are you live or paper* | The question with the most expensive wrong answer |
+| *what are your limits* | The bounds it trades inside |
+| *what is it costing to trade* | The cost gate everything has to clear |
+| *why aren't you trading SPY* | That symbol's actual decision |
+| *what can I ask* | This list, spoken |
+
+**There is no language model in this, and that is the design.** Every answer is
+assembled from fields in the same snapshot the panels render, so a spoken
+answer cannot say anything the screen does not. An answer generated from a
+prompt would be a fluent sentence with no measurement behind it, and the least
+acceptable place for that is a confident voice telling you how your money is
+doing. When the snapshot does not contain the answer, the answer is that it
+does not — and a question it did not understand is refused rather than guessed
+at, because a wrong answer and a right one sound identical.
+
+**Your words do not leave the machine.** The question is answered locally and
+never sent anywhere; only the sentence it wrote is passed to the speech
+service, and only if you have connected one. Recognition itself is the
+browser's — on Chrome and Edge that means the browser sends the audio to its
+own service to transcribe, which is Chrome's behaviour and not this program's.
+The **Ask** button is absent in browsers without speech recognition, rather
+than present and broken.
+
 ---
 
 ## Sector Trend (a sleeve, off by default)
