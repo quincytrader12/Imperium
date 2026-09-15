@@ -263,3 +263,22 @@ async def test_a_news_outage_returns_what_it_has_rather_than_raising(client, ven
     outage must cost coverage, not a scan."""
     venue.fail_next.append(lambda r: httpx.Response(500, json={"message": "nope"}))
     assert await client.news(["AAPL"]) == {}
+
+
+async def test_daily_history_can_ask_for_split_and_dividend_adjusted_bars(
+        client, venue):
+    """Prevents a multi-year daily strategy trading corporate actions.
+
+    An unadjusted series steps at every split and every dividend. A breakout
+    rule reads a 4-for-1 split as a 75% crash and a dividend as a gap down --
+    it would spend the backtest, and then the account, reacting to accounting.
+    """
+    await client.bars(["AAPL"], timeframe="1Day", adjustment="all")
+    assert dict(venue.requests[-1].url.params)["adjustment"] == "all"
+
+
+async def test_the_minute_ring_still_asks_for_raw_prices(client, venue):
+    """The other half of the same decision. Intraday prices must match what
+    the venue is quoting right now, so the default must not drift to adjusted."""
+    await client.bars(["AAPL"], timeframe="1Min")
+    assert dict(venue.requests[-1].url.params)["adjustment"] == "raw"

@@ -314,3 +314,17 @@ def test_a_refused_data_socket_shows_its_remedy_on_screen():
     assert "hz-feed-remedy" in APP_JS, "the remedy is never written to"
     assert "f.remedy" in APP_JS, "the remedy is never read from the snapshot"
     assert ".feed-remedy" in STYLES, "the remedy has no styling"
+
+
+def test_the_sector_sleeve_panel_is_rendered_and_says_when_it_is_off():
+    """Prevents the commonest question about a disabled strategy.
+
+    A sleeve that is switched off looks exactly like a sleeve that is on and
+    finding nothing, and the difference matters most to the person wondering
+    why nothing has traded. The panel has to say which, and say how to arm it.
+    """
+    assert "renderSector(s)" in APP_JS, "the sector panel is never rendered"
+    for element in ("st-note", "st-grid", "st-holdings", "st-why"):
+        assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
+    assert "SECTOR_TREND_ENABLED" in APP_JS
+    assert "keeps its own book" in APP_JS.lower() or "its own book" in APP_JS

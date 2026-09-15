@@ -811,6 +811,79 @@
    * as to show its readings: an operator who sees a "sentiment" panel on a
    * trading terminal will reasonably assume it decides something, and here it
    * decides nothing except how big an already-approved position is. */
+  /* The Sector Trend sleeve. The panel's first job is to say whether it is
+   * switched on at all: a strategy that is off looks exactly like a strategy
+   * that is on and finding nothing, and the difference matters most to the
+   * person wondering why nothing has traded. */
+  function renderSector(s) {
+    var st = s.sector || {};
+    var note = $('st-note');
+    if (!note) return;
+
+    if (!st.enabled) {
+      note.textContent = 'off';
+      note.className = 'note';
+    } else if (st.last_error) {
+      note.textContent = 'error';
+      note.className = 'note warn';
+    } else if (!st.last_run_day) {
+      note.textContent = 'armed, not yet run';
+      note.className = 'note';
+    } else {
+      note.textContent = 'last run ' + st.last_run_day;
+      note.className = 'note';
+    }
+
+    $('st-grid').innerHTML =
+      cell('sleeve', '$' + fmtNum(st.sleeve_equity || 0, 2),
+           '', (st.allocation * 100).toFixed(0) + '% of equity') +
+      // Sub-labels kept short: three cells share a 300px rail and the longer
+      // wording ran into its neighbour at that width.
+      cell('holding', (st.holding || 0) + ' / ' + (st.universe || 0),
+           (st.holding || 0) > 0 ? 'good' : '', 'ETFs held') +
+      cell('gross', ((st.gross_weight || 0) * 100).toFixed(0) + '%',
+           st.capped ? 'warn' : '',
+           st.capped ? 'cap binds' : 'of sleeve') +
+      cell('runs', fmtNum(st.runs || 0, 0), '', 'daily, ' + (st.exec_mode || ''));
+
+    var host = $('st-holdings');
+    if (host) {
+      var syms = st.symbols || [];
+      host.innerHTML = syms.length
+        ? syms.map(function (sym) {
+            var stop = (st.stops || {})[sym];
+            return '<span><b>' + sym + '</b>' +
+                   (stop !== undefined ? ' stop ' + stop : '') + '</span>';
+          }).join('')
+        : '';
+    }
+
+    var why = $('st-why');
+    if (why) {
+      if (!st.enabled) {
+        why.textContent = 'Switched off. Set SECTOR_TREND_ENABLED=true to ' +
+          'arm it, after reviewing a backtest. It trades ' +
+          (st.universe || 0) + ' sector ETFs on Donchian/Keltner breakouts ' +
+          'with a trailing stop, using only its own ' +
+          ((st.allocation || 0) * 100).toFixed(0) + '% slice of equity.';
+        why.className = 'dimmer';
+      } else if (st.last_error) {
+        why.textContent = st.last_error;
+        why.className = 'warn';
+      } else if (st.note) {
+        /* Almost always the sub-dollar warning on a small account. Shown in
+         * the warning style because it means orders are not being placed. */
+        why.textContent = st.note;
+        why.className = st.too_small ? 'warn' : 'dimmer';
+      } else {
+        why.textContent = 'Runs once a day. Keeps its own book, so the ' +
+          'account position another strategy shares with it can never be ' +
+          'mistaken for this sleeve\'s.';
+        why.className = 'dimmer';
+      }
+    }
+  }
+
   function renderNews(s) {
     var n = s.news || {};
     var note = $('news-note');
@@ -1173,6 +1246,7 @@
     renderTrend(s);
     renderCrossSection(s);
     renderNews(s);
+    renderSector(s);
     renderOvernight(s);
     renderCosts(s);
     renderStats(s);

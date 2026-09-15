@@ -529,6 +529,90 @@ behaving correctly. So:
 
 ---
 
+## Sector Trend (a sleeve, off by default)
+
+Donchian/Keltner breakouts on nineteen liquid SPDR industry ETFs, after
+Zarattini and Antonacci, *A Century of Profitable Industry Trends*.
+
+**What it does.** Each day it looks at adjusted daily closes. A flat symbol
+whose close clears *yesterday's* upper band is bought; a held symbol whose
+close falls below the stop it carried in from yesterday is sold. Positions are
+sized by volatility — `w = (target_vol / N) / sigma` — where `N` is the size of
+the whole universe, not the number of positions, so a thin signal stays a small
+book. The trailing stop never moves down.
+
+**Why it is a sleeve rather than a strategy.** It trades a fixed slice of
+equity and keeps its own ledger of quantities and stops, separate from the
+broker's book. Alpaca nets positions by symbol across the account: if the
+multi-day trend strategy is long 3 XLK and this sleeve enters 2 more, the venue
+reports 5 and nothing in that number says who owns what. A sleeve that sized or
+exited from the account position would sell another strategy's shares to close
+its own. The ledger is at `~/.imperium/state.json` under `sector_trend`, and
+every order carries a `sectrend-` client order id.
+
+**It is off until you turn it on.** `SECTOR_TREND_ENABLED` defaults to `false`.
+Run the backtest first.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SECTOR_TREND_ENABLED` | `false` | The kill switch. Nothing runs while this is false. |
+| `SECTOR_TREND_ALLOCATION` | `0.20` | Fraction of account equity the sleeve may use. |
+| `SECTOR_TREND_UNIVERSE` | 19 SPDR ETFs | Comma separated. |
+| `SECTOR_TREND_TARGET_VOL` | `0.015` | Daily volatility target for the sleeve. |
+| `SECTOR_TREND_MAX_LEVERAGE` | `1.0` | `2.0` is the paper's figure; it does not model the margin interest Alpaca would charge. |
+| `SECTOR_TREND_REBALANCE_THRESHOLD` | `0.25` | Held positions are only resized past this drift. Entries and exits always execute. |
+| `SECTOR_TREND_EXEC_MODE` | `near_close` | Or `next_open`. |
+| `SECTOR_TREND_RUN_TIME_ET` | `15:45` | |
+
+### Running the backtest
+
+```bash
+uv run python scripts/backtest_sector_trend.py                 # from Alpaca
+uv run python scripts/backtest_sector_trend.py --start 2005-01-01
+uv run python scripts/backtest_sector_trend.py --csv ./bars    # date,close CSVs
+```
+
+It runs both execution modes at both leverage caps, charges 5bp of slippage per
+side and 7% annual margin interest on exposure above 100%, and reports CAGR,
+volatility, Sharpe, Sortino, max drawdown, beta and alpha against SPY, trade
+count, average holding days and yearly returns.
+
+**Read the warnings at the bottom.** The paper reports roughly 7.7% CAGR at a
+Sharpe near 0.6 with a 24% drawdown over 2005–2024 on a wider universe. A
+result far better than that is much more likely to be a bug — lookahead, an
+unadjusted price series — than an edge, and the report says so rather than
+leaving it to a reader who wants the number to be good.
+
+### Enabling it on paper
+
+```bash
+export SECTOR_TREND_ENABLED=true
+```
+
+Then start the terminal as usual. The **Sector trend** panel in the left rail
+shows the sleeve's equity, how many ETFs it holds, its gross weight, and each
+position's stop.
+
+### One thing to check before you enable it
+
+Alpaca refuses a fractional buy below **$1.00 notional**. The sleeve's own
+arithmetic can produce targets under that on a small account:
+
+| Account | Allocation | Sleeve | Result |
+| --- | --- | --- | --- |
+| $70 | 0.20 | $14.00 | about half the universe sizes under $1 and is skipped |
+| $70 | 0.36 | $25.20 | every symbol clears the floor |
+| $127 | 0.20 | $25.40 | every symbol clears the floor |
+
+The sleeve checks this before sending anything and names the shortfall in the
+panel rather than letting you watch a run place nothing. The exact figure
+depends on the least volatile ETF in the universe on the day, because the
+smallest weight is the binding one.
+
+---
+
 ## Layout
 
 ```

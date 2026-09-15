@@ -559,7 +559,8 @@ class AlpacaClient:
 
     async def bars(self, symbols: list[str], *, timeframe: str = "1Min",
                    limit: int = 1000,
-                   start: dt.datetime | None = None) -> dict[str, list[dict[str, Any]]]:
+                   start: dt.datetime | None = None,
+                   adjustment: str = "raw") -> dict[str, list[dict[str, Any]]]:
         """Historical bars, batched by asset class.
 
         Equities and crypto come from different endpoints with different query
@@ -590,7 +591,15 @@ class AlpacaClient:
                 params["feed"] = self.feed
                 # Free plans cannot read the most recent 15 minutes of SIP data;
                 # asking for it returns an error rather than an empty result.
-                params["adjustment"] = "raw"
+                #
+                # "raw" is right for the minute ring, where a session's prices
+                # must match what the venue is quoting right now. It is wrong
+                # for a long daily history: an unadjusted series steps at every
+                # split and every dividend, and a breakout rule reads those
+                # steps as signals. A strategy trading years of daily bars asks
+                # for "all" and spends its time on the market rather than on
+                # corporate actions.
+                params["adjustment"] = adjustment
             if start is not None:
                 params["start"] = start.astimezone(dt.timezone.utc).isoformat()
             try:

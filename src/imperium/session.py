@@ -42,6 +42,11 @@ from imperium.notify import telegram as tg
 from imperium.notify import voice as voice_mod
 from imperium.strategy import crosssection as xs_mod
 from imperium.execution.newsdesk import NewsDesk
+from imperium.execution.sector_sleeve import (
+    SectorRunner, plan as sector_plan, summarise as sector_summarise,
+)
+from imperium.execution.sleeve_ledger import SleeveLedger, trading_day
+from imperium.strategy import sector_config as sector_cfg
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
 from imperium.strategy import sentiment as sentiment_mod
@@ -229,6 +234,13 @@ class TradingSession:
         #: why it is not allowed to be a gate.
         self.newsdesk = NewsDesk()
         self._news_task: asyncio.Task[None] | None = None
+        #: The Sector Trend sleeve. Off unless SECTOR_TREND_ENABLED
+        #: says otherwise, and holding its own book either way --
+        #: see imperium.execution.sleeve_ledger for why it cannot
+        #: share the broker's.
+        self.sector = SectorRunner(config=sector_cfg.from_environment(),
+                                   ledger=SleeveLedger.load())
+        self._sector_task: asyncio.Task[None] | None = None
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -1036,6 +1048,62 @@ class TradingSession:
         seen |= set(crypto)
         ordered += [s for s in self.universe if s not in seen]
         return ordered
+
+    def kick_sector_sleeve(self) -> None:
+        """Start the Sector Trend daily run, if it is due and switched on.
+
+        Backgrounded for the same reason the news refresh is: it fetches
+        nineteen symbols' worth of daily history, and a strategy that runs once
+        a day has no business holding up the loop that manages stops.
+        """
+        if not self.sector.enabled or self.client is None:
+            return
+        if not self.sector.due(trading_day()):
+            return
+        if self._sector_task is not None and not self._sector_task.done():
+            return
+        self._sector_task = asyncio.create_task(self.run_sector_sleeve())
+
+    async def run_sector_sleeve(self) -> None:
+        """One Sector Trend run: fetch, decide, apply, record.
+
+        Never raises into the loop. A sleeve that cannot reach the venue does
+        nothing today and says so; it does not take the terminal down, and it
+        does not mark the day complete, so the next pass will try again.
+        """
+        day = trading_day()
+        runner = self.sector
+        try:
+            closes = await runner.daily_closes(self.client)
+        except Exception as exc:                            # noqa: BLE001
+            runner.last_error = f"{type(exc).__name__}: {exc}"
+            self.telemetry.event(Level.WARN, "sector",
+                                 "the sector sleeve could not read its daily "
+                                 "history", detail=runner.last_error)
+            return
+
+        equity = self.equity()
+        result = sector_plan(closes, runner.ledger, equity, runner.config)
+        runner.last_plan = result
+        runner.last_error = ""
+
+        prices = {s: float(v[-1]) for s, v in closes.items() if v}
+        # Simulated into the sleeve's own ledger. Sending real orders is a
+        # separate decision that lives behind the same GO LIVE gate as every
+        # other order this program can place, and is not taken here.
+        runner.simulate(result, prices, day)
+        runner.ledger.complete_run(day)
+        runner.ledger.save()
+
+        if result.intentions or result.note:
+            self.telemetry.event(
+                Level.INFO if result.intentions else Level.WARN, "sector",
+                sector_summarise(result, runner.ledger),
+                detail=result.note)
+        for intention in result.intentions:
+            self.telemetry.pulse(intention.symbol, "decision",
+                                 f"{intention.reason}: {intention.detail}",
+                                 0.6)
 
     def kick_news(self) -> None:
         """Start a news refresh in the background, and do not wait for it.
@@ -1871,6 +1939,7 @@ class TradingSession:
                     # Started, not awaited. See kick_news: a third party's
                     # latency must never sit on this loop.
                     self.kick_news()
+                    self.kick_sector_sleeve()
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
                 # what has not been looked at yet.
@@ -2186,6 +2255,8 @@ class TradingSession:
             # estimate from the trend premium above: relative, not absolute.
             "cross_section": self._cross_section_block(),
             "news": self.newsdesk.panel(),
+            # The Sector Trend sleeve, which keeps its own book.
+            "sector": self.sector.panel(),
             # Why the book is not trading, counted. See _blockers.
             "blockers": self._blockers(),
             "universe_scan": {
