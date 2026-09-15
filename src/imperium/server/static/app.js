@@ -811,6 +811,54 @@
    * as to show its readings: an operator who sees a "sentiment" panel on a
    * trading terminal will reasonably assume it decides something, and here it
    * decides nothing except how big an already-approved position is. */
+  /* Where the money went. A strategy's position size is a fraction of its
+   * share rather than of the account, and until this panel existed there was
+   * nowhere on screen that said what any share was. */
+  function renderCapital(s) {
+    var c = s.capital || {};
+    var note = $('cap-note');
+    if (!note) return;
+
+    var shares = c.shares || {};
+    var names = Object.keys(shares);
+    var sleeves = names.filter(function (n) { return n !== 'engine'; });
+    var refused = Object.keys(c.refused || {});
+
+    note.textContent = refused.length ? 'oversubscribed'
+      : (sleeves.length ? (sleeves.length + ' sleeve' +
+          (sleeves.length === 1 ? '' : 's') + ' + engine') : 'engine only');
+    note.className = 'note' + (refused.length ? ' warn' : '');
+
+    var cells = cell('account', '$' + fmtNum(c.equity || 0, 2), '', 'total equity') +
+      cell('engine', ((shares.engine || 0) * 100).toFixed(0) + '%',
+           (shares.engine || 0) > 0 ? 'good' : 'warn',
+           '$' + fmtNum((c.allocated || {}).engine || 0, 2));
+    sleeves.forEach(function (n) {
+      cells += cell(n.replace(/_/g, ' '), (shares[n] * 100).toFixed(0) + '%',
+                    '', '$' + fmtNum((c.allocated || {})[n] || 0, 2));
+    });
+    $('cap-grid').innerHTML = cells;
+
+    var why = $('cap-why');
+    if (why) {
+      if (refused.length) {
+        why.textContent = 'The sleeves asked for more than the account holds. ' +
+          refused.join(', ') + ' got less than requested. Lower an allocation ' +
+          'so the shares fit inside 100%.';
+        why.className = 'warn';
+      } else if (!sleeves.length) {
+        why.textContent = 'No sleeve is enabled, so the per-symbol strategies ' +
+          'have the whole account.';
+        why.className = 'dimmer';
+      } else {
+        why.textContent = 'Each strategy sizes against its own share, never ' +
+          'the account total. Cash is still a hard ceiling underneath: a ' +
+          'share decides how large a position may be, not how much money exists.';
+        why.className = 'dimmer';
+      }
+    }
+  }
+
   /* The Sector Trend sleeve. The panel's first job is to say whether it is
    * switched on at all: a strategy that is off looks exactly like a strategy
    * that is on and finding nothing, and the difference matters most to the
@@ -1246,6 +1294,7 @@
     renderTrend(s);
     renderCrossSection(s);
     renderNews(s);
+    renderCapital(s);
     renderSector(s);
     renderOvernight(s);
     renderCosts(s);

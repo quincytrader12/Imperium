@@ -46,6 +46,7 @@ from imperium.execution.sector_sleeve import (
     SectorRunner, plan as sector_plan, summarise as sector_summarise,
 )
 from imperium.execution.sleeve_ledger import SleeveLedger, trading_day
+from imperium.execution.capital import ENGINE, Claim, CapitalPlan, divide
 from imperium.strategy import sector_config as sector_cfg
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
@@ -241,6 +242,12 @@ class TradingSession:
         self.sector = SectorRunner(config=sector_cfg.from_environment(),
                                    ledger=SleeveLedger.load())
         self._sector_task: asyncio.Task[None] | None = None
+        #: How the account is split between the engine and the
+        #: sleeves. Recomputed from equity each tick; the shares
+        #: themselves are fixed at startup, which matters -- a
+        #: share that moved mid-session would look to the
+        #: daily-loss check like a sudden loss and halt the book.
+        self.capital: CapitalPlan = divide(0.0, [])
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -1357,7 +1364,8 @@ class TradingSession:
                 continue
             try:
                 fill = await self.broker.apply_target(
-                    symbol, 0.0, price, self.equity(), order=MARKET_ON_CLOSE)
+                    symbol, 0.0, price, self.engine_equity(),
+                    order=MARKET_ON_CLOSE)
             except (VenueError, ModeSwitchRefused) as exc:
                 self.telemetry.event(
                     Level.ERROR, "overnight",
@@ -1395,7 +1403,8 @@ class TradingSession:
                 continue
             try:
                 fill = await self.broker.apply_target(
-                    symbol, 0.0, price, self.equity(), order=MARKET_ON_OPEN)
+                    symbol, 0.0, price, self.engine_equity(),
+                    order=MARKET_ON_OPEN)
             except (VenueError, ModeSwitchRefused) as exc:
                 self.telemetry.event(
                     Level.ERROR, "overnight",
@@ -1499,7 +1508,8 @@ class TradingSession:
                 f"flattened. The position is still open.")
             return
         try:
-            fill = await self.broker.apply_target(symbol, 0.0, price, self.equity())
+            fill = await self.broker.apply_target(symbol, 0.0, price,
+                                                 self.engine_equity())
         except (VenueError, ModeSwitchRefused) as exc:
             self.telemetry.event(Level.ERROR, "risk",
                                  f"could not flatten {symbol}: {exc}")
@@ -1516,6 +1526,31 @@ class TradingSession:
 
     def equity(self) -> float:
         return float(self.broker.equity(self.prices()))
+
+    def capital_claims(self) -> list[Claim]:
+        """What each sleeve is asking for. The engine does not appear: it takes
+        whatever the sleeves leave, so that capital a disabled sleeve is not
+        using is always available to something."""
+        return [Claim("sector_trend", self.sector.config.allocation,
+                      enabled=self.sector.config.enabled,
+                      note="Sector Trend sleeve")]
+
+    def engine_equity(self, account_equity: float | None = None) -> float:
+        """The equity the per-symbol strategies may size against.
+
+        **Every** number the engine's allocator compares must come through
+        here. The daily-loss halt measures ``day_start_equity`` against
+        ``allocator.equity``: feed it the account total on one side and the
+        engine's share on the other and it reads the difference as a loss --
+        with a sleeve at a fifth of the account that is an instant 20% drop
+        against a 4% limit, and the book halts on its first tick having traded
+        nothing. Hence one function rather than five call sites each doing the
+        multiplication.
+        """
+        total = self.equity() if account_equity is None else float(account_equity)
+        self.capital = divide(total, self.capital_claims())
+        return self.capital.equity_for(ENGINE)
+
 
     async def _drain_bars(self) -> None:
         """Evaluate every bar that actually closed. One pulse per evaluation."""
@@ -1628,7 +1663,8 @@ class TradingSession:
             return
         try:
             fill = await self.broker.apply_target(
-                decision.symbol, decision.target_weight, price, self.equity(),
+                decision.symbol, decision.target_weight, price,
+                self.engine_equity(),
                 order=decision.entry_order)
         except ModeSwitchRefused as exc:
             self.telemetry.event(Level.ERROR, "order", str(exc))
@@ -1660,7 +1696,8 @@ class TradingSession:
             self._save_overnight_state()
         if fill:
             self.allocator.observe(decision.symbol).current_weight = \
-                self.broker.weight_of(decision.symbol, price, self.equity())
+                self.broker.weight_of(decision.symbol, price,
+                                      self.engine_equity())
             qty_text = format_decimal(fill.quantity)
             px_text = format_decimal(fill.price)
             self.telemetry.pulse(decision.symbol, "order",
@@ -1696,8 +1733,12 @@ class TradingSession:
             self._report_unmanaged_equity()
         await self._refresh_account_limits()
         await self._reconcile_book()
-        equity = self.equity()
+        equity = self.engine_equity()
         self.allocator.equity = equity
+        # Cash stays the account's real number. The share governs how large a
+        # position may be, not how much money exists: a strategy still cannot
+        # spend what the account does not hold, and that ceiling sits under all
+        # of this regardless of how the shares are drawn.
         self.allocator.cash = float(self.broker.cash)
         # Scaled on the book that is actually being traded, not on the account
         # record. In live mode they are the same number. In paper they are not:
@@ -1824,7 +1865,7 @@ class TradingSession:
         for symbol, local, actual in drift:
             self.reconciliations += 1
             self.allocator.observe(symbol).current_weight = self.broker.weight_of(
-                symbol, self.feed.quote(symbol).last, self.equity())
+                symbol, self.feed.quote(symbol).last, self.engine_equity())
             self.telemetry.event(
                 Level.ERROR, "order",
                 f"{symbol}: this book held {format_decimal(local)} and the "
@@ -1911,7 +1952,10 @@ class TradingSession:
                 and not self.broker.fills):
             self.broker.cash = to_decimal(self.account_cash)
             self._seeded_from_account = True
-            self.day_start_equity = self.account_equity or self.account_cash
+            # On the engine's own basis, like every other number
+            # the daily-loss check touches.
+            self.day_start_equity = self.engine_equity(
+                self.account_equity or self.account_cash)
             self.telemetry.event(
                 Level.INFO, "account",
                 f"simulated book seeded from the real account: "
@@ -1920,9 +1964,10 @@ class TradingSession:
         # trading loop, so a terminal that has read an account but not yet been
         # started reported zero buying power against a funded balance.
         self.allocator.cash = float(self.broker.cash)
-        self.allocator.equity = self.account_equity or self.allocator.equity
         if self.account_equity > 0:
-            self.apply_account_scale(self.account_equity)
+            share = self.engine_equity(self.account_equity)
+            self.allocator.equity = share
+            self.apply_account_scale(share)
 
     async def _run(self) -> None:
         last_universe = 0.0
@@ -2124,7 +2169,7 @@ class TradingSession:
 
         for state in self.allocator.states.values():
             state.current_weight = 0.0
-        self.day_start_equity = self.equity()
+        self.day_start_equity = self.engine_equity()
         self.status_message = (f"running in {self.broker.mode.value}"
                                if self.running else "stopped")
 
@@ -2257,6 +2302,8 @@ class TradingSession:
             "news": self.newsdesk.panel(),
             # The Sector Trend sleeve, which keeps its own book.
             "sector": self.sector.panel(),
+            # How the one account is divided between them.
+            "capital": self.capital.as_dict(),
             # Why the book is not trading, counted. See _blockers.
             "blockers": self._blockers(),
             "universe_scan": {

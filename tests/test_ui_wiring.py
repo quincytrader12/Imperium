@@ -328,3 +328,15 @@ def test_the_sector_sleeve_panel_is_rendered_and_says_when_it_is_off():
         assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
     assert "SECTOR_TREND_ENABLED" in APP_JS
     assert "keeps its own book" in APP_JS.lower() or "its own book" in APP_JS
+
+
+def test_the_capital_panel_shows_how_the_account_is_divided():
+    """Prevents the split existing only in the source. Every strategy's
+    position size is a fraction of its share rather than of the account, and
+    before this panel there was nowhere on screen that said what any share
+    was -- or that one had been refused for want of room."""
+    assert "renderCapital(s)" in APP_JS, "the capital panel is never rendered"
+    for element in ("cap-note", "cap-grid", "cap-why"):
+        assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
+    assert "oversubscribed" in APP_JS
+    assert "c.refused" in APP_JS, "a refused claim is never surfaced"

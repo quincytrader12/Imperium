@@ -120,6 +120,16 @@
       <div class="dimmer" id="on-verdict" style="padding:0 9px 8px"></div>
     </section>
 
+    <!-- How the one account is divided. Its own row above the strategy
+         panels because it is the thing every one of them is a fraction of:
+         before this existed each strategy sized against the whole account and
+         the total came to more than the money. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Capital <span class="note" id="cap-note">—</span></h2>
+      <div class="limit-grid" id="cap-grid"></div>
+      <div class="dimmer" id="cap-why" style="padding:0 9px 8px"></div>
+    </section>
+
     <!-- The Sector Trend sleeve. Its own panel because it is a sleeve rather
          than a per-symbol strategy: it trades a fixed slice of equity, keeps
          its own book apart from the account's netted positions, and runs once
