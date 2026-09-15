@@ -291,7 +291,41 @@ class SectorRunner:
 
     @property
     def enabled(self) -> bool:
-        return self.config.enabled
+        """Whether the sleeve may trade: configured on, or armed by equity."""
+        return bool(self.config.enabled or self.ledger.armed_on)
+
+    def consider_arming(self, account_equity: float, day: str) -> str:
+        """Arm the sleeve the first time equity reaches the threshold.
+
+        Returns the announcement when it arms, and "" every other time.
+
+        **One way only.** It arms and never disarms. A sleeve that switched
+        itself off on a dip below the threshold would abandon whatever it was
+        holding -- the positions would sit there with their stops no longer
+        being trailed and nothing left to close them, which is worse than
+        either state on its own. If the operator wants it off, that is a
+        decision with a file to write it in.
+
+        **Recorded, not re-derived.** The fact of arming is persisted, so a
+        restart does not announce it again, and so the sleeve stays armed
+        through a drawdown.
+        """
+        if self.config.enabled or self.ledger.armed_on:
+            return ""
+        threshold = float(self.config.arm_at_equity or 0.0)
+        if threshold <= 0 or float(account_equity) < threshold:
+            return ""
+
+        self.ledger.armed_at_equity = float(account_equity)
+        self.ledger.armed_on = day
+        self.ledger.save()
+        sleeve = self.config.sleeve_equity(account_equity)
+        return (f"Sector Trend has armed itself: equity reached "
+                f"${account_equity:,.2f}, past the ${threshold:,.0f} "
+                f"threshold. It now trades {self.config.universe_size} sector "
+                f"ETFs on ${sleeve:,.2f} of its own capital, once a day. "
+                f"The other strategies lose that slice. To stop it, set "
+                f"SECTOR_TREND_ARM_AT_EQUITY=0 in settings.txt and restart.")
 
     def due(self, day: str) -> bool:
         """Whether today's run still needs to happen."""
@@ -362,7 +396,11 @@ class SectorRunner:
         held = self.ledger.longs()
         result = self.last_plan
         return {
-            "enabled": self.config.enabled,
+            "enabled": self.enabled,
+            "configured": self.config.enabled,
+            "arm_at_equity": self.config.arm_at_equity,
+            "armed_on": self.ledger.armed_on,
+            "armed_at_equity": round(self.ledger.armed_at_equity, 2),
             "allocation": self.config.allocation,
             "universe": len(self.config.universe),
             "holding": len(held),

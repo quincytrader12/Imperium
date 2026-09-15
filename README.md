@@ -580,6 +580,27 @@ so a typo costs a setting rather than being mistaken for one that worked.
 | `SECTOR_TREND_REBALANCE_THRESHOLD` | `0.25` | Held positions are only resized past this drift. Entries and exits always execute. |
 | `SECTOR_TREND_EXEC_MODE` | `near_close` | Or `next_open`. |
 | `SECTOR_TREND_RUN_TIME_ET` | `15:45` | |
+| `SECTOR_TREND_ARM_AT_EQUITY` | `200` | Equity at which the sleeve switches itself on. `0` never. |
+| `IMPERIUM_SECONDARY_CURRENCY` | `ZAR` | A second currency beside the dollar balance. Display only. |
+| `IMPERIUM_FX_RATE` | *(fetched)* | Pin the rate by hand instead of fetching it. |
+
+### Arming itself
+
+With `SECTOR_TREND_ARM_AT_EQUITY` set, the sleeve switches itself on the first
+time account equity reaches that figure, announces it everywhere it can reach,
+and takes its slice from the engine's share on the same tick.
+
+$200 is not a round number chosen for looks. At the default 0.20 allocation it
+gives the sleeve $40, which is where *every* ETF in the universe clears
+Alpaca's $1 minimum order — including the most volatile. Below about $130 the
+sleeve would quietly trade only the calm half of its universe, which is a
+different strategy from the one the paper describes.
+
+It arms once and **never disarms**. A sleeve that switched itself off on a dip
+would abandon whatever it was holding: those positions would sit there with
+their stops no longer being trailed and nothing left to close them, which is
+worse than either state on its own. Turning it off is a decision, and
+`settings.txt` is where you make it.
 
 ### Running the backtest
 

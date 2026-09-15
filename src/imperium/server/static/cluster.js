@@ -29,13 +29,27 @@
   /* One colour per pulse kind, and they have to be told apart at a glance in a
    * field of several hundred. The three that matter most to an operator are
    * the loudest: a decision was reached, the cost cap refused it, an order
-   * went out. Scanning stays the quiet blue underneath them -- it is the
+   * went out. Scanning stays the quiet silver underneath them -- it is the
    * background hum, and at twenty pulses a second anything brighter would
-   * drown the three events worth looking at. */
+   * drown the three events worth looking at.
+   *
+   * Silver for the hum, colour only for meaning.
+   *
+   * The scan pulse is by far the commonest thing this panel draws -- it is the
+   * scanner breathing -- so whatever colour it is, that is the colour of the
+   * terminal. It used to be blue, which made a black-and-silver interface read
+   * as a blue one no matter what the CSS said. It is silver now, and the panel
+   * is monochrome until something actually happens.
+   *
+   * The four that mean something keep their colours, and they were chosen by
+   * the operator: green for a verdict, purple for the cost gate, orange for
+   * money moving, red for a halt. Against a silver field those now carry all
+   * the colour on screen, which is the point -- a glance tells you whether
+   * anything has happened without reading a word. */
   var KIND_COLOR = {
-    scan:     [53, 167, 255],     // blue — the background hum
+    scan:     [214, 224, 238],    // silver — the background hum
     decision: [57, 255, 140],     // neon green — a verdict was reached
-    refused:  [107, 123, 145],    // grey — looked at, nothing there
+    refused:  [104, 110, 120],    // graphite — looked at, nothing there
     cap:      [190, 60, 255],     // neon purple — the cost gate said no
     order:    [255, 150, 40],     // bright orange — money actually moved
     warmup:   [232, 180, 68],
@@ -390,10 +404,10 @@
       var lg = layers[i % NETWORK_LAYERS].ctx;
       /* Two passes: a wide dim halo, then a thin bright core. One pass with a
        * shadow blur is far more expensive and looks flatter. */
-      lg.strokeStyle = 'rgba(40, 92, 140, 0.16)';
+      lg.strokeStyle = 'rgba(122, 130, 142, 0.17)';
       lg.lineWidth = 2.4;
       strokePath(lg, pts);
-      lg.strokeStyle = 'rgba(90, 170, 235, 0.30)';
+      lg.strokeStyle = 'rgba(203, 212, 225, 0.30)';
       lg.lineWidth = 0.7;
       strokePath(lg, pts);
       /* The ring node is NOT baked in any more -- it is drawn per frame from
@@ -404,8 +418,8 @@
     var hgctx = layers[Math.floor(NETWORK_LAYERS / 2)].ctx;
     var hg = hgctx.createRadialGradient(this.hub.x, this.hub.y, 0,
                                         this.hub.x, this.hub.y, 26);
-    hg.addColorStop(0, 'rgba(124, 224, 255, 0.30)');
-    hg.addColorStop(1, 'rgba(124, 224, 255, 0)');
+    hg.addColorStop(0, 'rgba(206, 216, 230, 0.26)');
+    hg.addColorStop(1, 'rgba(206, 216, 230, 0)');
     hgctx.fillStyle = hg;
     hgctx.beginPath();
     hgctx.arc(this.hub.x, this.hub.y, 26, 0, Math.PI * 2);
@@ -518,9 +532,9 @@
     // cytoplasm, limbs and banding drawn underneath it, and the neuron reads as
     // a featureless star rather than as a cell.
     var glow = g.createRadialGradient(cx, cy, R * 0.55, cx, cy, R * 2.0);
-    glow.addColorStop(0, 'rgba(70, 190, 255, 0.13)');
-    glow.addColorStop(0.5, 'rgba(70, 190, 255, 0.05)');
-    glow.addColorStop(1, 'rgba(70, 190, 255, 0)');
+    glow.addColorStop(0, 'rgba(198, 209, 224, 0.12)');
+    glow.addColorStop(0.5, 'rgba(198, 209, 224, 0.05)');
+    glow.addColorStop(1, 'rgba(198, 209, 224, 0)');
     g.fillStyle = glow;
     g.fillRect(0, 0, size, size);
 
@@ -531,8 +545,8 @@
       var len = R * (1.25 + rand() * 0.75);
       var grad = g.createLinearGradient(cx, cy,
         cx + Math.cos(a) * len, cy + Math.sin(a) * len);
-      grad.addColorStop(0, 'rgba(150, 225, 255, 0.55)');
-      grad.addColorStop(1, 'rgba(60, 150, 220, 0)');
+      grad.addColorStop(0, 'rgba(228, 236, 246, 0.55)');
+      grad.addColorStop(1, 'rgba(150, 160, 174, 0)');
       g.strokeStyle = grad;
       g.lineWidth = 2.2;
       g.lineCap = 'round';
@@ -548,9 +562,9 @@
     // Translucent cytoplasm.
     var body = g.createRadialGradient(cx - R * 0.25, cy - R * 0.25, R * 0.1,
                                       cx, cy, R);
-    body.addColorStop(0, 'rgba(180, 240, 255, 0.50)');
-    body.addColorStop(0.55, 'rgba(70, 165, 230, 0.30)');
-    body.addColorStop(1, 'rgba(30, 90, 150, 0.16)');
+    body.addColorStop(0, 'rgba(236, 242, 250, 0.50)');
+    body.addColorStop(0.55, 'rgba(168, 179, 194, 0.30)');
+    body.addColorStop(1, 'rgba(96, 104, 116, 0.18)');
     g.fillStyle = body;
     g.beginPath();
     // An irregular outline rather than a circle.
@@ -564,7 +578,7 @@
 
     // Soft contour banding.
     for (var b = 1; b <= 3; b++) {
-      g.strokeStyle = 'rgba(150, 225, 255, ' + (0.14 - b * 0.03) + ')';
+      g.strokeStyle = 'rgba(214, 224, 238, ' + (0.14 - b * 0.03) + ')';
       g.lineWidth = 1;
       g.beginPath();
       g.arc(cx, cy, R * (0.30 + b * 0.20), 0, Math.PI * 2);
@@ -679,7 +693,7 @@
 
     // Trails: fade rather than clear, so orbs leave a short tail.
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(6, 8, 12, 0.34)';
+    ctx.fillStyle = 'rgba(5, 5, 6, 0.34)';
     ctx.fillRect(0, 0, this.w, this.h);
 
     if (!this.networkLayers && this.symbols.length) this.buildNetworkSprite();

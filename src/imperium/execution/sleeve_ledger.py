@@ -89,6 +89,12 @@ class SleeveLedger:
     #: same target and trade the difference twice.
     last_run_day: str = ""
     runs: int = 0
+    #: Set once, when equity first reached the arming threshold. Persisted so
+    #: a restart does not re-announce it, and so the sleeve stays armed after
+    #: a drawdown that takes equity back below the threshold -- see
+    #: SectorRunner.consider_arming for why disarming is the wrong move.
+    armed_at_equity: float = 0.0
+    armed_on: str = ""
 
     # -- reading ---------------------------------------------------------
 
@@ -152,6 +158,8 @@ class SleeveLedger:
             "positions": {s: p.as_dict() for s, p in self.positions.items()},
             "last_run_day": self.last_run_day,
             "runs": self.runs,
+            "armed_at_equity": self.armed_at_equity,
+            "armed_on": self.armed_on,
         }
 
     @classmethod
@@ -168,6 +176,8 @@ class SleeveLedger:
             positions=positions,
             last_run_day=str(payload.get("last_run_day") or ""),
             runs=int(payload.get("runs") or 0),
+            armed_at_equity=float(payload.get("armed_at_equity") or 0.0),
+            armed_on=str(payload.get("armed_on") or ""),
         )
 
     @classmethod

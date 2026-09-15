@@ -68,6 +68,15 @@ class SectorTrendConfig:
     #: "next_open" computes after the final close and trades the next morning.
     exec_mode: str = "near_close"
     run_time_et: str = "15:45"
+    #: Account equity at which the sleeve arms itself, or 0 to never.
+    #:
+    #: $200 by default, and the figure is not arbitrary. Alpaca refuses a
+    #: fractional buy under a dollar, and at the default 0.20 allocation a
+    #: $200 account gives the sleeve $40 -- enough for every ETF in the
+    #: universe to clear that floor, including the most volatile. Below about
+    #: $130 the sleeve would silently trade only the calm half of its universe,
+    #: which is a different strategy from the one that was backtested.
+    arm_at_equity: float = 200.0
 
     @property
     def universe_size(self) -> int:
@@ -110,4 +119,5 @@ def from_environment() -> SectorTrendConfig:
             0.0, _number("SECTOR_TREND_REBALANCE_THRESHOLD", 0.25)),
         exec_mode=mode,
         run_time_et=os.environ.get("SECTOR_TREND_RUN_TIME_ET", "15:45").strip(),
+        arm_at_equity=max(0.0, _number("SECTOR_TREND_ARM_AT_EQUITY", 200.0)),
     )

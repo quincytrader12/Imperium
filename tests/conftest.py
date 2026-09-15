@@ -62,6 +62,39 @@ def offline_news(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def offline_fx(monkeypatch):
+    """No test reaches the real exchange-rate service.
+
+    The same rule as ``offline_news`` and for the same reason: the rate comes
+    from a public endpoint on the open internet, and a suite that touches it
+    depends on a stranger's uptime and hits their server on every run. No test
+    reaches it today -- the ones that exercise ``FxDesk`` pass their own
+    transport -- but the guard is here so that the first test which calls
+    ``refresh`` or runs the trading loop cannot quietly start doing so.
+
+    The guard is on ``FxDesk.refresh`` and not on ``httpx``. The first version
+    of this patched ``AsyncClient`` through ``fx.httpx``, which is not a local
+    alias -- it is the httpx module -- so it forced a mock transport into every
+    client the whole program builds, and four tests in two unrelated files
+    started failing. A guard that reaches beyond the thing it is guarding is
+    worse than no guard.
+    """
+    from imperium.venues import fx as fx_mod
+
+    original = fx_mod.FxDesk.refresh
+
+    async def guarded(self):
+        if self.enabled and not self.manual and self.transport is None:
+            raise AssertionError(
+                "a test tried to fetch a live exchange rate; pass a transport "
+                "to FxDesk instead")
+        await original(self)
+
+    monkeypatch.setattr(fx_mod.FxDesk, "refresh", guarded)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def clean_settings_environment():
     """No test may leak a setting into the next one.
 

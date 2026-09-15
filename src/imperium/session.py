@@ -17,6 +17,7 @@ import datetime as dt
 import json
 import logging
 import math
+import os
 import time
 
 import numpy as np
@@ -47,6 +48,7 @@ from imperium.execution.sector_sleeve import (
 )
 from imperium.execution.sleeve_ledger import SleeveLedger, trading_day
 from imperium.execution.capital import ENGINE, Claim, CapitalPlan, divide
+from imperium.venues.fx import FxDesk
 from imperium.strategy import sector_config as sector_cfg
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy import trend as trend_mod
@@ -65,6 +67,15 @@ from imperium.venues.alpaca.filters import format_decimal, to_decimal
 from imperium.venues.registry import VenueSpec
 
 log = logging.getLogger("imperium.session")
+
+
+def _positive_float(raw: str | None) -> float:
+    """A configured number, or zero. Never raises on a typo."""
+    try:
+        value = float(raw) if raw else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value > 0 else 0.0
 
 
 def _bar_ms(value: Any) -> int:
@@ -242,12 +253,22 @@ class TradingSession:
         self.sector = SectorRunner(config=sector_cfg.from_environment(),
                                    ledger=SleeveLedger.load())
         self._sector_task: asyncio.Task[None] | None = None
+        #: A second currency beside the dollar balance. Display
+        #: only -- every decision here stays in dollars.
+        self.fx = FxDesk(
+            os.environ.get("IMPERIUM_SECONDARY_CURRENCY", "ZAR"),
+            manual_rate=_positive_float(
+                os.environ.get("IMPERIUM_FX_RATE")))
+        self._fx_task: asyncio.Task[None] | None = None
         #: How the account is split between the engine and the
-        #: sleeves. Recomputed from equity each tick; the shares
-        #: themselves are fixed at startup, which matters -- a
-        #: share that moved mid-session would look to the
-        #: daily-loss check like a sudden loss and halt the book.
+        #: sleeves. Recomputed from equity each tick.
         self.capital: CapitalPlan = divide(0.0, [])
+        #: The engine's share as the daily-loss reference was last
+        #: measured in. A share that moves mid-session -- which the
+        #: sleeve arming itself does -- re-bases one side of that
+        #: comparison and not the other, and the book halts on a
+        #: loss it never took. See _rebase_daily_loss_reference.
+        self._engine_share: float = 1.0
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
@@ -1119,6 +1140,14 @@ class TradingSession:
         # is turnover. The sleeve reports in the left rail; the cluster stays
         # the scanner's.
 
+    def kick_fx(self) -> None:
+        """Refresh the display currency in the background, never on the loop."""
+        if not self.fx.due():
+            return
+        if self._fx_task is not None and not self._fx_task.done():
+            return
+        self._fx_task = asyncio.create_task(self.fx.refresh())
+
     def kick_news(self) -> None:
         """Start a news refresh in the background, and do not wait for it.
 
@@ -1538,9 +1567,59 @@ class TradingSession:
         """What each sleeve is asking for. The engine does not appear: it takes
         whatever the sleeves leave, so that capital a disabled sleeve is not
         using is always available to something."""
+        # self.sector.enabled, not self.sector.config.enabled.
+        #
+        # The configured flag says what the operator wrote; the property says
+        # whether the sleeve is actually trading, which is also true when it
+        # armed itself on equity. Reading the configured flag here let a
+        # self-armed sleeve trade its 20% while the engine went on sizing
+        # against 100% -- the same hundred-and-twenty-percent double count the
+        # capital divider was written to end, arriving through a new door.
         return [Claim("sector_trend", self.sector.config.allocation,
-                      enabled=self.sector.config.enabled,
+                      enabled=self.sector.enabled,
                       note="Sector Trend sleeve")]
+
+    def _set_daily_loss_reference(self, equity: float) -> None:
+        """Record the day's starting point *and* the share it is measured in.
+
+        The two are one fact. Storing the figure without the share is what let
+        the reference and the current equity drift into different bases, so
+        every site that sets it goes through here.
+        """
+        self.day_start_equity = float(equity)
+        self._engine_share = self.capital.share_for(ENGINE)
+
+    def _rebase_daily_loss_reference(self) -> None:
+        """Keep the daily-loss reference in the base it is compared against.
+
+        ``day_start_equity`` is the engine's share at the start of the day, and
+        ``allocator.equity`` is the engine's share now. That comparison only
+        means anything while the share itself holds still, and it no longer
+        does: the Sector Trend sleeve arms itself the first time equity reaches
+        its threshold, which takes the engine from the whole account to four
+        fifths of it in one tick. Nothing was lost, but the reference was
+        measured in fifths-of-five and the current figure in fifths-of-four, so
+        the check reads a 20% loss against a 4% limit and halts the book --
+        immediately, permanently until the day rolls, and for no reason an
+        operator could find by looking at their positions.
+
+        So when the share moves, the reference moves with it: the same start of
+        day, re-expressed in the share the engine now holds. Written against
+        the share generally rather than against arming specifically, because
+        any future sleeve switching on or off does the same thing.
+        """
+        share = self.capital.share_for(ENGINE)
+        previous = self._engine_share
+        if share <= 0.0 or previous <= 0.0:
+            # Nothing to scale into or out of. Record and wait: rebasing
+            # through zero would either divide by it or wipe the reference.
+            self._engine_share = share
+            return
+        if abs(share - previous) < 1e-9:
+            return
+        if self.day_start_equity > 0:
+            self.day_start_equity *= share / previous
+        self._engine_share = share
 
     def engine_equity(self, account_equity: float | None = None) -> float:
         """The equity the per-symbol strategies may size against.
@@ -1740,7 +1819,20 @@ class TradingSession:
             self._report_unmanaged_equity()
         await self._refresh_account_limits()
         await self._reconcile_book()
+        # Before the split is taken: arming changes the split, and the engine
+        # must be told its new share on the same tick rather than one later.
+        armed = self.sector.consider_arming(self.equity(), trading_day())
+        if armed:
+            self.telemetry.event(Level.WARN, "sector", armed)
+            self.telemetry.pulse("BOOK", "decision",
+                                 "sector trend armed itself on equity", 1.0)
+            # Loud on purpose. A strategy switching itself on is the single
+            # most surprising thing this program can do unattended, and the
+            # operator should hear about it wherever they are.
+            self._pending_notice = f"⚙️ {armed}"
+
         equity = self.engine_equity()
+        self._rebase_daily_loss_reference()
         self.allocator.equity = equity
         # Cash stays the account's real number. The share governs how large a
         # position may be, not how much money exists: a strategy still cannot
@@ -1757,7 +1849,7 @@ class TradingSession:
         self.apply_account_scale(equity)
         self._roll_trading_day(equity)
         if self.day_start_equity <= 0:
-            self.day_start_equity = equity
+            self._set_daily_loss_reference(equity)
         if self.allocator.check_daily_loss(self.day_start_equity) and self.running:
             self.telemetry.pulse("BOOK", "halt", self.allocator.halt_reason, 1.0)
             # The book stopping itself is the other thing worth a buzz. Fired
@@ -1833,7 +1925,8 @@ class TradingSession:
             return
         first = self._trading_day == ""
         self._trading_day = today
-        self.day_start_equity = equity if equity > 0 else self.day_start_equity
+        if equity > 0:
+            self._set_daily_loss_reference(equity)
         self._seeded_from_account = self._seeded_from_account and not first
         if first:
             return
@@ -1961,8 +2054,8 @@ class TradingSession:
             self._seeded_from_account = True
             # On the engine's own basis, like every other number
             # the daily-loss check touches.
-            self.day_start_equity = self.engine_equity(
-                self.account_equity or self.account_cash)
+            self._set_daily_loss_reference(self.engine_equity(
+                self.account_equity or self.account_cash))
             self.telemetry.event(
                 Level.INFO, "account",
                 f"simulated book seeded from the real account: "
@@ -1992,6 +2085,7 @@ class TradingSession:
                     # latency must never sit on this loop.
                     self.kick_news()
                     self.kick_sector_sleeve()
+                    self.kick_fx()
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
                 # what has not been looked at yet.
@@ -2176,7 +2270,7 @@ class TradingSession:
 
         for state in self.allocator.states.values():
             state.current_weight = 0.0
-        self.day_start_equity = self.engine_equity()
+        self._set_daily_loss_reference(self.engine_equity())
         self.status_message = (f"running in {self.broker.mode.value}"
                                if self.running else "stopped")
 
@@ -2311,6 +2405,9 @@ class TradingSession:
             "sector": self.sector.panel(),
             # How the one account is divided between them.
             "capital": self.capital.as_dict(),
+            # A second currency for the balance. Never used for
+            # any decision; see imperium.venues.fx.
+            "fx": self.fx.panel(),
             # Why the book is not trading, counted. See _blockers.
             "blockers": self._blockers(),
             "universe_scan": {

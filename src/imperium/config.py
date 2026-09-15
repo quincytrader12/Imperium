@@ -89,6 +89,21 @@ SETTINGS_TEMPLATE = """\
 # SECTOR_TREND_EXEC_MODE=near_close
 # SECTOR_TREND_RUN_TIME_ET=15:45
 # SECTOR_TREND_UNIVERSE=XLF,XLK,XLE,XLV,XLI,XBI,XLU,XLP,XLY,KRE,XLB,XLC,XRT,XOP,XLRE,XHB,KBE,XME,KIE
+
+# Equity at which the sleeve switches itself on, or 0 to never. It arms once
+# and never disarms -- switching off a sleeve that holds positions would leave
+# them with nobody trailing their stops. $200 is where every ETF in the
+# universe clears Alpaca's $1 minimum order at the default allocation.
+# SECTOR_TREND_ARM_AT_EQUITY=200
+
+# ------------------------------------------------------------ second currency
+# Show the account balance in a second currency beside the dollar figure.
+# Display only: every decision this program makes stays in dollars. Blank
+# disables it. The rate comes from the ECB and is shown with its age; set
+# IMPERIUM_FX_RATE to pin it by hand instead of fetching.
+
+# IMPERIUM_SECONDARY_CURRENCY=ZAR
+# IMPERIUM_FX_RATE=
 """
 
 #: Settings this file is allowed to define.
@@ -106,6 +121,9 @@ SETTABLE = frozenset({
     "SECTOR_TREND_REBALANCE_THRESHOLD",
     "SECTOR_TREND_EXEC_MODE",
     "SECTOR_TREND_RUN_TIME_ET",
+    "SECTOR_TREND_ARM_AT_EQUITY",
+    "IMPERIUM_SECONDARY_CURRENCY",
+    "IMPERIUM_FX_RATE",
 })
 
 

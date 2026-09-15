@@ -113,6 +113,36 @@
       eq.textContent = '—';
       eq.title = acct.error || 'attach a key to read the account balance';
     }
+    /* The same balance in the operator's own currency.
+     *
+     * Never shown without the rate that produced it and how old that rate is.
+     * A number in rands with nothing behind it is a claim this program cannot
+     * support: the rate moves, the last fetch may have failed hours ago, and
+     * an operator reading a stale conversion as current is worse off than one
+     * reading dollars. Stale rates are marked rather than hidden -- an old
+     * rate is still useful if you know it is old. */
+    var fx = s.fx || {};
+    var alt = $('h-equity-alt');
+    if (alt) {
+      var show = fx.enabled && fx.known && acct.known;
+      alt.hidden = !show;
+      if (show) {
+        var converted = acct.equity * fx.rate;
+        alt.textContent = '≈ ' + fx.quote + ' ' +
+          converted.toLocaleString(undefined, {minimumFractionDigits: 2,
+                                               maximumFractionDigits: 2}) +
+          (fx.stale ? ' (stale)' : '');
+        alt.className = 'v-alt num' + (fx.stale ? ' warn' : '');
+        alt.title = '1 USD = ' + fx.rate + ' ' + fx.quote +
+          (fx.source ? ' · ' + fx.source : '') +
+          (fx.age !== null && fx.age !== undefined
+            ? ' · ' + (fx.age < 3600 ? Math.round(fx.age / 60) + 'm'
+                                     : Math.round(fx.age / 3600) + 'h') + ' old'
+            : '') +
+          '\nDisplay only — every decision this terminal makes is in dollars.';
+      }
+    }
+
     var book = $('h-book');
     /* Shown only when it says something the headline does not. */
     var drift = acct.known && acct.simulated &&
@@ -754,7 +784,7 @@
   };
   var REGIME_COLOR = {
     trending: '#35d69b', mean_reverting: '#c678f0', indeterminate: '#46536a',
-    contradicted: '#e8b444', warming_up: '#35a7ff'
+    contradicted: '#e8b444', warming_up: '#c3cbd6'
   };
 
   function renderCensus(s) {
@@ -795,13 +825,15 @@
 
     var enough = (x.cohort || 0) >= (x.minimum_cohort || 0);
     setHTML($('xs-grid'), cell('coins', (x.cohort || 0) + ' / ' + (x.minimum_cohort || 0),
-           enough ? 'good' : 'warn', 'ranked / needed') +
+           enough ? 'good' : 'warn', 'have / need') +
       // The funnel: listed by the venue, carried by the cohort, holding
       // daily bars. Where the chain narrows is the fault.
       cell('funnel', (x.listed || 0) + '\u2192' + (x.resident || 0) +
-           '\u2192' + (x.with_history || 0), '', 'priced / resident / history') +
+           // Three words, not five. Three cells share a 300px rail and the
+           // longer wording overlapped its neighbour into "pehisttoryof rank".
+           '\u2192' + (x.with_history || 0), '', 'listed \u2192 held') +
       cell('premium', (x.beta_bps || 0).toFixed(2) + 'bp',
-           x.credible ? 'good' : '', 'per unit of rank') +
+           x.credible ? 'good' : '', 'per rank') +
       cell('t-stat', ((x.t_stat || 0) >= 0 ? '+' : '') + (x.t_stat || 0).toFixed(2),
            Math.abs(x.t_stat || 0) >= 2 ? 'good' : '',
            x.credible ? 'credible' : 'not yet') +
@@ -1043,7 +1075,7 @@
            t.day_trades_available ? 'intraday open' : 'intraday closed') +
       cell('options', o.affordable ? 'reachable' : 'need $' +
            fmtNum(o.min_equity, 0), '',
-           '1 contract = ' + o.contract_multiplier + ' sh');
+           '\u00d7' + o.contract_multiplier + ' sh/contract');
 
     var why = $('tr-why');
     if (!t.day_trades_available) {

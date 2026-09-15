@@ -340,3 +340,112 @@ def test_the_capital_panel_shows_how_the_account_is_divided():
         assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
     assert "oversubscribed" in APP_JS
     assert "c.refused" in APP_JS, "a refused claim is never surfaced"
+
+
+def _cell_sub_labels(source: str) -> list[str]:
+    """The fourth argument of every cell(...) call that passes a literal.
+
+    Parsed by matching parentheses rather than by regex: the arguments contain
+    nested calls and their own brackets, and a regex that tried to span them
+    either stopped at the first ")" or ran past the end of the call. Arguments
+    that are not plain string literals -- a ternary, a variable -- are skipped;
+    this measures the wording that is written down.
+    """
+    labels: list[str] = []
+    start = 0
+    while True:
+        at = source.find("cell(", start)
+        if at < 0:
+            return labels
+        # A "cell(" that is part of a longer identifier is not a cell call.
+        if at and (source[at - 1].isalnum() or source[at - 1] in "_$."):
+            start = at + 5
+            continue
+        depth, i, args, current = 0, at + 4, [], []
+        quote = ""
+        while i < len(source):
+            ch = source[i]
+            if quote:
+                if ch == "\\":
+                    current.append(source[i:i + 2])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+                current.append(ch)
+            elif ch in "\"'":
+                quote = ch
+                current.append(ch)
+            elif ch in "([{":
+                depth += 1
+                if depth > 1:
+                    current.append(ch)
+            elif ch in ")]}":
+                depth -= 1
+                if depth == 0:
+                    args.append("".join(current).strip())
+                    break
+                current.append(ch)
+            elif ch == "," and depth == 1:
+                args.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+        start = i + 1
+        if len(args) < 4:
+            continue
+        sub = args[3]
+        literal = _string_literal(sub)
+        if literal is not None:
+            labels.append(literal)
+
+
+def _string_literal(text: str) -> str | None:
+    """The value of `text` if it is one whole string literal, else None.
+
+    Starting and ending with a quote is not enough: `'a ' + x + ' b'` does
+    too, and reading it as a literal measured the JavaScript rather than the
+    words on screen. The closing quote has to be the last character.
+    """
+    if len(text) < 2 or text[0] not in "\"'" or text[-1] != text[0]:
+        return None
+    quote, i = text[0], 1
+    while i < len(text) - 1:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return None
+        i += 1
+    return text[1:-1]
+
+
+def test_the_small_panel_sub_labels_fit_the_rail_they_share():
+    """Prevents the defect that read "pehisttoryof rank" on screen.
+
+    The left rail is 300px and its grids put three cells across it, so each
+    sub-label has roughly a third of that. Longer wording does not wrap, it
+    overlaps its neighbour — and an overlapping label is worse than a terse
+    one, because it is unreadable rather than merely brief.
+
+    The budget: 300px of rail, less the panel's padding, over three cells is
+    about 90px each; at the 10px the sub-label is set in that is roughly 18
+    characters. Measured, not guessed — the three labels that overlapped were
+    20, 22 and 26 characters and the ones beside them at 17 did not.
+    """
+    labels = _cell_sub_labels(APP_JS)
+    assert len(labels) > 10, (
+        f"the parser found only {len(labels)} sub-labels; it has stopped "
+        f"reading the file it is meant to be checking")
+    offenders = [label for label in labels if len(label) > 18]
+    assert not offenders, (
+        f"sub-labels too long for the 300px rail: {offenders}")
+
+
+def test_the_theme_states_its_contrast_reasoning():
+    """The colours here were solved against a measured background rather than
+    picked, and the file has to say so — otherwise the next person to adjust
+    them by eye undoes it without knowing."""
+    assert "4.5:1" in STYLES or "4.5" in STYLES
+    assert "--dimmer" in STYLES

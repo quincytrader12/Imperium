@@ -7,6 +7,7 @@ the bot trading without stopping the bot.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 
 import pytest
@@ -42,6 +43,12 @@ async def test_the_daily_loss_halt_does_not_outlive_the_day_that_caused_it():
     session.broker = PaperBroker(registry.get(registry.DEFAULT_VENUE))
     session.market_clock = _at(4)
     session.broker.cash = __import__("decimal").Decimal("10000")
+    # The sleeve off, so the engine holds the whole account and the figures
+    # below are the account's. What arming does to this reference is its own
+    # problem with its own test -- see test_auto_arm; mixing the two here
+    # would leave this one silently measuring a fraction of what it names.
+    session.sector.config = dataclasses.replace(
+        session.sector.config, arm_at_equity=0.0)
 
     await session._tick()
     assert session.day_start_equity == pytest.approx(10_000.0)
