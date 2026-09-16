@@ -39,6 +39,7 @@ from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
 from imperium.notify import briefing as brief_mod
+from imperium.notify import greeting as greeting_mod
 from imperium.notify import telegram as tg
 from imperium.notify import voice as voice_mod
 from imperium.strategy import crosssection as xs_mod
@@ -272,6 +273,13 @@ class TradingSession:
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
+        #: The last greeting, held so the voice endpoint can speak exactly
+        #: what the screen was shown rather than drawing a second quote.
+        self.opening: greeting_mod.Opening | None = None
+        #: Which quote was used last, so Start twice in a row cannot say the
+        #: same thing twice. In memory only: a repeat across a restart is not
+        #: the repeat that reads as a bug.
+        self._last_quote: int = -1
         self.market_clock: MarketClock = MarketClock()
         self.universe_scanned_at: float = 0.0
         #: How wide the last sweep actually looked, and how much of it carried
@@ -2134,6 +2142,12 @@ class TradingSession:
         self.running = True
         self.started_at = time.time()
         self.lamps.session = "ok"
+        # Drawn before any of the slow startup work below, so the greeting the
+        # endpoint returns is ready the moment the button is released rather
+        # than after a universe scan.
+        self.opening = greeting_mod.opening(mode=self.broker.mode.value,
+                                            previous=self._last_quote)
+        self._last_quote = self.opening.index
         self.keep_awake.acquire()
         self.status_message = f"running in {self.broker.mode.value}"
         self.telemetry.event(Level.GOOD, "session",

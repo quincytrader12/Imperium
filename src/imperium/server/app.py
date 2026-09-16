@@ -479,6 +479,28 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         return Response(content=audio, media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/voice/greeting")
+    async def voice_greeting() -> Response:
+        """Speak the greeting drawn at the last Start.
+
+        Deliberately not an endpoint that speaks arbitrary text. The browser
+        asks for *the* greeting and the server decides what that is, so a page
+        on this machine cannot run up an ElevenLabs bill a character at a time,
+        and the spoken line is guaranteed to be the one already on screen.
+        """
+        session = get_session()
+        if session.opening is None:
+            raise HTTPException(409, detail="the session has not been started")
+        if not session.speaker.enabled:
+            raise HTTPException(
+                400, detail="no ElevenLabs key and voice are set up yet")
+        audio = await session.speaker.speak(session.opening.spoken)
+        if audio is None:
+            raise HTTPException(
+                502, detail=session.speaker.last_error or "speech failed")
+        return Response(content=audio, media_type="audio/mpeg",
+                        headers={"Cache-Control": "no-store"})
+
     @app.post("/api/ask")
     async def ask_question(body: AskRequest) -> JSONResponse:
         """Answer a question from the snapshot. Text only, no quota spent.
@@ -642,8 +664,12 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
 
     @app.post("/api/session/start")
     async def start_session() -> JSONResponse:
-        await get_session().start()
-        return JSONResponse({"running": True})
+        session = get_session()
+        await session.start()
+        # The greeting comes back with the response rather than arriving on the
+        # next snapshot, so it is on screen the instant the button is released.
+        opening = session.opening.as_dict() if session.opening else None
+        return JSONResponse({"running": True, "opening": opening})
 
     @app.post("/api/session/stop")
     async def stop_session() -> JSONResponse:

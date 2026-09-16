@@ -600,6 +600,30 @@ If the new kind means something has gone wrong, add it to `ALERT_KINDS` in
 `MAX_PROCESSES` in `orb.js` is a GLSL array bound, compiled into the shaders
 as a `#define`. It is 8; past that, raise it there and nowhere else.
 
+### Pressing Start
+
+It greets you by name and reads a trading quote — out loud if a voice is
+connected, and on screen either way, because the voice is optional and this
+should not be. The line fades after fourteen seconds: a quote still sitting on
+the header an hour later is furniture.
+
+The mode is named as part of it. "Trading live" and "Dry run, no orders will
+be placed" are one glance apart in the header and a completely different fact
+about the next hour, and Start is the moment that distinction matters most.
+
+**The quotes are attributed, and correctly.** Trading quotations circulate in a
+state of near-total attribution collapse — the most famous line in the file is
+given to Keynes almost everywhere and he never wrote it; it is A. Gary
+Shilling's, and the terminal says so when it reads it. A program whose whole
+claim is that it reports what it measured cannot open by passing on something
+it did not check. A test asserts every quote names who said it.
+
+It never says the same quote twice in a row. A quote coming round again next
+week is a rotation; the same one twice running is a program that is not really
+choosing.
+
+Set `IMPERIUM_OPERATOR` in `settings.txt` to change the name.
+
 ### Asking it out loud
 
 Press **Ask**, say a question, and it answers in the same voice as the
@@ -699,6 +723,7 @@ so a typo costs a setting rather than being mistaken for one that worked.
 | `SECTOR_TREND_ARM_AT_EQUITY` | `200` | Equity at which the sleeve switches itself on. `0` never. |
 | `IMPERIUM_SECONDARY_CURRENCY` | `ZAR` | A second currency beside the dollar balance. Display only. |
 | `IMPERIUM_FX_RATE` | *(fetched)* | Pin the rate by hand instead of fetching it. |
+| `IMPERIUM_OPERATOR` | `Mr Gininda` | What it calls you when you press Start. |
 
 ### Arming itself
 

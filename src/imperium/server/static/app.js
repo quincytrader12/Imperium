@@ -1441,7 +1441,71 @@
     });
   }
 
-  $('btn-start').onclick = function () { post('/api/session/start').catch(alertErr); };
+  /* ---------- the greeting ----------
+   *
+   * Shown as well as spoken. The voice is optional -- there may be no
+   * ElevenLabs key, the browser may refuse to play audio, the network may be
+   * down -- and a greeting that only exists as sound is a greeting most
+   * operators never get. The text is the feature; the speech is the flourish.
+   */
+  var greetingAudio = null;
+
+  function showGreeting(opening) {
+    var host = $('greeting');
+    if (!host || !opening) return;
+    var parts = ['<span class="g-hello"></span>',
+                 '<span class="g-quote"></span>',
+                 '<span class="g-who"></span>'];
+    if (opening.note) parts.push('<span class="g-note"></span>');
+    setHTML(host, parts.join(''));
+    /* textContent, not interpolation: these strings come from the server, and
+     * a quote with an ampersand in it should read as an ampersand rather than
+     * as the start of an entity. */
+    host.querySelector('.g-hello').textContent = opening.hello;
+    host.querySelector('.g-quote').textContent = '\u201c' + opening.quote + '\u201d';
+    host.querySelector('.g-who').textContent = opening.who ? '\u2014 ' + opening.who : '';
+    if (opening.note) host.querySelector('.g-note').textContent = opening.note + '.';
+    host.hidden = false;
+
+    /* It fades rather than staying. The greeting is for the moment the book
+     * starts; a quote still sitting on the header an hour later is furniture. */
+    clearTimeout(host._timer);
+    host.classList.remove('leaving');
+    host._timer = setTimeout(function () {
+      host.classList.add('leaving');
+      host._timer = setTimeout(function () { host.hidden = true; }, 900);
+    }, 14000);
+  }
+
+  function speakGreeting() {
+    /* Silently skipped when no voice is connected. Start must never fail
+     * because the flourish did. */
+    if (!$('btn-speak') || $('btn-speak').disabled) return;
+    fetch('/api/voice/greeting', { method: 'POST' })
+      .then(function (r) { return r.ok ? r.blob() : null; })
+      .then(function (blob) {
+        if (!blob) return;
+        if (greetingAudio) {
+          greetingAudio.pause();
+          URL.revokeObjectURL(greetingAudio.src);
+        }
+        greetingAudio = new Audio(URL.createObjectURL(blob));
+        /* Pressing Start is the user gesture that lets this play at all, so
+         * autoplay policy is satisfied. A rejection here is still not an
+         * error worth showing: the words are already on screen. */
+        return greetingAudio.play().catch(function () {});
+      })
+      .catch(function () {});
+  }
+
+  $('btn-start').onclick = function () {
+    post('/api/session/start')
+      .then(function (reply) {
+        showGreeting(reply && reply.opening);
+        speakGreeting();
+      })
+      .catch(alertErr);
+  };
   $('btn-stop').onclick = function () { post('/api/session/stop').catch(alertErr); };
 
   $('sel-mode').onchange = function (e) {

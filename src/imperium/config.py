@@ -104,6 +104,12 @@ SETTINGS_TEMPLATE = """\
 
 # IMPERIUM_SECONDARY_CURRENCY=ZAR
 # IMPERIUM_FX_RATE=
+
+# ------------------------------------------------------------------ greeting
+# What the terminal calls you when you press Start. It says this and then a
+# trading quote, out loud if a voice is connected and on screen either way.
+
+# IMPERIUM_OPERATOR=Mr Gininda
 """
 
 #: Settings this file is allowed to define.
@@ -124,6 +130,7 @@ SETTABLE = frozenset({
     "SECTOR_TREND_ARM_AT_EQUITY",
     "IMPERIUM_SECONDARY_CURRENCY",
     "IMPERIUM_FX_RATE",
+    "IMPERIUM_OPERATOR",
 })
 
 
