@@ -326,7 +326,14 @@ def test_the_sector_sleeve_panel_is_rendered_and_says_when_it_is_off():
     assert "renderSector(s)" in APP_JS, "the sector panel is never rendered"
     for element in ("st-note", "st-grid", "st-holdings", "st-why"):
         assert 'id="' + element + '"' in INDEX, f"{element} is not on the page"
-    assert "SECTOR_TREND_ENABLED" in APP_JS
+    # It used to tell the operator to edit SECTOR_TREND_ENABLED. There is an
+    # arming control in the panel now, so the page must offer that instead of
+    # sending them to a file and a restart.
+    assert "SECTOR_TREND_ENABLED" not in APP_JS, (
+        "the panel still sends the operator to a settings file it no longer "
+        "needs them to edit")
+    assert 'id="st-arm"' in INDEX, "the arming control is not on the page"
+    assert "/api/sector/arm" in APP_JS and "/api/sector/disarm" in APP_JS
     assert "keeps its own book" in APP_JS.lower() or "its own book" in APP_JS
 
 

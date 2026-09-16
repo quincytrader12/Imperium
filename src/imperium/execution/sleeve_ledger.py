@@ -95,6 +95,12 @@ class SleeveLedger:
     #: SectorRunner.consider_arming for why disarming is the wrong move.
     armed_at_equity: float = 0.0
     armed_on: str = ""
+    #: How it came to be armed: "equity" when the threshold was reached,
+    #: "hand" when the operator pressed the button. Worth recording because
+    #: the two answer different questions later -- a sleeve that armed itself
+    #: is the program doing something unattended, and a sleeve armed by hand
+    #: is a decision somebody made and may not remember making.
+    armed_by: str = ""
 
     # -- reading ---------------------------------------------------------
 
@@ -160,6 +166,7 @@ class SleeveLedger:
             "runs": self.runs,
             "armed_at_equity": self.armed_at_equity,
             "armed_on": self.armed_on,
+            "armed_by": self.armed_by,
         }
 
     @classmethod
@@ -178,6 +185,7 @@ class SleeveLedger:
             runs=int(payload.get("runs") or 0),
             armed_at_equity=float(payload.get("armed_at_equity") or 0.0),
             armed_on=str(payload.get("armed_on") or ""),
+            armed_by=str(payload.get("armed_by") or ""),
         )
 
     @classmethod

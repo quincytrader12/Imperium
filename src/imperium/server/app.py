@@ -36,6 +36,7 @@ from imperium.notify import ask as ask_mod
 from imperium.notify import telegram, voice
 from imperium.execution.broker import LIVE_CONFIRMATION_PHRASE, Mode, ModeSwitchRefused
 from imperium.security.credentials import CredentialError, CredentialStore
+from imperium.execution.sleeve_ledger import trading_day
 from imperium.session import TradingSession
 from imperium.telemetry.streams import Level
 from imperium.venues import registry
@@ -122,6 +123,13 @@ class VoiceKeyRequest(BaseModel):
 class VoiceChoiceRequest(BaseModel):
     voice_id: str = Field(min_length=1, max_length=128)
     voice_name: str = Field(default="", max_length=128)
+
+
+class ArmRequest(BaseModel):
+    # Set once the operator has been told what arming below the threshold
+    # costs. The server asks rather than the page, so the warning cannot be
+    # skipped by calling the endpoint directly.
+    acknowledged: bool = False
 
 
 class AskRequest(BaseModel):
@@ -478,6 +486,56 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                 502, detail=session.speaker.last_error or "speech failed")
         return Response(content=audio, media_type="audio/mpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/sector/arm")
+    async def sector_arm(body: ArmRequest) -> JSONResponse:
+        """Switch the Sector Trend sleeve on now.
+
+        Allowed below the arming threshold, because it is the operator's money
+        and their call -- but not silently. An undersized sleeve cannot afford
+        its most volatile names, and the ones it drops are exactly the ones
+        the strategy's returns come from, so the first call gets a refusal
+        explaining that and the second one carries ``acknowledged``.
+        """
+        session = get_session()
+        sector = session.sector
+        if sector.enabled:
+            return JSONResponse({"armed": True, "note": "already armed"})
+
+        equity = session.arming_equity()
+        if equity <= 0:
+            raise HTTPException(
+                409, detail="the account balance is not known yet, so there "
+                            "is nothing to size a sleeve against. Attach a "
+                            "key first.")
+
+        threshold = float(sector.config.arm_at_equity or 0.0)
+        if threshold > 0 and equity < threshold and not body.acknowledged:
+            ceiling = sector.volatility_ceiling(equity)
+            raise HTTPException(409, detail=(
+                f"${equity:,.2f} is under the ${threshold:,.0f} this sleeve "
+                f"wants. At this balance it can only afford ETFs quieter than "
+                f"{ceiling * 100:.2f}% a day, and the ones it would drop are "
+                f"the most volatile -- which is where the strategy's return "
+                f"comes from. It would be trading the calm half of its "
+                f"universe, which is a different strategy with no backtest "
+                f"behind it. Arm anyway to accept that."))
+
+        message = sector.arm_by_hand(equity, trading_day())
+        if message:
+            session.telemetry.event(Level.WARN, "sector", message)
+        return JSONResponse({"armed": True, "note": message})
+
+    @app.post("/api/sector/disarm")
+    async def sector_disarm() -> JSONResponse:
+        """Switch it off. Refused while it is holding anything."""
+        session = get_session()
+        refusal = session.sector.disarm()
+        if refusal:
+            raise HTTPException(409, detail=refusal)
+        session.telemetry.event(Level.INFO, "sector",
+                                "Sector Trend disarmed by hand")
+        return JSONResponse({"armed": False})
 
     @app.post("/api/voice/greeting")
     async def voice_greeting() -> Response:

@@ -318,14 +318,85 @@ class SectorRunner:
 
         self.ledger.armed_at_equity = float(account_equity)
         self.ledger.armed_on = day
+        self.ledger.armed_by = "equity"
         self.ledger.save()
         sleeve = self.config.sleeve_equity(account_equity)
         return (f"Sector Trend has armed itself: equity reached "
                 f"${account_equity:,.2f}, past the ${threshold:,.0f} "
                 f"threshold. It now trades {self.config.universe_size} sector "
                 f"ETFs on ${sleeve:,.2f} of its own capital, once a day. "
-                f"The other strategies lose that slice. To stop it, set "
-                f"SECTOR_TREND_ARM_AT_EQUITY=0 in settings.txt and restart.")
+                f"The other strategies lose that slice. Disarm it in the "
+                f"Sector trend panel while it is holding nothing.")
+
+    def arm_by_hand(self, account_equity: float, day: str) -> str:
+        """Arm it now, because the operator said so.
+
+        Separate from ``consider_arming`` rather than a flag on it: one is the
+        program deciding and the other is a person deciding, they are recorded
+        differently, and only one of them is allowed to happen below the
+        threshold.
+        """
+        if self.enabled:
+            return ""
+        self.ledger.armed_at_equity = float(account_equity)
+        self.ledger.armed_on = day
+        self.ledger.armed_by = "hand"
+        self.ledger.save()
+        sleeve = self.config.sleeve_equity(account_equity)
+        return (f"Sector Trend armed by hand at ${account_equity:,.2f}. It "
+                f"now trades {self.config.universe_size} sector ETFs on "
+                f"${sleeve:,.2f} of its own capital, once a day, and the "
+                f"other strategies lose that slice.")
+
+    def disarm(self) -> str:
+        """Switch it off. Refused while it is holding anything.
+
+        The one-way rule was never about arming being sacred -- it was about
+        what disarming does to open positions. A sleeve switched off mid-book
+        leaves its ETFs sitting there with nobody trailing their stops and
+        nothing left to close them, which is worse than either state on its
+        own. Flat, there is nothing to abandon, so there is nothing to
+        protect and the operator can have the switch.
+
+        Returns "" on success, or the reason it was refused.
+        """
+        held = self.ledger.longs()
+        if held:
+            return (f"Sector Trend is holding {len(held)} position"
+                    f"{'' if len(held) == 1 else 's'} "
+                    f"({', '.join(held[:4])}"
+                    f"{', and more' if len(held) > 4 else ''}). Disarming now "
+                    f"would leave them with nobody trailing their stops. Wait "
+                    f"for it to close them, or close them yourself first.")
+        if self.config.enabled:
+            return ("Sector Trend is switched on in settings.txt. Set "
+                    "SECTOR_TREND_ENABLED=false there and restart; a button "
+                    "cannot overrule a file the operator wrote.")
+        self.ledger.armed_at_equity = 0.0
+        self.ledger.armed_on = ""
+        self.ledger.armed_by = ""
+        self.ledger.save()
+        return ""
+
+    def arming_progress(self, account_equity: float) -> dict[str, Any]:
+        """How close the account is to the threshold that arms this.
+
+        Shown as a gauge rather than left implicit. The sleeve switching
+        itself on is the most surprising thing this program does unattended,
+        and a bar creeping toward a line is the difference between that being
+        a surprise and being something the operator watched coming.
+        """
+        threshold = float(self.config.arm_at_equity or 0.0)
+        equity = max(0.0, float(account_equity))
+        return {
+            "threshold": threshold,
+            "equity": round(equity, 2),
+            "fraction": round(min(1.0, equity / threshold), 4)
+            if threshold > 0 else 0.0,
+            "short_by": round(max(0.0, threshold - equity), 2)
+            if threshold > 0 else 0.0,
+            "watching": threshold > 0 and not self.enabled,
+        }
 
     def due(self, day: str) -> bool:
         """Whether today's run still needs to happen."""
@@ -391,8 +462,14 @@ class SectorRunner:
                 position.stop = max(position.stop, stop) \
                     if math.isfinite(position.stop) else stop
 
-    def panel(self) -> dict[str, Any]:
-        """What the terminal shows about this sleeve."""
+    def panel(self, account_equity: float = 0.0) -> dict[str, Any]:
+        """What the terminal shows about this sleeve.
+
+        Takes the account balance because the arming gauge is about the
+        account rather than about the sleeve: the sleeve has no capital at all
+        until it arms, so it cannot answer "how close are we" from anything it
+        owns.
+        """
         held = self.ledger.longs()
         result = self.last_plan
         return {
@@ -401,6 +478,11 @@ class SectorRunner:
             "arm_at_equity": self.config.arm_at_equity,
             "armed_on": self.ledger.armed_on,
             "armed_at_equity": round(self.ledger.armed_at_equity, 2),
+            "armed_by": self.ledger.armed_by,
+            # Disarming is refused while it holds anything, so the button can
+            # say why before it is pressed rather than after.
+            "can_disarm": self.enabled and not self.ledger.longs()
+                          and not self.config.enabled,
             "allocation": self.config.allocation,
             "universe": len(self.config.universe),
             "holding": len(held),
@@ -419,4 +501,34 @@ class SectorRunner:
             "last_error": self.last_error,
             "max_leverage": self.config.max_leverage,
             "exec_mode": self.config.exec_mode,
+            "arming": self.arming_progress(account_equity),
+            # The volatility ceiling this balance can reach. Below the
+            # threshold the sleeve is too small for its most volatile names to
+            # clear the venue's one-dollar minimum, and the operator should see
+            # that before arming rather than discover it as a run that places
+            # eight orders out of nineteen.
+            "vol_ceiling": self.volatility_ceiling(account_equity),
         }
+
+    def volatility_ceiling(self, account_equity: float) -> float:
+        """The daily sigma above which a symbol is too small to order, as a
+        fraction. Zero when the sleeve has no capital at all.
+
+        Exact, not estimated. Sizing is ``w = (target_vol / N) / sigma``, so a
+        position is worth ``sleeve * target_vol / (N * sigma)`` and clears the
+        venue's one-dollar floor only while
+        ``sigma <= sleeve * target_vol / N``.
+
+        This is the number that makes a small sleeve dangerous rather than
+        merely modest. Weight falls as volatility rises, so the symbols priced
+        out first are the most volatile ones -- an undersized sleeve does not
+        trade a smaller version of this strategy, it trades the calm half of
+        it, which is a different strategy with different statistics and no
+        backtest behind it.
+        """
+        sleeve = self.config.sleeve_equity(account_equity)
+        universe = max(1, self.config.universe_size)
+        if sleeve <= 0 or self.config.target_vol <= 0:
+            return 0.0
+        return sleeve * self.config.target_vol / (universe
+                                                  * MIN_FRACTIONAL_NOTIONAL)

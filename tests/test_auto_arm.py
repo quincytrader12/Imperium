@@ -51,8 +51,10 @@ def test_the_announcement_says_what_changed_and_how_to_stop_it():
     assert "$250.00" in message and "$200" in message
     assert "own capital" in message
     assert "other strategies lose that slice" in message
-    assert "SECTOR_TREND_ARM_AT_EQUITY=0" in message
-    assert "settings.txt" in message
+    # It used to say "set SECTOR_TREND_ARM_AT_EQUITY=0 and restart".
+    # There is a Disarm button in that panel now, so pointing at a
+    # file would be sending the operator the long way round.
+    assert "Disarm" in message and "panel" in message
 
 
 def test_it_announces_once_and_not_on_every_tick():
@@ -284,3 +286,216 @@ def test_the_panel_distinguishes_configured_from_self_armed():
     assert panel["configured"] is False
     assert panel["armed_on"] == "2026-09-15"
     assert panel["armed_at_equity"] == pytest.approx(300.0)
+
+
+# -- arming from the panel ---------------------------------------------------
+
+
+def test_arming_by_hand_records_that_a_person_did_it():
+    """"It armed itself" and "somebody armed it" are different facts.
+
+    A sleeve that switched itself on is the program acting unattended; one
+    armed by hand is a decision a person made and may not remember making. The
+    panel says which, so neither has to be guessed at later.
+    """
+    runner = _runner()
+    assert runner.arm_by_hand(143.20, "2026-09-16")
+    assert runner.enabled is True
+    assert runner.ledger.armed_by == "hand"
+    assert runner.ledger.armed_at_equity == pytest.approx(143.20)
+
+
+def test_arming_by_hand_below_the_threshold_is_allowed():
+    """It is the operator's money. The warning is the server's job, not a
+    refusal."""
+    runner = _runner(threshold=200.0)
+    assert runner.arm_by_hand(50.0, "2026-09-16")
+    assert runner.enabled is True
+
+
+def test_arming_twice_by_hand_does_nothing_the_second_time():
+    runner = _runner()
+    first = runner.arm_by_hand(143.20, "2026-09-16")
+    second = runner.arm_by_hand(999.0, "2026-09-17")
+    assert first and not second
+    assert runner.ledger.armed_at_equity == pytest.approx(143.20)
+
+
+def test_disarming_is_refused_while_it_holds_anything():
+    """The whole reason arming was one-way.
+
+    A sleeve switched off mid-book leaves its ETFs sitting there with nobody
+    trailing their stops and nothing left to close them, which is worse than
+    either state on its own.
+    """
+    runner = _runner()
+    runner.arm_by_hand(400.0, "2026-09-16")
+    runner.ledger.open_position("XLF", quantity=2.0, price=40.0,
+                                stop=38.0, day="2026-09-16")
+
+    refusal = runner.disarm()
+    assert refusal
+    assert "XLF" in refusal
+    assert "trailing their stops" in refusal
+    assert runner.enabled is True, "it disarmed anyway"
+
+
+def test_disarming_works_once_it_is_flat():
+    runner = _runner()
+    runner.arm_by_hand(400.0, "2026-09-16")
+    assert runner.disarm() == ""
+    assert runner.enabled is False
+    assert runner.ledger.armed_by == ""
+
+
+def test_a_button_cannot_overrule_the_settings_file():
+    """Somebody who wrote SECTOR_TREND_ENABLED=true meant it, and a control in
+    a web page that silently undid a file they edited would be the program
+    disagreeing with its own configuration."""
+    runner = SectorRunner(config=SectorTrendConfig(enabled=True),
+                          ledger=SleeveLedger())
+    refusal = runner.disarm()
+    assert "settings.txt" in refusal
+    assert runner.enabled is True
+
+
+def test_the_arming_gauge_measures_the_account_not_the_sleeve():
+    """The sleeve has no capital until it arms, so it cannot answer "how close
+    are we" from anything it owns."""
+    runner = _runner(threshold=200.0)
+    progress = runner.arming_progress(143.20)
+    assert progress["threshold"] == 200.0
+    assert progress["equity"] == pytest.approx(143.20)
+    assert progress["fraction"] == pytest.approx(0.716)
+    assert progress["short_by"] == pytest.approx(56.80)
+    assert progress["watching"] is True
+
+    # Past the line it reads full rather than over-full.
+    assert runner.arming_progress(400.0)["fraction"] == 1.0
+    assert runner.arming_progress(400.0)["short_by"] == 0.0
+
+
+def test_the_gauge_stops_watching_once_it_is_armed():
+    runner = _runner(threshold=200.0)
+    runner.arm_by_hand(400.0, "2026-09-16")
+    assert runner.arming_progress(400.0)["watching"] is False
+
+
+def test_the_volatility_ceiling_is_the_exact_sizing_arithmetic():
+    """Not an estimate.
+
+    Sizing is w = (target_vol / N) / sigma, so a position is worth
+    sleeve * target_vol / (N * sigma) and clears the venue's one-dollar floor
+    only while sigma <= sleeve * target_vol / N. This is the number that makes
+    an undersized sleeve a *different* strategy rather than a smaller one:
+    weight falls as volatility rises, so the names priced out first are the
+    volatile ones the returns come from.
+    """
+    runner = _runner()
+    config = runner.config
+    for equity in (50.0, 143.20, 200.0, 1000.0):
+        sleeve = equity * config.allocation
+        expected = sleeve * config.target_vol / config.universe_size
+        assert runner.volatility_ceiling(equity) == pytest.approx(expected)
+
+    # At the default threshold every SPDR sector ETF clears it; the most
+    # volatile of them run around 2.5% a day.
+    assert runner.volatility_ceiling(200.0) > 0.025
+    # Well under it, they do not.
+    assert runner.volatility_ceiling(100.0) < 0.020
+
+
+def test_the_volatility_ceiling_is_zero_with_no_capital():
+    assert _runner().volatility_ceiling(0.0) == 0.0
+
+
+# -- the endpoints the button calls ------------------------------------------
+
+
+def _client(equity: float = 0.0):
+    from fastapi.testclient import TestClient
+
+    from imperium.server.app import create_app
+
+    session = TradingSession()
+    session.sector.config = SectorTrendConfig(arm_at_equity=200.0)
+    session.account_equity = equity
+    return TestClient(create_app(session)), session
+
+
+def test_the_arm_endpoint_refuses_without_a_known_balance():
+    """There is nothing to size a sleeve against, so there is no honest
+    answer to "arm it"."""
+    client, _ = _client(equity=0.0)
+    with client:
+        reply = client.post("/api/sector/arm", json={})
+        assert reply.status_code == 409
+        assert "balance is not known" in reply.json()["detail"]
+
+
+def test_arming_early_asks_once_and_says_exactly_what_it_costs():
+    """The refusal has to carry the reason, not just say no.
+
+    The cost of an early arm is not "it will be small" -- it is that the names
+    priced out are the volatile ones, so it would be trading the calm half of
+    the universe, which has no backtest behind it.
+    """
+    client, _ = _client(equity=143.20)
+    with client:
+        reply = client.post("/api/sector/arm", json={})
+        assert reply.status_code == 409
+        detail = reply.json()["detail"]
+        assert "$143.20" in detail and "$200" in detail
+        assert "2.26% a day" in detail, detail
+        assert "most volatile" in detail
+        assert "Arm anyway" in detail, (
+            "the refusal does not tell the operator how to proceed")
+
+
+def test_acknowledging_arms_it():
+    client, session = _client(equity=143.20)
+    with client:
+        reply = client.post("/api/sector/arm", json={"acknowledged": True})
+        assert reply.status_code == 200
+        assert reply.json()["armed"] is True
+        assert session.sector.enabled is True
+        assert session.sector.ledger.armed_by == "hand"
+
+
+def test_arming_above_the_threshold_needs_no_acknowledgement():
+    client, session = _client(equity=400.0)
+    with client:
+        assert client.post("/api/sector/arm", json={}).status_code == 200
+        assert session.sector.enabled is True
+
+
+def test_the_disarm_endpoint_refuses_while_it_holds_something():
+    client, session = _client(equity=400.0)
+    with client:
+        client.post("/api/sector/arm", json={})
+        session.sector.ledger.open_position("XLK", quantity=1.0, price=200.0,
+                                            stop=190.0, day="2026-09-16")
+        reply = client.post("/api/sector/disarm")
+        assert reply.status_code == 409
+        assert "XLK" in reply.json()["detail"]
+        assert session.sector.enabled is True
+
+
+def test_disarming_works_from_the_endpoint_when_flat():
+    client, session = _client(equity=400.0)
+    with client:
+        client.post("/api/sector/arm", json={})
+        assert client.post("/api/sector/disarm").status_code == 200
+        assert session.sector.enabled is False
+
+
+def test_the_panel_carries_the_gauge_the_button_needs():
+    client, _ = _client(equity=143.20)
+    with client:
+        sector = client.get("/api/snapshot").json()["sector"]
+        assert sector["arming"]["threshold"] == 200.0
+        assert sector["arming"]["equity"] == pytest.approx(143.20)
+        assert sector["arming"]["watching"] is True
+        assert sector["vol_ceiling"] > 0
+        assert sector["can_disarm"] is False
+        assert sector["armed_by"] == ""

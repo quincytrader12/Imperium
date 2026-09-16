@@ -887,3 +887,33 @@ button:active, .btn:active { background: #0c0e11; }
   #greeting, #greeting.leaving { animation: none; }
   #greeting.leaving { opacity: 0; }
 }
+
+/* Arming the sector sleeve, from its own panel.
+ *
+ * The button is deliberately quiet. Arming hands a fifth of the account to a
+ * strategy that trades on its own once a day, which is a decision worth
+ * making on purpose — but it is not an emergency control, and styling it like
+ * one would put a red button next to a gauge that spends most of its life
+ * filling slowly. */
+#st-arm { display: flex; align-items: center; gap: 8px; }
+#st-arm .gauge { flex: 1 1 auto; min-width: 0; }
+.st-btn {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 3px 9px;
+  letter-spacing: .04em;
+}
+.st-btn:disabled { opacity: .35; }
+/* Armed: a lamp and the reason, in place of the gauge that is now answered. */
+.st-armed {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

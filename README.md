@@ -736,6 +736,31 @@ so a typo costs a setting rather than being mistaken for one that worked.
 | `IMPERIUM_OPERATOR` | `Mr Gininda` | What it calls you when you press Start. |
 | `IMPERIUM_OPERATOR_SPOKEN` | *(the name)* | Only if a voice mispronounces it. |
 
+### Arming it
+
+The Sector trend panel carries a gauge and a button. The gauge reads in the
+account's own money — *$143.20 of $200, $56.80 to go* — because "72%" is a
+number you have to do arithmetic on and a balance is one you can act on. The
+button arms it now; once armed, the same place says how it armed (by hand, by
+equity, or from `settings.txt`) and offers **Disarm**.
+
+**Disarm is refused while it holds anything**, and that is the whole reason
+arming used to be one-way. A sleeve switched off mid-book leaves its ETFs
+sitting there with nobody trailing their stops and nothing left to close them,
+which is worse than either state. Flat, there is nothing to abandon, so the
+switch is yours. A button also cannot overrule `SECTOR_TREND_ENABLED=true` —
+somebody who wrote that in a file meant it.
+
+**Arming below the threshold asks once.** It is allowed — your money, your
+call — but the refusal carries the arithmetic rather than a vague warning.
+Sizing is `w = (target_vol / N) / sigma`, so a position is worth
+`sleeve × target_vol / (N × sigma)` and clears Alpaca's $1 floor only while
+`sigma ≤ sleeve × target_vol / N`. At $143 that ceiling is 2.26% a day; at
+$200 it is 3.16%, which clears every ETF in the universe. The names priced out
+first are the most volatile — which is where the strategy's return comes from
+— so an undersized sleeve is not a smaller version of this strategy, it is the
+calm half of it, with no backtest behind it.
+
 ### Arming itself
 
 With `SECTOR_TREND_ARM_AT_EQUITY` set, the sleeve switches itself on the first

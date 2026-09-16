@@ -920,10 +920,93 @@
    * switched on at all: a strategy that is off looks exactly like a strategy
    * that is on and finding nothing, and the difference matters most to the
    * person wondering why nothing has traded. */
+  /* Arming the sector sleeve, from the panel rather than from a text file.
+   *
+   * It used to take an edit to settings.txt and a restart, or waiting for the
+   * balance to cross a line the operator could not see. Both are worse than a
+   * control that shows where you are and lets you decide. */
+  function renderArming(st) {
+    var host = $('st-arm');
+    if (!host) return;
+    var arming = st.arming || {};
+    var parts = [];
+
+    if (st.enabled) {
+      var how = st.configured ? 'on in settings.txt'
+              : st.armed_by === 'hand' ? 'armed by hand'
+              : st.armed_by === 'equity' ? 'armed itself at $' +
+                  fmtNum(st.armed_at_equity || 0, 2)
+              : 'armed';
+      parts.push('<div class="st-armed"><span class="lamp ok"></span>' +
+                 esc(how) + (st.armed_on ? ' on ' + esc(st.armed_on) : '') +
+                 '</div>');
+      parts.push('<button id="st-disarm" class="st-btn"' +
+                 (st.can_disarm ? '' : ' disabled') + '>Disarm</button>');
+    } else if (arming.threshold > 0) {
+      /* The gauge reads in the account's own money rather than as a bare
+       * percentage: "$143 of $200" is a fact an operator can act on and
+       * "72%" is one they have to do arithmetic on. */
+      parts.push(gauge('arms at $' + fmtNum(arming.threshold, 0),
+                       arming.equity || 0, arming.threshold,
+                       '$' + fmtNum(arming.equity || 0, 2) +
+                       (arming.short_by > 0
+                         ? ' \u2014 $' + fmtNum(arming.short_by, 2) + ' to go'
+                         : ' \u2014 ready'),
+                       arming.short_by > 0 ? '' : 'good'));
+      parts.push('<button id="st-arm-now" class="st-btn">Arm now</button>');
+    } else {
+      parts.push('<div class="dimmer">no arming threshold set' +
+                 ' (SECTOR_TREND_ARM_AT_EQUITY)</div>');
+      parts.push('<button id="st-arm-now" class="st-btn">Arm now</button>');
+    }
+
+    setHTML(host, parts.join(''));
+
+    // Wrapped, not passed by reference. `onclick = armSector` hands the
+    // click Event in as the first argument, so `acknowledged` arrived as a
+    // truthy MouseEvent, the "ask first" branch was skipped and the refusal
+    // went to the banner instead of to a question.
+    if ($('st-arm-now')) {
+      $('st-arm-now').onclick = function () { armSector(false); };
+    }
+    if ($('st-disarm')) {
+      /* Disabled rather than hidden, with the reason on hover: a button that
+       * vanishes while the sleeve holds something looks like a bug, and a
+       * disabled one that explains itself is an answer. */
+      if (!st.can_disarm) {
+        $('st-disarm').title = (st.holding || 0) > 0
+          ? 'holding ' + st.holding + ' position' +
+            ((st.holding || 0) === 1 ? '' : 's') +
+            ' \u2014 disarming now would leave them with nobody trailing ' +
+            'their stops'
+          : 'switched on in settings.txt; a button cannot overrule a file';
+      }
+      $('st-disarm').onclick = function () {
+        post('/api/sector/disarm').catch(alertErr);
+      };
+    }
+  }
+
+  function armSector(acknowledged) {
+    post('/api/sector/arm', { acknowledged: acknowledged === true })
+      .catch(function (e) {
+        /* The server refuses an early arm once, with the reason. Asking here
+         * rather than gating in the page: a check the page owns is a check
+         * that is skipped by anyone calling the endpoint directly. */
+        var why = (e && e.message) || String(e);
+        if (!acknowledged && /Arm anyway/.test(why)) {
+          if (window.confirm(why)) armSector(true);
+          return;
+        }
+        alertErr(e);
+      });
+  }
+
   function renderSector(s) {
     var st = s.sector || {};
     var note = $('st-note');
     if (!note) return;
+    renderArming(st);
 
     if (!st.enabled) {
       note.textContent = 'off';
@@ -965,11 +1048,24 @@
     var why = $('st-why');
     if (why) {
       if (!st.enabled) {
-        why.textContent = 'Switched off. Set SECTOR_TREND_ENABLED=true to ' +
-          'arm it, after reviewing a backtest. It trades ' +
-          (st.universe || 0) + ' sector ETFs on Donchian/Keltner breakouts ' +
-          'with a trailing stop, using only its own ' +
-          ((st.allocation || 0) * 100).toFixed(0) + '% slice of equity.';
+        /* No longer tells the operator to edit a file: the button above this
+         * does it. What is left is the part a button cannot say -- what the
+         * thing actually trades, and what this balance can afford of it. */
+        var ceiling = st.vol_ceiling || 0;
+        var arming = st.arming || {};
+        var text = 'Off. It trades ' + (st.universe || 0) + ' sector ETFs on ' +
+          'Donchian/Keltner breakouts with a trailing stop, using its own ' +
+          ((st.allocation || 0) * 100).toFixed(0) + '% slice of equity. ' +
+          'Run the backtest before arming it.';
+        if (arming.threshold > 0 && arming.short_by > 0 && ceiling > 0) {
+          /* The number that makes an early arm a different strategy rather
+           * than a smaller one: weight falls as volatility rises, so the
+           * names an undersized sleeve drops are the volatile ones. */
+          text += ' At $' + fmtNum(arming.equity || 0, 2) + ' it could only ' +
+            'afford ETFs quieter than ' + (ceiling * 100).toFixed(2) +
+            '% a day, which leaves out the volatile half of the universe.';
+        }
+        why.textContent = text;
         why.className = 'dimmer';
       } else if (st.last_error) {
         why.textContent = st.last_error;

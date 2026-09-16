@@ -2434,7 +2434,7 @@ class TradingSession:
             "cross_section": self._cross_section_block(),
             "news": self.newsdesk.panel(),
             # The Sector Trend sleeve, which keeps its own book.
-            "sector": self.sector.panel(),
+            "sector": self.sector.panel(self.arming_equity()),
             # How the one account is divided between them.
             "capital": self.capital.as_dict(),
             # A second currency for the balance. Never used for
