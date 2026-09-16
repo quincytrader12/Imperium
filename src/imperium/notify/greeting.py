@@ -27,17 +27,60 @@ from dataclasses import dataclass
 
 from imperium.notify import briefing as brief
 
-#: Who the terminal is talking to.
+#: Who the terminal is talking to, as written.
 #:
 #: Overridable, because this program is packaged and someone else may end up
 #: running it, and being greeted by another person's name is a small thing
 #: that makes software feel like it was not written for you.
 DEFAULT_OPERATOR = "Mr Gininda"
 
+#: The same name, spelled for a voice rather than for a reader.
+#:
+#: English text-to-speech guesses at "Gininda" and guesses wrong. A phonetic
+#: respelling is the fix that works on every engine: SSML <phoneme> tags are
+#: supported by some ElevenLabs models and silently ignored by others, and a
+#: greeting that depends on which model the account happens to be using is a
+#: greeting that mispronounces its owner's name half the time.
+#:
+#: This is why the spoken and written forms were separate from the start. The
+#: screen shows the name; the voice gets the sounds.
+#:
+#: The operator's own respelling was "Gee-neen-ndhha", and the last syllable
+#: is changed here for a measured reason: "ndhha" is not a pronounceable
+#: English cluster, and an engine that cannot say a cluster falls back to
+#: spelling it. Run through a speech synthesiser it came out as
+#: "Gee-neen-EN-DEE-AITCH-AITCH-AY" -- the name read out as letters, which is
+#: a worse failure than the mispronunciation this is fixing. "dah" gives
+#: /dʒiː.niːn.dɑː/ cleanly, and the first two syllables are untouched.
+#:
+#: The true sound is a prenasalised, breathy d of the kind Nguni languages
+#: have and English orthography cannot carry, so this is the closest an
+#: English respelling gets rather than an exact rendering.
+DEFAULT_OPERATOR_SPOKEN = "Mr Gee-neen-dah"
+
 
 def operator_name() -> str:
+    """The name as it appears on screen."""
     return (os.environ.get("IMPERIUM_OPERATOR") or DEFAULT_OPERATOR).strip() \
         or DEFAULT_OPERATOR
+
+
+def operator_spoken() -> str:
+    """The name as the voice should say it.
+
+    The respelling belongs to the name, not to the slot. Somebody who sets
+    IMPERIUM_OPERATOR to their own name and nothing else must not have this
+    program read out a phonetic spelling of a stranger's surname at them -- so
+    a custom written name falls back to itself, and the default respelling is
+    used only for the default name.
+    """
+    explicit = (os.environ.get("IMPERIUM_OPERATOR_SPOKEN") or "").strip()
+    if explicit:
+        return explicit
+    written = operator_name()
+    if written == DEFAULT_OPERATOR:
+        return DEFAULT_OPERATOR_SPOKEN
+    return written
 
 
 @dataclass(frozen=True)
@@ -177,12 +220,16 @@ def opening(*, mode: str = "", previous: int = -1,
     """
     index = pick(previous, rng)
     quote = QUOTES[index]
-    hello = f"{brief.greeting(now)}, {operator_name()}."
+    opener = brief.greeting(now)
+    hello = f"{opener}, {operator_name()}."
+    # The one difference between the two forms: the voice is handed a phonetic
+    # respelling of the name, the screen is handed the name.
+    heard = f"{opener}, {operator_spoken()}."
     where = {"live": " Trading live.",
              "paper": " Trading on paper.",
              "dry_run": " Dry run. No orders will be placed."}.get(mode, "")
     return Opening(
-        spoken=f"{hello}{where} {quote.spoken()}.",
+        spoken=f"{heard}{where} {quote.spoken()}.",
         hello=hello,
         quote=quote.text + ".",
         who=quote.who,

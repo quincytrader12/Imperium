@@ -110,6 +110,12 @@ SETTINGS_TEMPLATE = """\
 # trading quote, out loud if a voice is connected and on screen either way.
 
 # IMPERIUM_OPERATOR=Mr Gininda
+
+# The same name spelled for a voice rather than for a reader. English
+# text-to-speech guesses at an unfamiliar surname and usually guesses wrong,
+# and a phonetic respelling is the fix that works on every engine. The screen
+# always shows IMPERIUM_OPERATOR; only the voice is handed this.
+# IMPERIUM_OPERATOR_SPOKEN=Mr Gee-neen-dah
 """
 
 #: Settings this file is allowed to define.
@@ -131,6 +137,7 @@ SETTABLE = frozenset({
     "IMPERIUM_SECONDARY_CURRENCY",
     "IMPERIUM_FX_RATE",
     "IMPERIUM_OPERATOR",
+    "IMPERIUM_OPERATOR_SPOKEN",
 })
 
 

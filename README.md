@@ -622,7 +622,28 @@ It never says the same quote twice in a row. A quote coming round again next
 week is a rotation; the same one twice running is a program that is not really
 choosing.
 
-Set `IMPERIUM_OPERATOR` in `settings.txt` to change the name.
+**The voice is handed the name spelled phonetically**, because English
+text-to-speech guesses at *Gininda* and guesses wrong. It says
+*Gee-neen-dah*; the screen always shows the name. SSML `<phoneme>` tags
+would have been the obvious fix and are the wrong one — some ElevenLabs models
+honour them and others ignore them silently, so the pronunciation would depend
+on which model the account happened to be using. A respelling works on every
+engine.
+
+The respelling was checked by running it through a speech synthesiser rather
+than by assuming. The first version ended in *ndhha*, which is not a
+pronounceable English cluster — and an engine that cannot say a cluster falls
+back to spelling it, so the name came out as
+"Gee-neen-EN-DEE-AITCH-AITCH-AY". *dah* gives /dʒiː.niːn.dɑː/ cleanly. The
+real sound is a prenasalised, breathy *d* of the kind Nguni languages have and
+English orthography cannot carry, so this is the closest an English respelling
+gets, not an exact rendering.
+
+Set `IMPERIUM_OPERATOR` in `settings.txt` to change the name, and
+`IMPERIUM_OPERATOR_SPOKEN` to change how it is said. A custom name does not
+inherit the default respelling: the phonetics belong to the name, not to the
+slot, so setting your own name and nothing else does not have the terminal
+read a stranger's surname at you.
 
 ### Asking it out loud
 
@@ -724,6 +745,7 @@ so a typo costs a setting rather than being mistaken for one that worked.
 | `IMPERIUM_SECONDARY_CURRENCY` | `ZAR` | A second currency beside the dollar balance. Display only. |
 | `IMPERIUM_FX_RATE` | *(fetched)* | Pin the rate by hand instead of fetching it. |
 | `IMPERIUM_OPERATOR` | `Mr Gininda` | What it calls you when you press Start. |
+| `IMPERIUM_OPERATOR_SPOKEN` | `Mr Gee-neen-dah` | The same name spelled for the voice. |
 
 ### Arming itself
 
