@@ -9,6 +9,7 @@ there.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import subprocess
 import sys
@@ -37,8 +38,25 @@ def page_assets(body: str) -> list[str]:
     throws and stops the whole bundle, the terminal would come up blank on a
     build that reported success.
     """
-    return re.findall(r'<(?:script|link)[^>]+(?:src|href)="(/static/[^"]+)"',
-                      body)
+    assets = re.findall(
+        r'<(?:script|link)[^>]+(?:src|href)="(/static/[^"]+)"', body)
+
+    # An import map names files no tag points at. The browser fetches them the
+    # moment a module imports the bare specifier, so a build that lost the
+    # vendored three.js would pass a tag-only check and then serve a terminal
+    # whose centre panel is empty -- with one line in a console nobody has
+    # open, which is the exact failure this script exists to catch.
+    assets += re.findall(r'"(/static/vendor/[^"]+)"', body)
+
+    # Deduped, order preserved: the same file can be named by a tag and by the
+    # map, and reporting it twice makes a clean build look suspicious.
+    seen: set[str] = set()
+    unique = []
+    for asset in assets:
+        if asset not in seen:
+            seen.add(asset)
+            unique.append(asset)
+    return unique
 
 
 def check_assets(fetch, body: str, failures: list[str]) -> list[str]:
@@ -50,13 +68,24 @@ def check_assets(fetch, body: str, failures: list[str]) -> list[str]:
     everything -- both print a build that passed.
     """
     notes: list[str] = []
-    assets = page_assets(body)
-    for required in ("/static/app.js", "/static/styles.css"):
+    assets = list(page_assets(body))
+    for required in ("/static/app.js", "/static/styles.css",
+                     "/static/orb.boot.js", "/static/palette.js"):
         if required not in assets:
             failures.append(f"{required} is not referenced by the page at all")
     if not assets:
         failures.append("the page references no static files at all")
-    for asset in assets:
+    # Walked as a graph, not as a list.
+    #
+    # Half of this page's JavaScript is now ES modules, which pull their own
+    # dependencies in with relative imports that appear in no tag. The orb's
+    # shaders, its arithmetic and the three.js postprocessing addons are all
+    # reached that way, so a check that only fetched what the markup names
+    # would pass a build that had lost every one of them.
+    queued = list(assets)
+    seen = set(queued)
+    while queued:
+        asset = queued.pop(0)
         try:
             status, content = fetch(asset)
         except urllib.error.HTTPError as exc:
@@ -65,9 +94,26 @@ def check_assets(fetch, body: str, failures: list[str]) -> list[str]:
             continue
         if status != 200 or len(content) < 200:
             failures.append(f"{asset} returned HTTP {status}, {len(content)} bytes")
-        else:
-            notes.append(f"  served {asset} ({len(content)} bytes)")
+            continue
+        notes.append(f"  served {asset} ({len(content)} bytes)")
+        if asset.endswith(".js"):
+            for imported in module_imports(asset, content):
+                if imported not in seen:
+                    seen.add(imported)
+                    queued.append(imported)
     return notes
+
+
+def module_imports(asset: str, source: str) -> list[str]:
+    """The relative imports of one module, as absolute /static paths.
+
+    Bare specifiers such as "three" are skipped: those resolve through the
+    page's import map, whose targets are already collected from the markup.
+    """
+    base = posixpath.dirname(asset)
+    found = re.findall(r"""(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]""",
+                       source)
+    return [posixpath.normpath(posixpath.join(base, spec)) for spec in found]
 
 
 def wait_for_server(proc: subprocess.Popen, timeout: float = 90.0) -> None:

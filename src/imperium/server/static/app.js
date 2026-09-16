@@ -62,7 +62,12 @@
   /* Bounded by what the stream sends full reasoning for (DETAIL_ROWS). */
   var REASON_ROWS = 40;
 
-  var cluster = new Cluster($('cluster'), $('tooltip'));
+  /* The orb lives in a module (three.js is one; this file is not), so it is
+   * reached through window rather than constructed here. Every call site
+   * guards on it: the terminal has to keep working when WebGL is missing,
+   * blocked, or still loading, and every fact the orb shows is also on screen
+   * in text somewhere. */
+  function orb() { return window.__orbReady ? window.orb : null; }
 
   /* ---------- formatting ---------- */
 
@@ -1315,7 +1320,12 @@
       /* Absorbed even while hidden, so the log is complete on return; only the
        * rendering is skipped. Skipping the absorb instead would silently
        * discard delta frames the server will never send again. */
-      if (document.hidden) { absorbEvents(s); cluster.ingest(s.pulses); return; }
+      if (document.hidden) {
+        absorbEvents(s);
+        var hiddenOrb = orb();
+        if (hiddenOrb) hiddenOrb.ingest(s.pulses);
+        return;
+      }
       try { render(s); } catch (e) {
         // A render failure must not take down the stream; the next snapshot
         // gets another chance.
@@ -1352,24 +1362,51 @@
     renderExecution(s);
     renderFooter(s);
 
-    cluster.setUniverse(s.watchlist.map(function (r) { return r.symbol; }));
-    var pos = {};
-    s.positions.forEach(function (p) {
-      pos[p.symbol] = s.equity > 0 ? Math.abs(p.value) / s.equity : 0;
-    });
-    cluster.setPositions(pos);
-    cluster.ingest(s.pulses);
+    renderOrb(s);
+  }
 
-    /* The health figure is shown only when it is doing something. On a
-     * machine that keeps up it stays at 1 and saying so every second would be
-     * noise; on one that does not, it is the explanation for a panel that has
-     * quietly gone sparser. */
-    var health = cluster.health === undefined ? 1 : cluster.health;
-    $('cluster-note').textContent =
-      cluster.orbs.length + ' orbs / ' + cluster.orbBudget() + ' budget · ' +
-      cluster.pulseRate.toFixed(1) + ' pulses/s' +
-      (health < 0.98 ? ' · eased to ' + Math.round(health * 100) +
-                       '% for this machine' : '');
+  /* The orb, and the line of text under it.
+   *
+   * The text is not decoration. The orb says what kind of work is happening
+   * and roughly where; this names the symbols, which is the one thing a
+   * three-dimensional body cannot spell out -- and it is the whole panel on a
+   * machine with no working WebGL. */
+  var orbTicker = [];
+
+  function renderOrb(s) {
+    var o = orb();
+    if (o) {
+      o.ingest(s.pulses);
+      // A book that halted before this tab connected emitted its pulse to
+      // nobody, so the state is read from the snapshot as well.
+      o.setHalted(!!(s.limits && s.limits.halted) ||
+                  !!(s.drawdown && s.drawdown.halted));
+    }
+
+    /* Newest first, deduped by symbol so one busy ticker cannot fill the
+     * line, and capped at what fits without wrapping. */
+    (s.pulses || []).forEach(function (pulse) {
+      orbTicker = orbTicker.filter(function (r) {
+        return r.symbol !== pulse.symbol;
+      });
+      orbTicker.unshift({ symbol: pulse.symbol, kind: pulse.kind,
+                          reason: pulse.reason });
+    });
+    if (orbTicker.length > 8) orbTicker.length = 8;
+
+    var html = orbTicker.map(function (row) {
+      return '<span class="orb-tick" style="color:' +
+        window.Palette.css(row.kind) + '" title="' + esc(row.reason || '') +
+        '"><i style="background:' + window.Palette.css(row.kind) + '"></i>' +
+        esc(row.symbol) + '</span>';
+    }).join('');
+    setHTML($('orb-ticker'), html);
+
+    if (o) {
+      $('cluster-note').textContent = o.caption();
+    } else if (window.__orbError) {
+      $('cluster-note').textContent = 'orb unavailable — ' + window.__orbError;
+    }
   }
 
   function animate(now) {
@@ -1378,10 +1415,14 @@
      * left running for days this is the difference between a warm laptop and a
      * hot one -- and browsers throttle background rAF unevenly, so relying on
      * them to do it produces stutter on return rather than a clean resume. */
-    if (!document.hidden) cluster.frame(now);
+    var o = orb();
+    if (o && !document.hidden) o.frame(now);
     /* Exposed so the panel's self-limiting can be verified from outside
      * rather than taken on trust. */
-    window.__cluster_health = cluster.health;
+    if (o) {
+      window.__orb_tier = o.orb.tierIndex;
+      window.__orb_fps = o.orb.fps;
+    }
     requestAnimationFrame(animate);
   }
 
@@ -1861,9 +1902,10 @@
           var now = foldedSet();
           if (panel.classList.contains('collapsed')) now.add(key); else now.delete(key);
           rememberFolds(now);
-          // Canvases inside a panel that just changed size need re-fitting, and
-          // the cluster owns its own backing store.
-          cluster.resize();
+          // Canvases inside a panel that just changed size need re-fitting,
+          // and the orb owns its own backing store and camera aspect.
+          var folded = orb();
+          if (folded) folded.resize();
           if (state.snapshot) { try { render(state.snapshot); } catch (e) {} }
         };
         h2.addEventListener('click', toggle);
@@ -1875,17 +1917,21 @@
 
   initFolding();
 
-  /* The legend takes its swatches from the canvas palette rather than carrying
-   * its own copy of the same hex codes. */
-  if (window.Cluster && window.Cluster.paintLegend) {
-    window.Cluster.paintLegend(document.getElementById('cluster-legend'));
+  /* The legend takes its swatches from the shared palette rather than
+   * carrying its own copy of the same hex codes. */
+  if (window.Palette && window.Palette.paintLegend) {
+    window.Palette.paintLegend(document.getElementById('cluster-legend'));
   }
 
-  window.addEventListener('resize', function () { cluster.resize(); });
+  window.addEventListener('resize', function () {
+    var r = orb();
+    if (r) r.resize();
+  });
   document.addEventListener('visibilitychange', function () {
     // Repaint on return rather than showing a second of stale panel.
     if (!document.hidden && state.snapshot) {
-      cluster.resize();
+      var back = orb();
+      if (back) back.resize();
       try { render(state.snapshot); } catch (e) { console.error(e); }
     }
   });

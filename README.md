@@ -527,6 +527,79 @@ behaving correctly. So:
 - The reasoning panel gives, per symbol, expected edge against round-trip cost —
   the answer to *"it says TRADING, so why is there no position"*.
 
+### The process orb
+
+The centre panel is one object that shows what the terminal is doing. It
+replaced a 2D pulse field, and it had to keep everything that field carried,
+because an operator glancing at it was reading three things at once:
+
+| What you read | How the orb says it |
+| --- | --- |
+| what kind of work is happening | the core's colour zones, one per process kind |
+| which symbol just fired | a ripple from that symbol's own point on the surface |
+| how hard it is working | the morph state, the heartbeat rate, the bloom |
+
+The third is why it is a body and not a chart. A number telling you the scan
+rate is something you have to read; a thing that breathes faster is something
+you notice while looking at something else, and this panel is looked at out of
+the corner of an eye for hours.
+
+**Three layers over one shared displacement field** (`orb.shaders.js`): a
+glossy liquid core, two frosted membranes that refract it, and a point-cloud
+skin just outside. They deform together because they evaluate the same
+function, not because their animations are kept in step.
+
+**Four morph states**, blended over 1.5s and never snapped: `idle` is nearly a
+sphere, breathing; `active` wobbles; `intense` grows lumpy, higher-frequency
+lobes; `alert` melts, the lower hemisphere drawn down with a gravity falloff.
+The state is chosen from total activity with hysteresis so a rate sitting on a
+boundary cannot flicker between two bodies, and `setMode` overrides it.
+
+**Nothing here is a hardcoded colour.** Every process colour comes from
+`palette.js`, which is also what paints the legend and what the server
+validates its pulse kinds against. A test asserts the three agree.
+
+**Three.js is vendored, not loaded from a CDN.** This ships as an offline
+Windows executable; a CDN tag would leave the panel dead on a machine with no
+internet. The vendored copy lives in `static/vendor/` and is bundled with the
+rest of `static/`. A bare `three` specifier resolves through an import map in
+the page, which keeps the project's no-build-step rule.
+
+**It measures itself.** Four quality tiers, from a 64-detail icosahedron with
+14k skin points down to a 20-detail body with none. Sustained slow frames drop
+a tier, a long clean run earns one back — quick to cut, slow to relax, because
+a panel that recovers eagerly oscillates and the flicker is worse than simply
+running lower. The tier is named in the panel caption when it is not the top
+one, so a body that has quietly gone simpler says so.
+
+#### Testing it without live data
+
+`?debug=orb` in the URL, or Ctrl+Shift+O, opens a panel with a slider per
+process, a mode selector, and a button that fires ten ripples. It loads
+lil-gui on demand, so an operator who never opens it never downloads it.
+
+#### Adding a process type
+
+Three edits, and a test will tell you if you miss one:
+
+1. **`imperium/telemetry/streams.py`** — add the name to `PULSE_KINDS`. The
+   server refuses to emit a pulse of an unknown kind, so this is what makes it
+   exist at all.
+2. **`static/palette.js`** — add it to `KIND_COLOR` with an RGB triplet, to
+   `KIND_LABEL` with what it should be called out loud, and to `KIND_ORDER`
+   where it belongs on the scale from "background hum" to "something is
+   wrong". The legend and the orb both read this; there is no second list.
+3. **`static/orb.math.js`** — add it to `FULL_RATE`: how many of these per
+   second counts as an activity of 1.0. This matters more than it looks.
+   Scans run at tens per second and orders at a handful per day, so a shared
+   denominator would make everything except scanning invisible.
+
+If the new kind means something has gone wrong, add it to `ALERT_KINDS` in
+`static/orb.boot.js` and it will put the orb into its melting state.
+
+`MAX_PROCESSES` in `orb.js` is a GLSL array bound, compiled into the shaders
+as a `#define`. It is 8; past that, raise it there and nowhere else.
+
 ### Asking it out loud
 
 Press **Ask**, say a question, and it answers in the same voice as the
@@ -732,9 +805,13 @@ the portfolio-clamp test (sizing's own cap was already tighter than the budget,
 so the clamp had nothing to do) and the no-retry-on-reject test (two independent
 guards, either sufficient alone).
 
-The front-end invariants that a screenshot cannot show — orb dedupe, bounded
-replay, a bloom-measured budget, jittered speed and depth — run under Node from
-`tests/test_cluster_js.py`.
+The front-end invariants that a screenshot cannot show — frame-rate independent
+damping, mode hysteresis, the particle distribution, symbol placement, pulse
+dedupe and bounded replay — run under Node from `tests/test_orb_js.py`. The ones
+that need a GPU — that every shader compiles, that each mode actually deforms
+the mesh, that disposal releases the context — render in a real browser from
+`tests/test_orb_browser.py`, and are skipped where no browser is installed.
+That file takes about three and a half minutes; `-k "not orb_browser"` skips it.
 
 ## Running the Windows build
 

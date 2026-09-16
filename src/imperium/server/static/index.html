@@ -177,13 +177,17 @@
 
   <!-- ---------------- neural cluster ---------------- -->
   <section class="panel" id="cluster-panel">
-    <h2>Neural cluster
+    <h2>Process orb
       <span class="note" id="cluster-note">—</span>
     </h2>
     <div class="cluster-wrap" id="cluster-wrap">
-      <canvas id="cluster"></canvas>
-      <div id="tooltip" hidden></div>
-      <!-- The swatches are painted from the canvas's own palette at startup.
+      <canvas id="orb"></canvas>
+      <!-- What just fired, in words. The orb says which kind and roughly
+           where; this says which symbol. Between them nothing the 2D pulse
+           field used to carry has been lost -- and unlike the field, this
+           part is still readable with WebGL switched off. -->
+      <div id="orb-ticker" class="orb-ticker"></div>
+      <!-- The swatches are painted from the shared palette at startup.
            Written out here as hex they were a second copy of the same fact,
            and a legend that disagrees with the field it explains is worse
            than no legend. -->
@@ -395,7 +399,17 @@
 </div>
 
 <script src="/static/fmt.js"></script>
-<script src="/static/cluster.js"></script>
+<script src="/static/palette.js"></script>
 <script src="/static/app.js"></script>
+<!-- The vendored three.js addons import from a bare "three" specifier. An
+     import map resolves it in the browser, which is how this project keeps
+     its no-build-step rule while still using modules. Three.js is vendored
+     rather than loaded from a CDN because this ships as an offline Windows
+     executable: a CDN tag would leave the orb dead on a machine with no
+     internet, and the rest of the terminal is built to work without one. -->
+<script type="importmap">
+{"imports": {"three": "/static/vendor/three/three.module.js"}}
+</script>
+<script type="module" src="/static/orb.boot.js"></script>
 </body>
 </html>

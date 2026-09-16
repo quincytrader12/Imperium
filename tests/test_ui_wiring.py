@@ -136,7 +136,7 @@ def test_every_global_the_script_depends_on_is_loaded_by_the_page():
     """
     scripts = _script_order()
     for global_name, provider in (("window.Fmt", "fmt.js"),
-                                  ("window.Cluster", "cluster.js")):
+                                  ("window.Palette", "palette.js")):
         if global_name in APP_JS:
             assert provider in scripts, (
                 f"app.js reads {global_name} and the page never loads "
@@ -149,7 +149,7 @@ def test_dependencies_are_loaded_before_the_script_that_reads_them():
     scripts = _script_order()
     assert "app.js" in scripts
     app_at = scripts.index("app.js")
-    for provider in ("fmt.js", "cluster.js"):
+    for provider in ("fmt.js", "palette.js"):
         if provider in scripts:
             assert scripts.index(provider) < app_at, (
                 f"{provider} is loaded after app.js, which reads it")
@@ -449,3 +449,36 @@ def test_the_theme_states_its_contrast_reasoning():
     them by eye undoes it without knowing."""
     assert "4.5:1" in STYLES or "4.5" in STYLES
     assert "--dimmer" in STYLES
+
+
+def test_the_orb_is_loaded_as_a_module_with_its_import_map_first():
+    """An import map has to be in the document before the module that needs it.
+
+    The vendored three.js addons import from a bare "three" specifier. The
+    browser resolves that through the import map, and a map declared after the
+    module that triggers the resolution is ignored -- so the orb would fail to
+    load with a specifier error and the centre panel would simply be empty,
+    with one line in a console nobody has open.
+    """
+    map_at = INDEX.find('type="importmap"')
+    orb_at = INDEX.find('src="/static/orb.boot.js"')
+    assert map_at != -1, "no import map; the bare \"three\" specifier cannot resolve"
+    assert orb_at != -1, "the page never loads the orb"
+    assert map_at < orb_at, "the import map is declared after the module that needs it"
+    assert 'type="module"' in INDEX[max(0, orb_at - 120):orb_at], (
+        "orb.boot.js is loaded as a classic script; its imports would throw")
+
+
+def test_the_page_still_carries_what_just_fired_as_text():
+    """The orb replaced a 2D field that named the symbol that fired.
+
+    A three-dimensional body cannot spell a ticker, so the names moved into
+    the DOM beside it. This is also the entire panel on a machine with no
+    working WebGL, which is why it is ordinary markup and not drawn into the
+    canvas.
+    """
+    assert 'id="orb-ticker"' in INDEX
+    assert "orb-tick" in APP_JS, "nothing ever populates the ticker strip"
+    assert "window.__orbError" in APP_JS, (
+        "the page never reports a failed orb; a blank panel with no "
+        "explanation is the failure this terminal exists to prevent")

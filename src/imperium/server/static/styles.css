@@ -342,7 +342,9 @@ input::placeholder { color: var(--dimmer); }
 
 /* ---------- cluster ---------- */
 
-#cluster { display: block; width: 100%; height: 100%; }
+/* The orb's canvas. Transparent, so the panel's own gradient is the
+   background and the orb sits in the terminal rather than on it. */
+#orb { display: block; width: 100%; height: 100%; }
 .cluster-wrap { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 #tooltip {
   position: absolute; pointer-events: none; z-index: 10;
@@ -794,3 +796,46 @@ button:active, .btn:active { background: #0c0e11; }
 @media (prefers-reduced-motion: reduce) {
   #btn-ask.listening { animation: none; }
 }
+
+/* What just fired, in words, along the bottom of the orb panel.
+ *
+ * The orb carries the kind and roughly where; a three-dimensional body cannot
+ * spell a ticker. This is also the entire panel on a machine with no working
+ * WebGL, which is why it is ordinary DOM and not drawn into the canvas. */
+.orb-ticker {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 26px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  justify-content: center;
+  pointer-events: none;
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+.orb-tick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: .82;
+  white-space: nowrap;
+}
+.orb-tick i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+/* The newest entry is the brightest; the rest recede. Reading order without
+   needing a timestamp on each one. */
+.orb-tick:first-child { opacity: 1; }
+.orb-tick:nth-child(n+5) { opacity: .5; }
+
+/* lil-gui, when the debug panel is open. Docked inside the terminal's own
+   stacking context so it cannot end up behind a panel. */
+.lil-gui { --background-color: #0f1114; --widget-color: #22252b;
+           --text-color: #dbe0e6; --title-background-color: #171a1f;
+           --font-size: 11px; z-index: 40; }
