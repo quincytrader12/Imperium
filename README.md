@@ -622,28 +622,17 @@ It never says the same quote twice in a row. A quote coming round again next
 week is a rotation; the same one twice running is a program that is not really
 choosing.
 
-**The voice is handed the name spelled phonetically**, because English
-text-to-speech guesses at *Gininda* and guesses wrong. It says
-*Gee-neen-dah*; the screen always shows the name. SSML `<phoneme>` tags
-would have been the obvious fix and are the wrong one — some ElevenLabs models
-honour them and others ignore them silently, so the pronunciation would depend
-on which model the account happened to be using. A respelling works on every
-engine.
+The voice is given the name as written, which was checked against a speech
+synthesiser rather than assumed: *Gininda* comes out as /dʒɪ.ˈnɪn.də/, which is
+right. Not every name is so lucky, so `IMPERIUM_OPERATOR_SPOKEN` hands the
+engine a different spelling while the screen keeps the real one — and if you
+ever need it, keep each syllable sayable. A consonant run an engine cannot
+pronounce makes it give up on the word and read the letters instead; *ndhha*
+came back as "EN-DEE-AITCH-AITCH-AY", which is worse than any mispronunciation.
+A phonetic respelling rather than SSML, because a `<phoneme>` tag is honoured
+by some ElevenLabs models and ignored silently by others.
 
-The respelling was checked by running it through a speech synthesiser rather
-than by assuming. The first version ended in *ndhha*, which is not a
-pronounceable English cluster — and an engine that cannot say a cluster falls
-back to spelling it, so the name came out as
-"Gee-neen-EN-DEE-AITCH-AITCH-AY". *dah* gives /dʒiː.niːn.dɑː/ cleanly. The
-real sound is a prenasalised, breathy *d* of the kind Nguni languages have and
-English orthography cannot carry, so this is the closest an English respelling
-gets, not an exact rendering.
-
-Set `IMPERIUM_OPERATOR` in `settings.txt` to change the name, and
-`IMPERIUM_OPERATOR_SPOKEN` to change how it is said. A custom name does not
-inherit the default respelling: the phonetics belong to the name, not to the
-slot, so setting your own name and nothing else does not have the terminal
-read a stranger's surname at you.
+Set `IMPERIUM_OPERATOR` in `settings.txt` to change the name.
 
 ### Asking it out loud
 
@@ -745,7 +734,7 @@ so a typo costs a setting rather than being mistaken for one that worked.
 | `IMPERIUM_SECONDARY_CURRENCY` | `ZAR` | A second currency beside the dollar balance. Display only. |
 | `IMPERIUM_FX_RATE` | *(fetched)* | Pin the rate by hand instead of fetching it. |
 | `IMPERIUM_OPERATOR` | `Mr Gininda` | What it calls you when you press Start. |
-| `IMPERIUM_OPERATOR_SPOKEN` | `Mr Gee-neen-dah` | The same name spelled for the voice. |
+| `IMPERIUM_OPERATOR_SPOKEN` | *(the name)* | Only if a voice mispronounces it. |
 
 ### Arming itself
 

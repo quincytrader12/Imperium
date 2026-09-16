@@ -34,30 +34,6 @@ from imperium.notify import briefing as brief
 #: that makes software feel like it was not written for you.
 DEFAULT_OPERATOR = "Mr Gininda"
 
-#: The same name, spelled for a voice rather than for a reader.
-#:
-#: English text-to-speech guesses at "Gininda" and guesses wrong. A phonetic
-#: respelling is the fix that works on every engine: SSML <phoneme> tags are
-#: supported by some ElevenLabs models and silently ignored by others, and a
-#: greeting that depends on which model the account happens to be using is a
-#: greeting that mispronounces its owner's name half the time.
-#:
-#: This is why the spoken and written forms were separate from the start. The
-#: screen shows the name; the voice gets the sounds.
-#:
-#: The operator's own respelling was "Gee-neen-ndhha", and the last syllable
-#: is changed here for a measured reason: "ndhha" is not a pronounceable
-#: English cluster, and an engine that cannot say a cluster falls back to
-#: spelling it. Run through a speech synthesiser it came out as
-#: "Gee-neen-EN-DEE-AITCH-AITCH-AY" -- the name read out as letters, which is
-#: a worse failure than the mispronunciation this is fixing. "dah" gives
-#: /dʒiː.niːn.dɑː/ cleanly, and the first two syllables are untouched.
-#:
-#: The true sound is a prenasalised, breathy d of the kind Nguni languages
-#: have and English orthography cannot carry, so this is the closest an
-#: English respelling gets rather than an exact rendering.
-DEFAULT_OPERATOR_SPOKEN = "Mr Gee-neen-dah"
-
 
 def operator_name() -> str:
     """The name as it appears on screen."""
@@ -66,21 +42,25 @@ def operator_name() -> str:
 
 
 def operator_spoken() -> str:
-    """The name as the voice should say it.
+    """The name as the voice should say it, which is normally just the name.
 
-    The respelling belongs to the name, not to the slot. Somebody who sets
-    IMPERIUM_OPERATOR to their own name and nothing else must not have this
-    program read out a phonetic spelling of a stranger's surname at them -- so
-    a custom written name falls back to itself, and the default respelling is
-    used only for the default name.
+    There is no default respelling. "Gininda" was checked against a speech
+    synthesiser and comes out right -- /dʒɪ.ˈnɪn.də/ -- so handing the voice
+    anything other than the name would be inventing a problem.
+
+    The hook stays because names are not all so lucky, and because the fix for
+    one that a voice mangles is a phonetic respelling rather than SSML: a
+    <phoneme> tag is honoured by some ElevenLabs models and ignored silently by
+    others, so the pronunciation would depend on which model the account
+    happened to be using.
+
+    One thing to know before writing one. A consonant run an engine cannot
+    pronounce makes it give up on the word and read the letters instead --
+    "ndhha" came back as "EN-DEE-AITCH-AITCH-AY", which is worse than any
+    mispronunciation. Keep each syllable sayable.
     """
     explicit = (os.environ.get("IMPERIUM_OPERATOR_SPOKEN") or "").strip()
-    if explicit:
-        return explicit
-    written = operator_name()
-    if written == DEFAULT_OPERATOR:
-        return DEFAULT_OPERATOR_SPOKEN
-    return written
+    return explicit or operator_name()
 
 
 @dataclass(frozen=True)

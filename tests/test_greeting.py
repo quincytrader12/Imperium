@@ -121,58 +121,33 @@ def test_it_greets_the_operator_by_name():
     assert "Mr Gininda" in opening.hello
 
 
-def test_the_voice_is_given_the_name_spelled_out_phonetically():
-    """The screen gets the name; the voice gets the sounds.
+def test_the_voice_is_given_the_plain_name_by_default():
+    """No respelling unless one is asked for.
 
-    English text-to-speech guesses at "Gininda" and guesses wrong. SSML
-    phoneme tags are supported by some ElevenLabs models and silently ignored
-    by others, so a greeting that relied on them would mispronounce its
-    owner's name depending on which model the account happened to be using.
-    A respelling works on every engine.
+    "Gininda" was checked against a speech synthesiser and comes out right, so
+    handing the voice anything else would be inventing a problem. The hook for
+    a name that a voice does mangle stays; the default does not use it.
     """
     opening = greeting.opening()
-    assert greeting.DEFAULT_OPERATOR_SPOKEN in opening.spoken
-    # And the reader is never shown the phonetics.
-    assert "Gee-neen" not in opening.hello
-    assert "Gee-neen" not in opening.quote
+    assert greeting.DEFAULT_OPERATOR in opening.spoken
+    assert opening.hello in opening.spoken
 
 
-def test_the_respelling_has_no_cluster_an_engine_would_spell_out():
-    """The failure this was caught by, kept as a rule.
+def test_the_voice_is_given_the_plain_name_by_default():
+    """No respelling unless one is asked for.
 
-    A speech engine that meets a consonant run it cannot pronounce stops
-    trying to say the word and reads the letters instead. The first respelling
-    here ended in "ndhha" and came out of a synthesiser as
-    "Gee-neen-EN-DEE-AITCH-AITCH-AY" -- the operator's name spelled at him,
-    which is a worse failure than the mispronunciation the respelling exists
-    to fix.
-
-    Three consonants in a row is the line: "ndhha" has four, "dah" has one.
+    "Gininda" was checked against a speech synthesiser and comes out right, so
+    handing the voice anything else would be inventing a problem. The hook for
+    a name that a voice does mangle stays; the default does not use it.
     """
-    import re
-
-    for syllable in re.split(r"[\s-]+", greeting.DEFAULT_OPERATOR_SPOKEN):
-        runs = re.findall(r"[bcdfghjklmnpqrstvwxz]{3,}", syllable.lower())
-        assert not runs, (
-            f"{syllable!r} contains {runs}, a consonant run an engine is "
-            f"likely to give up on and spell out letter by letter")
+    opening = greeting.opening()
+    assert greeting.DEFAULT_OPERATOR in opening.spoken
+    assert opening.hello in opening.spoken
 
 
 def test_the_name_can_be_changed(monkeypatch):
     monkeypatch.setenv("IMPERIUM_OPERATOR", "Captain Ahab")
     assert "Captain Ahab" in greeting.opening().spoken
-
-
-def test_a_different_name_does_not_inherit_the_default_respelling(monkeypatch):
-    """The respelling belongs to the name, not to the slot.
-
-    Somebody who sets their own name and nothing else must not have this
-    program read a phonetic spelling of a stranger's surname at them.
-    """
-    monkeypatch.setenv("IMPERIUM_OPERATOR", "Captain Ahab")
-    spoken = greeting.opening().spoken
-    assert "Gee-neen" not in spoken
-    assert "Captain Ahab" in spoken
 
 
 def test_the_spoken_name_can_be_set_on_its_own(monkeypatch):
@@ -185,7 +160,7 @@ def test_the_spoken_name_can_be_set_on_its_own(monkeypatch):
 
 def test_a_blank_respelling_falls_back_to_the_written_name(monkeypatch):
     monkeypatch.setenv("IMPERIUM_OPERATOR_SPOKEN", "   ")
-    assert greeting.DEFAULT_OPERATOR_SPOKEN in greeting.opening().spoken
+    assert greeting.DEFAULT_OPERATOR in greeting.opening().spoken
 
 
 def test_an_empty_name_falls_back_rather_than_greeting_nobody(monkeypatch):
@@ -230,7 +205,6 @@ def test_the_mode_is_named_out_loud(mode, says):
 def test_an_unknown_mode_does_not_invent_one():
     opening = greeting.opening(mode="something-new")
     assert "something-new" not in opening.spoken
-    assert greeting.DEFAULT_OPERATOR_SPOKEN in opening.spoken
     assert greeting.DEFAULT_OPERATOR in opening.hello
 
 

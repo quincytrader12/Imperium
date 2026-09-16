@@ -111,11 +111,12 @@ SETTINGS_TEMPLATE = """\
 
 # IMPERIUM_OPERATOR=Mr Gininda
 
-# The same name spelled for a voice rather than for a reader. English
-# text-to-speech guesses at an unfamiliar surname and usually guesses wrong,
-# and a phonetic respelling is the fix that works on every engine. The screen
-# always shows IMPERIUM_OPERATOR; only the voice is handed this.
-# IMPERIUM_OPERATOR_SPOKEN=Mr Gee-neen-dah
+# Only set this if a voice mispronounces the name above. It is handed to the
+# speech engine instead, spelled however it needs to be to sound right; the
+# screen always shows IMPERIUM_OPERATOR. Keep each syllable sayable -- a
+# consonant run an engine cannot pronounce makes it spell the letters out
+# instead, which is worse than any mispronunciation.
+# IMPERIUM_OPERATOR_SPOKEN=
 """
 
 #: Settings this file is allowed to define.
