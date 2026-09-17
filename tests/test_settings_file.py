@@ -199,6 +199,7 @@ def test_the_launcher_windows_name_the_settings_file():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "packaging"
-    for name in ("Start-IMPERIUM.bat", "Run-IMPERIUM-247.bat"):
+    for name in ("Start-IMPERIUM.bat", "Run-IMPERIUM-247.bat",
+                 "Backtest-Sector-Trend.bat"):
         text = (root / name).read_text(encoding=config.TEXT_ENCODING)
         assert "settings.txt" in text, f"{name} does not mention the settings file"

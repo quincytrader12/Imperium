@@ -120,7 +120,11 @@ def parse_args():
                 "  IMPERIUM.exe                  start on the default port and "
                 "open a browser\n"
                 "  IMPERIUM.exe --port 9000      start on port 9000\n"
-                "  IMPERIUM.exe --no-browser     start without opening a browser\n"),
+                "  IMPERIUM.exe --no-browser     start without opening a browser\n"
+                "  IMPERIUM.exe --backtest       backtest the Sector Trend "
+                "sleeve instead of serving\n"
+                "  IMPERIUM.exe --backtest --help   what the backtest itself "
+                "takes\n"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -131,7 +135,18 @@ def parse_args():
                         help="do not open a browser on start")
     parser.add_argument("--version", action="store_true",
                         help="print the version and exit")
+    # Listed so --help mentions it; it never reaches argparse, because
+    # everything after it belongs to the backtest. See _backtest_argv.
+    parser.add_argument("--backtest", action="store_true",
+                        help="run the Sector Trend backtest and exit instead "
+                             "of serving; remaining arguments are passed to it")
     args = parser.parse_args()
+    # Reachable only when --backtest was not the first argument, because
+    # main() hands that case off before ever getting here. Refused rather than
+    # ignored: a run that swallowed the flag would serve the terminal while the
+    # operator waited for a report.
+    if args.backtest:
+        parser.error("--backtest must come first, before any other argument")
     if args.port is None:
         args.port = config_default_port()
     if not (1 <= args.port <= 65535):
@@ -142,6 +157,43 @@ def parse_args():
         print(f"IMPERIUM {imperium.__version__} — built by Quincy Gininda")
         raise SystemExit(0)
     return args
+
+
+def backtest_argv(argv: list[str]) -> list[str] | None:
+    """The backtest's own arguments, or None if this is an ordinary start.
+
+    Split off by hand rather than with a subparser because everything after
+    ``--backtest`` belongs to the backtest, including flags this parser also
+    defines. A subparser would have to know all of them, which would mean the
+    two argument lists had to be kept identical by hand -- and the failure mode
+    of getting that wrong is ``--start`` being silently eaten by the launcher.
+
+    Only honoured as the *first* argument. ``--port 9000 --backtest`` is a
+    request that does not mean anything, and quietly ignoring the port would be
+    worse than the error argparse gives.
+    """
+    if argv and argv[0] == "--backtest":
+        return argv[1:]
+    return None
+
+
+def run_backtest(argv: list[str]) -> int:
+    """Hand off to the packaged backtest.
+
+    Imported here rather than at the top so that numpy and the strategy modules
+    are not paid for by every ordinary start.
+    """
+    from imperium.strategy.backtest_cli import main as backtest_main
+
+    name = "IMPERIUM.exe" if getattr(sys, "frozen", False) else "launcher.py"
+    try:
+        return backtest_main(argv, prog=f"{name} --backtest")
+    except SystemExit as exc:      # --help, a bad argument, or "no key stored"
+        code = exc.code
+        if isinstance(code, str):  # the message argparse would not have printed
+            print(code, file=sys.stderr)
+            return 1
+        return int(code or 0)
 
 
 def config_default_port() -> int:
@@ -201,10 +253,14 @@ def main() -> int:
         _pause()
         return 1
 
-    try:
-        args = parse_args()
-    except SystemExit as exc:          # --help, --version, or a bad argument
-        return int(exc.code or 0)
+    # Read before parse_args, which would otherwise reject the backtest's own
+    # flags as unrecognised.
+    backtest = backtest_argv(sys.argv[1:])
+    if backtest is None:
+        try:
+            args = parse_args()
+        except SystemExit as exc:      # --help, --version, or a bad argument
+            return int(exc.code or 0)
 
     logging_setup.configure()
     try:
@@ -223,6 +279,12 @@ def main() -> int:
             print(f"settings.txt: {name!r} is not a setting IMPERIUM knows; "
                   f"ignored")
         print(f"Settings file: {config.settings_path()}")
+        # After the settings file, deliberately: the backtest reads the same
+        # universe and the same target volatility the live sleeve would, so a
+        # run that ignored settings.txt would be measuring a different
+        # strategy from the one the terminal is about to trade.
+        if backtest is not None:
+            return run_backtest(backtest)
         # CI launches this to verify the build; opening a browser on a headless
         # runner is at best noise and at worst a hang.
         open_browser = not (args.no_browser or os.environ.get("IMPERIUM_NO_BROWSER"))

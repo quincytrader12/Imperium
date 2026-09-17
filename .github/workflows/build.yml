@@ -132,6 +132,7 @@ jobs:
         run: |
           Copy-Item packaging/Start-IMPERIUM.bat dist/IMPERIUM/ -Force
           Copy-Item packaging/Run-IMPERIUM-247.bat dist/IMPERIUM/ -Force
+          Copy-Item packaging/Backtest-Sector-Trend.bat dist/IMPERIUM/ -Force
           Copy-Item README.md dist/IMPERIUM/README.txt -Force
           Remove-Item dist/IMPERIUM/imperium-startup.log -ErrorAction SilentlyContinue
           Compress-Archive -Path dist/IMPERIUM/* -DestinationPath dist/IMPERIUM-windows.zip -Force
@@ -197,6 +198,14 @@ jobs:
 
           SHA-256 ``${{ steps.hash.outputs.zip_sha }}``
 
+          ## Before you arm the Sector Trend sleeve
+
+          **Backtest-Sector-Trend.bat** walks the strategy through twenty years of
+          adjusted daily bars using the key you already stored, and prints CAGR,
+          Sharpe, drawdown, beta and a list of anything in the result that does not
+          look like the published paper it comes from. It places no orders and arms
+          nothing. Run it before you let the sleeve trade.
+
           ## If it does not start
 
           The folder contains **imperium-startup.log** after any attempt. That file
@@ -207,6 +216,7 @@ jobs:
 
               Start-IMPERIUM.bat --port 9000    serve on another port
               IMPERIUM.exe --no-browser         start without opening a browser
+              IMPERIUM.exe --backtest           backtest the Sector Trend sleeve
               IMPERIUM.exe --help
 
           It binds 127.0.0.1 only and there is no flag to change that: the process
@@ -228,7 +238,8 @@ jobs:
 
           Both were built on a Windows runner and then launched by
           packaging/verify_build.py, which requires each to serve its own page, its
-          static assets, its API and a diagnostics verdict before the build passes.
+          static assets, its API, a diagnostics verdict and a completed backtest
+          before the build passes.
           "@
           # A rolling tag, so the download link stays stable across builds.
           gh release delete $tag --repo $env:GITHUB_REPOSITORY --yes --cleanup-tag 2>$null

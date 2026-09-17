@@ -781,11 +781,27 @@ worse than either state on its own. Turning it off is a decision, and
 
 ### Running the backtest
 
+From the Windows build, where most people have one — double-click
+**Backtest-Sector-Trend.bat**, or from a command prompt in that folder:
+
+```
+IMPERIUM.exe --backtest                        from the stored Alpaca key
+IMPERIUM.exe --backtest --start 2010-01-01     a shorter history
+IMPERIUM.exe --backtest --csv .\bars           date,close CSVs instead
+```
+
+From a checkout:
+
 ```bash
 uv run python scripts/backtest_sector_trend.py                 # from Alpaca
 uv run python scripts/backtest_sector_trend.py --start 2005-01-01
 uv run python scripts/backtest_sector_trend.py --csv ./bars    # date,close CSVs
 ```
+
+Both run the same code — `imperium.strategy.backtest_cli` — so the two cannot
+drift apart and give different answers. It places no orders and arms nothing,
+and it reads `settings.txt`, so it measures the universe and volatility target
+the sleeve would actually trade rather than the defaults.
 
 It runs both execution modes at both leverage caps, charges 5bp of slippage per
 side and 7% annual margin interest on exposure above 100%, and reports CAGR,

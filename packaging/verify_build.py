@@ -9,10 +9,12 @@ there.
 
 from __future__ import annotations
 
+import math
 import posixpath
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -116,6 +118,80 @@ def module_imports(asset: str, source: str) -> list[str]:
     return [posixpath.normpath(posixpath.join(base, spec)) for spec in found]
 
 
+def synthetic_bars(folder: Path, symbols=("AAA", "BBB", "CCC"),
+                   days: int = 420) -> None:
+    """Bars with trends in them, written where the backtest can read them.
+
+    Synthetic rather than real for two reasons. A build check must not need a
+    credential or a network, and it must not depend on what the market did --
+    a check whose result moves with SPY is not a check. These are generated
+    from a fixed formula, so every run of this script measures the same thing.
+
+    Trending on purpose: a flat series takes no trades, and a backtest that
+    takes no trades exercises almost none of the code this is verifying. Each
+    symbol gets a different period and phase so they break out at different
+    times, which is what makes the sizing and the leverage cap do any work.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    for offset, symbol in enumerate(symbols):
+        period = 70 + 23 * offset
+        price = 100.0 + 10.0 * offset
+        lines = ["date,close"]
+        for day in range(days):
+            # A slow cycle for the trend, a fast one for the noise the bands
+            # have to see through. Deterministic, so a failure reproduces.
+            price *= (1.0 + 0.004 * math.sin(2 * math.pi * day / period)
+                      + 0.0015 * math.sin(day * 1.7 + offset))
+            stamp = f"{2015 + day // 252:04d}-{(day % 252) // 21 + 1:02d}-" \
+                    f"{(day % 21) + 1:02d}"
+            lines.append(f"{stamp},{price:.4f}")
+        (folder / f"{symbol}.csv").write_text("\n".join(lines) + "\n",
+                                              encoding="utf-8")
+
+
+def check_backtest(exe: Path, failures: list[str]) -> None:
+    """The backtest must run from the build, not only from a checkout.
+
+    It used to live in scripts/, which PyInstaller does not bundle, so the
+    packaged terminal shipped a strategy with no way to measure it -- and
+    "arm the sleeve and find out" is not an acceptable substitute. This runs
+    the command the shipped .bat runs, on bars generated here, and requires a
+    finished report.
+
+    Worth its own check rather than folding into the import graph: numpy is
+    the largest thing in the bundle and the only place it is reached from is
+    this command, so an `excludes` entry or a hook change could drop it and
+    every other check here would still pass.
+    """
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp:
+        bars = Path(tmp) / "bars"
+        synthetic_bars(bars)
+        try:
+            done = subprocess.run(
+                [str(exe), "--backtest", "--csv", str(bars)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", timeout=600,
+                env={**os.environ, "IMPERIUM_NO_PAUSE": "1"})
+        except subprocess.TimeoutExpired:
+            failures.append("the backtest did not finish within 10 minutes")
+            return
+
+    tail = (done.stdout or "")[-3000:]
+    if done.returncode != 0:
+        failures.append(
+            f"--backtest exited {done.returncode}:\n{tail}")
+        return
+    for expected in ("Final equity", "Max drawdown", "near_close",
+                     "next_open"):
+        if expected not in done.stdout:
+            failures.append(
+                f"the backtest report is missing {expected!r}:\n{tail}")
+            return
+    print("  --backtest ran and produced a report")
+
+
 def wait_for_server(proc: subprocess.Popen, timeout: float = 90.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -191,6 +267,8 @@ def main(exe: str) -> int:
                 print("  diagnostics produced a verdict")
         except Exception as exc:
             failures.append(f"the diagnostics endpoint failed: {exc}")
+
+        check_backtest(path, failures)
     finally:
         proc.terminate()
         try:
@@ -204,7 +282,7 @@ def main(exe: str) -> int:
             print(f"  - {f}")
         return 1
     print("\nbuild verified: it serves its own page, its assets, its API and "
-          "its diagnostics.")
+          "its diagnostics, and it can backtest.")
     return 0
 
 
