@@ -15,6 +15,7 @@ that a person holding only the .exe can get them.
 from __future__ import annotations
 
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,31 @@ def _bars(folder: Path, symbols=("AAA", "BBB", "CCC"), days: int = 420) -> Path:
         (folder / f"{symbol}.csv").write_text("\n".join(lines) + "\n",
                                               encoding="utf-8")
     return folder
+
+
+def _env(home: Path) -> dict[str, str]:
+    """A clean run that is still a runnable one.
+
+    The obvious way to isolate this -- hand the subprocess a dict of three
+    variables and nothing else -- passes on Linux and fails on Windows before
+    a line of our code runs. ``_overlapped`` needs Winsock, Winsock needs
+    ``SystemRoot``, and without it ``import asyncio`` dies with
+    ``WinError 10106: the requested service provider could not be loaded``,
+    which looks exactly like a packaging fault and is not one.
+
+    So the environment is inherited and then narrowed: the home directory is
+    redirected so the run cannot touch the operator's real ~/.imperium, and
+    every IMPERIUM_ and SECTOR_ variable is dropped so a runner or a developer
+    with the sleeve configured does not quietly change which universe is being
+    backtested. USERPROFILE as well as HOME, because that is the one Windows
+    reads.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("IMPERIUM_", "SECTOR_"))}
+    env["IMPERIUM_NO_PAUSE"] = "1"
+    env["HOME"] = str(home)
+    env["USERPROFILE"] = str(home)
+    return env
 
 
 # -- where the code lives ---------------------------------------------------
@@ -146,13 +172,55 @@ def test_running_it_through_the_launcher_produces_a_report(tmp_path):
     done = subprocess.run(
         [sys.executable, str(PACKAGING / "launcher.py"), "--backtest",
          "--csv", str(_bars(tmp_path / "bars"))],
-        capture_output=True, text=True, timeout=600,
-        env={"IMPERIUM_NO_PAUSE": "1", "PATH": "", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=600, env=_env(tmp_path),
     )
     assert done.returncode == 0, done.stdout + done.stderr
     for expected in ("near_close", "next_open", "leverage cap 1.0x",
                      "leverage cap 2.0x", "Max drawdown", "Final equity"):
         assert expected in done.stdout, f"the report has no {expected!r}"
+
+
+def test_the_run_is_isolated_without_being_crippled(monkeypatch):
+    """The CI failure this file caused, kept as a test.
+
+    Handing the subprocess a hand-built dict looked like the careful thing to
+    do and broke the Windows job: Python could not import asyncio at all. The
+    two properties have to hold together -- our own configuration must not
+    leak in, and the platform's must not be stripped out.
+    """
+    monkeypatch.setenv("SECTOR_TREND_UNIVERSE", "XLK,XLF")
+    monkeypatch.setenv("IMPERIUM_OPERATOR", "Somebody Else")
+    env = _env(Path("/tmp/home"))
+
+    assert "SECTOR_TREND_UNIVERSE" not in env, (
+        "a configured universe leaked in; the run would backtest something "
+        "other than the default and nothing would say so")
+    assert "IMPERIUM_OPERATOR" not in env
+    assert env["IMPERIUM_NO_PAUSE"] == "1"
+    assert env["HOME"] == env["USERPROFILE"] == "/tmp/home"
+
+    # Everything the platform needs is still there. On Windows the one that
+    # matters is SystemRoot; on POSIX, PATH.
+    for name in ("SystemRoot", "PATH"):
+        if name in os.environ:
+            assert env[name] == os.environ[name], (
+                f"{name} was stripped; on Windows this is the difference "
+                f"between a backtest and WinError 10106")
+
+
+def test_the_run_writes_its_home_where_it_was_told_to(tmp_path):
+    """Isolation that is claimed and not checked is not isolation.
+
+    If the redirect silently failed, the test would still pass -- and it would
+    be creating and writing a real ~/.imperium on whoever ran it.
+    """
+    subprocess.run(
+        [sys.executable, str(PACKAGING / "launcher.py"), "--backtest",
+         "--csv", str(_bars(tmp_path / "bars"))],
+        capture_output=True, text=True, timeout=600, env=_env(tmp_path),
+    )
+    assert (tmp_path / ".imperium").is_dir(), (
+        "the run did not use the home it was given, so it used the real one")
 
 
 def test_the_report_carries_its_own_warnings(tmp_path):
@@ -165,8 +233,7 @@ def test_the_report_carries_its_own_warnings(tmp_path):
     done = subprocess.run(
         [sys.executable, str(PACKAGING / "launcher.py"), "--backtest",
          "--csv", str(_bars(tmp_path / "bars"))],
-        capture_output=True, text=True, timeout=600,
-        env={"IMPERIUM_NO_PAUSE": "1", "PATH": "", "HOME": str(tmp_path)},
+        capture_output=True, text=True, timeout=600, env=_env(tmp_path),
     )
     assert "CHECK BEFORE BELIEVING THIS" in done.stdout, (
         "a Sharpe far above the paper's drew no warning")
