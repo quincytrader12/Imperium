@@ -180,7 +180,7 @@ def test_running_it_through_the_launcher_produces_a_report(tmp_path):
         assert expected in done.stdout, f"the report has no {expected!r}"
 
 
-def test_the_run_is_isolated_without_being_crippled(monkeypatch):
+def test_the_run_is_isolated_without_being_crippled(monkeypatch, tmp_path):
     """The CI failure this file caused, kept as a test.
 
     Handing the subprocess a hand-built dict looked like the careful thing to
@@ -190,14 +190,18 @@ def test_the_run_is_isolated_without_being_crippled(monkeypatch):
     """
     monkeypatch.setenv("SECTOR_TREND_UNIVERSE", "XLK,XLF")
     monkeypatch.setenv("IMPERIUM_OPERATOR", "Somebody Else")
-    env = _env(Path("/tmp/home"))
+    env = _env(tmp_path)
 
     assert "SECTOR_TREND_UNIVERSE" not in env, (
         "a configured universe leaked in; the run would backtest something "
         "other than the default and nothing would say so")
     assert "IMPERIUM_OPERATOR" not in env
     assert env["IMPERIUM_NO_PAUSE"] == "1"
-    assert env["HOME"] == env["USERPROFILE"] == "/tmp/home"
+    # Compared against str(tmp_path) rather than a literal, because a literal
+    # is a second assumption about the platform hiding inside a test written
+    # to catch the first one: "/tmp/home" comes back as "\\tmp\\home" on
+    # Windows, and this assertion failed there for that reason alone.
+    assert env["HOME"] == env["USERPROFILE"] == str(tmp_path)
 
     # Everything the platform needs is still there. On Windows the one that
     # matters is SystemRoot; on POSIX, PATH.
