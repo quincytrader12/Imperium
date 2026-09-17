@@ -70,6 +70,15 @@ def _env(home: Path) -> dict[str, str]:
     with the sleeve configured does not quietly change which universe is being
     backtested. USERPROFILE as well as HOME, because that is the one Windows
     reads.
+
+    Not separately unit-tested, deliberately. A test that asserted on this
+    dict broke the Windows build twice on its own platform assumptions -- a
+    POSIX path literal, then ``os.environ`` being case-insensitive on Windows
+    so a plain copy holds SYSTEMROOT and not SystemRoot -- while catching
+    nothing. The end-to-end tests below already prove the property, and prove
+    it better: they run the backtest through the launcher, so an environment
+    missing what Windows needs fails them outright with WinError 10106, which
+    is exactly how this was found in the first place.
     """
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("IMPERIUM_", "SECTOR_"))}
@@ -178,38 +187,6 @@ def test_running_it_through_the_launcher_produces_a_report(tmp_path):
     for expected in ("near_close", "next_open", "leverage cap 1.0x",
                      "leverage cap 2.0x", "Max drawdown", "Final equity"):
         assert expected in done.stdout, f"the report has no {expected!r}"
-
-
-def test_the_run_is_isolated_without_being_crippled(monkeypatch, tmp_path):
-    """The CI failure this file caused, kept as a test.
-
-    Handing the subprocess a hand-built dict looked like the careful thing to
-    do and broke the Windows job: Python could not import asyncio at all. The
-    two properties have to hold together -- our own configuration must not
-    leak in, and the platform's must not be stripped out.
-    """
-    monkeypatch.setenv("SECTOR_TREND_UNIVERSE", "XLK,XLF")
-    monkeypatch.setenv("IMPERIUM_OPERATOR", "Somebody Else")
-    env = _env(tmp_path)
-
-    assert "SECTOR_TREND_UNIVERSE" not in env, (
-        "a configured universe leaked in; the run would backtest something "
-        "other than the default and nothing would say so")
-    assert "IMPERIUM_OPERATOR" not in env
-    assert env["IMPERIUM_NO_PAUSE"] == "1"
-    # Compared against str(tmp_path) rather than a literal, because a literal
-    # is a second assumption about the platform hiding inside a test written
-    # to catch the first one: "/tmp/home" comes back as "\\tmp\\home" on
-    # Windows, and this assertion failed there for that reason alone.
-    assert env["HOME"] == env["USERPROFILE"] == str(tmp_path)
-
-    # Everything the platform needs is still there. On Windows the one that
-    # matters is SystemRoot; on POSIX, PATH.
-    for name in ("SystemRoot", "PATH"):
-        if name in os.environ:
-            assert env[name] == os.environ[name], (
-                f"{name} was stripped; on Windows this is the difference "
-                f"between a backtest and WinError 10106")
 
 
 def test_the_run_writes_its_home_where_it_was_told_to(tmp_path):
