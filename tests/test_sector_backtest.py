@@ -184,13 +184,79 @@ def test_max_drawdown_is_measured_peak_to_trough():
 
 def test_beta_against_itself_is_one():
     """A sanity anchor for the regression: a series regressed on itself has a
-    beta of exactly one and no alpha."""
+    beta of exactly one and no alpha.
+
+    Note what this does *not* cover. Passing the equity curve in as its own
+    benchmark makes the two the same length by construction, so this exercises
+    the arithmetic and never the alignment -- which is how the alignment bug
+    below survived underneath a passing test.
+    """
     closes, dates = _series(600)
     result = bt.run(closes, dates)
     curve = np.asarray(result.equity, dtype=float)
     metrics = bt.measure(result, benchmark=curve)
     assert metrics.beta == pytest.approx(1.0, abs=1e-9)
     assert metrics.alpha == pytest.approx(0.0, abs=1e-9)
+
+
+def test_beta_is_measured_against_a_full_length_price_history():
+    """The bug this exists to prevent, which shipped silently.
+
+    The run does not start on the first bar -- sixty days of warm-up go by
+    before there is a channel to break out of -- so the equity curve is always
+    shorter than the price history behind it. The old code required the
+    benchmark to be exactly one longer than the return series and simply
+    skipped the regression otherwise, which it always did. Beta and alpha came
+    back NaN on every real run, and the brief's "beta around 0.4" criterion
+    never ran at all.
+
+    A benchmark handed in the way the command actually hands it in -- the full
+    price series -- must produce a finite beta.
+    """
+    closes, dates = _series(600)
+    result = bt.run(closes, dates)
+    benchmark = closes[sorted(closes)[0]]
+
+    assert len(result.equity) < benchmark.size, (
+        "the fixture no longer exercises the mismatch this test is about")
+
+    metrics = bt.measure(result, benchmark=benchmark, benchmark_dates=dates)
+    assert math.isfinite(metrics.beta), "beta was skipped, not measured"
+    assert math.isfinite(metrics.alpha)
+
+
+def test_beta_alignment_by_date_and_by_tail_agree():
+    """The date path is exact; the tail path is the fallback when no dates are
+    given. They must not disagree, because the warm-up only ever trims the
+    front."""
+    closes, dates = _series(600)
+    result = bt.run(closes, dates)
+    benchmark = closes[sorted(closes)[0]]
+    by_date = bt.measure(result, benchmark=benchmark, benchmark_dates=dates)
+    by_tail = bt.measure(result, benchmark=benchmark)
+    assert by_date.beta == pytest.approx(by_tail.beta, abs=1e-12)
+
+
+def test_a_benchmark_too_short_to_cover_the_run_is_refused():
+    """Refused rather than aligned to whatever happens to fit.
+
+    Quietly regressing against a truncated series would produce a number that
+    looks like a beta and is not one, which is worse than no beta at all.
+    """
+    closes, dates = _series(600)
+    result = bt.run(closes, dates)
+    short = closes[sorted(closes)[0]][:50]
+    assert bt.align_benchmark(short, result) is None
+    assert not math.isfinite(bt.measure(result, benchmark=short).beta)
+
+
+def test_mismatched_dates_are_refused_rather_than_partly_matched():
+    """A benchmark whose dates do not cover the run is not a benchmark for it."""
+    closes, dates = _series(600)
+    result = bt.run(closes, dates)
+    benchmark = closes[sorted(closes)[0]]
+    wrong = [f"1999-01-{i % 28 + 1:02d}" for i in range(len(dates))]
+    assert bt.align_benchmark(benchmark, result, wrong) is None
 
 
 def test_the_sanity_check_flags_a_result_that_is_too_good():

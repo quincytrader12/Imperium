@@ -199,7 +199,7 @@ def main() -> int:
                     holder = bt.BacktestResult(
                         dates=result.dates, equity=list(bench))
                     bench_metrics = bt.measure(holder)
-            metrics = bt.measure(result, benchmark=bench)
+            metrics = bt.measure(result, benchmark=bench, benchmark_dates=dates)
             report(f"{mode}, leverage cap {cap:.1f}x", metrics, result,
                    bench_metrics)
 

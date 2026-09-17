@@ -296,8 +296,46 @@ def max_drawdown(curve: np.ndarray) -> float:
     return float(np.max((peaks - curve) / peaks)) if np.all(peaks > 0) else 0.0
 
 
+def align_benchmark(benchmark: np.ndarray, result: BacktestResult,
+                    benchmark_dates: list[str] | None = None,
+                    ) -> np.ndarray | None:
+    """The benchmark cut to the same days as the equity curve, or None.
+
+    The run does not start on the first bar. Sixty days of warm-up go by
+    before there is a Donchian channel to break out of, so the equity curve is
+    always shorter than the price history it was built from -- and a benchmark
+    handed in at full length does not line up with it.
+
+    That mattered more than a length check suggests. The old code simply
+    skipped the regression when the lengths disagreed, which they always did,
+    so beta and alpha came back NaN on every real run and the brief's "beta
+    around 0.4" sanity criterion never once ran. The one test covering it fed
+    the equity curve in as its own benchmark, where the lengths match by
+    construction, so it passed against a code path nobody was using.
+    """
+    series = np.asarray(benchmark, dtype=float)
+    wanted = len(result.equity)
+    if wanted < 2 or series.size < 2:
+        return None
+
+    if benchmark_dates:
+        index = {day: i for i, day in enumerate(benchmark_dates)}
+        picked = [index.get(day, -1) for day in result.dates]
+        if all(i >= 0 for i in picked) and len(picked) == wanted:
+            return series[np.asarray(picked)]
+        return None
+
+    # Without dates, align on the tail: the warm-up is trimmed from the front,
+    # so the curve's last day is the history's last day. Refused rather than
+    # guessed at when the benchmark is too short to cover the run.
+    if series.size < wanted:
+        return None
+    return series[-wanted:]
+
+
 def measure(result: BacktestResult, *,
-            benchmark: np.ndarray | None = None) -> Metrics:
+            benchmark: np.ndarray | None = None,
+            benchmark_dates: list[str] | None = None) -> Metrics:
     """Turn a run into the numbers the brief asks for.
 
     The risk-free rate is zero throughout, which is stated rather than assumed:
@@ -331,8 +369,10 @@ def measure(result: BacktestResult, *,
     if result.exposure:
         out.average_exposure = float(np.mean(result.exposure))
 
-    if benchmark is not None and len(benchmark) == returns.size + 1:
-        bench = np.diff(benchmark) / benchmark[:-1]
+    aligned = (align_benchmark(benchmark, result, benchmark_dates)
+               if benchmark is not None else None)
+    if aligned is not None and aligned.size == returns.size + 1:
+        bench = np.diff(aligned) / aligned[:-1]
         if np.std(bench, ddof=1) > 0:
             beta = float(np.cov(returns, bench, ddof=1)[0, 1]
                          / np.var(bench, ddof=1))
