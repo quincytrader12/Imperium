@@ -57,6 +57,7 @@ from imperium.strategy import sentiment as sentiment_mod
 from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
+from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
 from imperium.strategy.signals import StrategyParams
@@ -273,6 +274,9 @@ class TradingSession:
         #: Set by code that cannot await (the account absorber runs inside a
         #: synchronous path); drained by the trading loop on the next tick.
         self._pending_notice: str = ""
+        #: High-water mark of each open position's unrealised gain. Dropped
+        #: when the position closes -- see _protect_positions.
+        self._peaks: dict[str, protect.PositionPeak] = {}
         #: The last greeting, held so the voice endpoint can speak exactly
         #: what the screen was shown rather than drawing a second quote.
         self.opening: greeting_mod.Opening | None = None
@@ -1424,6 +1428,98 @@ class TradingSession:
                 f"{symbol}: closing on the auction rather than carrying it "
                 f"overnight — {engine.decision.reason}")
 
+    async def _protect_positions(self) -> None:
+        """Close a position that has given back too much of its own best.
+
+        The exit this program did not have. Every other exit here is a
+        *signal* exit -- the trend faded, the z-score came back inside its
+        band -- and a signal exit says nothing about what the position is
+        worth. A live crypto position ran to +43%, the account marked $82.52,
+        and by the evening the book was $78.78 with the position still open
+        and still, by every rule the program had, perfectly fine.
+
+        Deliberately not a profit target. A target caps the winners, and a
+        book that pays for a lot of small losers with a few large gains cannot
+        afford that. This lets a position run as far as it likes and only asks
+        how much of its own high-water mark it may hand back.
+
+        Runs before the reconcile so the close is reflected in the same tick's
+        book rather than the next one.
+        """
+        # Runs while the book is halted too. A halt is "no new exposure,
+        # exits still pass", and closing a position that has given back its
+        # gain is an exit.
+        for symbol, position in list(self.broker.positions.items()):
+            if position is None or position.is_flat:
+                self._peaks.pop(symbol, None)
+                continue
+            entry = float(position.avg_price)
+            price = self.feed.quote(symbol).last or 0.0
+            if entry <= 0 or price <= 0:
+                continue
+            # Long-only book: a short would invert this and there is nothing
+            # here that can hold one.
+            if float(position.quantity) <= 0:
+                continue
+
+            gain = (price - entry) / entry
+            record = self._peaks.setdefault(symbol, protect.PositionPeak())
+            peak = record.observe(gain)
+
+            engine = self.engines.get(symbol)
+            decision = engine.decision if engine else None
+            round_trip = float(getattr(decision, "round_trip_cost_bps", 0.0) or 0.0)
+            sigma = self._bar_sigma(symbol)
+
+            verdict = protect.assess(gain=gain, peak=peak,
+                                     round_trip_bps=round_trip, sigma=sigma)
+            if not verdict.exit_now:
+                continue
+
+            try:
+                fill = await self.broker.apply_target(
+                    symbol, 0.0, price, self.engine_equity())
+            except (VenueError, ModeSwitchRefused) as exc:
+                self.telemetry.event(
+                    Level.ERROR, "protect",
+                    f"{symbol} gave back {peak - gain:.2%} of its best and "
+                    f"could not be closed: {exc}")
+                continue
+
+            self._peaks.pop(symbol, None)
+            self.allocator.observe(symbol).current_weight = 0.0
+            self.telemetry.pulse(symbol, "decision", verdict.reason, 0.9)
+            self.telemetry.event(Level.WARN, "protect",
+                                 f"{symbol} {verdict.reason}")
+            if fill:
+                self._pending_notice = (
+                    f"🛡️ PROTECTED {symbol}\n"
+                    f"closed at {gain:+.1%} after a {peak:+.1%} best.\n"
+                    f"{verdict.band:.1%} was the most it could give back.")
+
+    def _bar_sigma(self, symbol: str) -> float:
+        """Per-bar return volatility, so the give-back band clears the noise.
+
+        Returns 0.0 when it cannot be measured, which makes the band a pure
+        fraction of the peak -- tighter, but never wrong in a way that holds a
+        position it should have closed.
+        """
+        engine = self.engines.get(symbol)
+        if engine is None:
+            return 0.0
+        closes = engine.series.closes() if hasattr(engine, "series") else None
+        if closes is None or len(closes) < 20:
+            return 0.0
+        import numpy as np
+
+        arr = np.asarray(closes, dtype=float)
+        arr = arr[arr > 0]
+        if arr.size < 20:
+            return 0.0
+        rets = np.diff(arr) / arr[:-1]
+        sd = float(np.std(rets[-120:], ddof=1)) if rets.size >= 2 else 0.0
+        return sd if math.isfinite(sd) else 0.0
+
     async def _exit_overnight_holdings(self) -> None:
         """Sell every overnight hold on the opening auction.
 
@@ -1843,6 +1939,7 @@ class TradingSession:
         elif phase is SessionPhase.PREOPEN:
             await self._exit_overnight_holdings()
             self._report_unmanaged_equity()
+        await self._protect_positions()
         await self._refresh_account_limits()
         await self._reconcile_book()
         # Before the split is taken: arming changes the split, and the engine
