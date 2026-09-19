@@ -368,22 +368,40 @@ class PortfolioAllocator:
         scoped to anything and must survive every rollover: releasing it
         because midnight passed would be the program overruling a human.
         """
+        first = halted and not self.halted
         self.halted = halted
         self.halt_reason = reason
         self.halt_source = source if halted else ""
-        if halted:
+        # Logged on the transition only, for the same reason the notice is:
+        # a halt held for an afternoon is one event, and a warning repeated
+        # every cycle buries whatever else the log had to say.
+        if first:
             log.warning("book halted by %s: %s", source, reason)
 
     def check_daily_loss(self, day_start_equity: float) -> bool:
-        """Halt the book if the day's loss breaches the limit."""
+        """Halt the book if the day's loss breaches the limit.
+
+        Returns True only on the **transition** into a halt, not for every
+        tick spent inside one. The caller uses this to announce the halt, and
+        a halt is one event however long it lasts: returning the state instead
+        of the edge sent the operator the same "BOOK HALTED, daily loss
+        33.93%" message on every cycle, identical text and identical figure,
+        until the day rolled. Five copies of a notice is how a real one stops
+        being read.
+
+        Whether the book *is* halted is ``self.halted``, which is what every
+        gate in the program already reads.
+        """
         if day_start_equity <= 0 or self.equity <= 0:
-            return self.halted
+            return False
         drawdown = (day_start_equity - self.equity) / day_start_equity
-        if drawdown >= self.limits.daily_loss_halt:
-            self.set_halt(True, f"daily loss {drawdown:.2%} reached the "
-                                f"{self.limits.daily_loss_halt:.2%} limit",
-                          source="daily_loss")
-        return self.halted
+        if drawdown < self.limits.daily_loss_halt:
+            return False
+        was_halted = self.halted
+        self.set_halt(True, f"daily loss {drawdown:.2%} reached the "
+                            f"{self.limits.daily_loss_halt:.2%} limit",
+                      source="daily_loss")
+        return not was_halted
 
     def roll_session(self) -> bool:
         """Clear a halt that belonged to the day that has just ended.

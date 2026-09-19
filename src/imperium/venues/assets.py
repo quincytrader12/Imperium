@@ -88,6 +88,26 @@ class AssetClassSpec:
     tick_size: Decimal
     #: Whether fractional quantities are accepted.
     fractional: bool
+    #: The smallest position worth opening with an ordinary order.
+    #:
+    #: Per class because the reasons are per class, and applying one class's
+    #: reasons to another is how a correctly sized $10.70 crypto position
+    #: became 35% of a $70 book.
+    viable_position_notional: Decimal = Decimal("5")
+    #: The smallest position worth opening with an **auction** order.
+    #:
+    #: Separate, because this is where the $25 actually comes from and it is
+    #: not a property of the asset class at all -- it is a property of the
+    #: order type. Market-on-close and market-on-open will not take a
+    #: fractional quantity, so an auction position must be whole shares, and
+    #: $25 buys one share of a large part of the US market.
+    #:
+    #: Charging every strategy that floor is what stopped a $70 book trading:
+    #: at a 25% per-symbol cap it could commit $17.50, the floor demanded $25,
+    #: and every name was refused as unreachable -- including the multi-day
+    #: and intraday positions that use ordinary fractional orders and never go
+    #: near an auction.
+    auction_position_notional: Decimal = Decimal("25")
     tradeable: bool = True
     note: str = ""
 
@@ -114,6 +134,15 @@ EQUITY_SPEC = AssetClassSpec(
     calibration_key="us_equity",
     tick_size=Decimal("0.01"),
     fractional=True,
+    # Five dollars for an ordinary order: Alpaca fills fractional equity
+    # orders down to $1 of notional, and a position that cannot be halved
+    # twice and still clear that minimum cannot be trimmed -- which is the
+    # property the floor exists to protect.
+    viable_position_notional=Decimal("5"),
+    # Twenty-five for an auction order, which takes whole shares. This is what
+    # keeps the overnight strategy and non-fractionable names reachable, and
+    # it is charged only to the strategies that actually use auctions.
+    auction_position_notional=Decimal("25"),
 )
 
 CRYPTO_SPEC = AssetClassSpec(
@@ -136,6 +165,18 @@ CRYPTO_SPEC = AssetClassSpec(
     calibration_key="crypto",
     tick_size=Decimal("0.01"),
     fractional=True,
+    # Two dollars, derived rather than chosen: Alpaca's crypto minimum is
+    # about a dollar of notional, and a position that cannot be halved and
+    # still leave two tradeable halves cannot be trimmed.
+    #
+    # The cost check that matters at this size: a round trip is 50bp of
+    # commission plus an 8bp assumed spread, so a $2 position pays about a
+    # cent to open and close. That is a real drag and it is bounded; a $25
+    # floor on a $70 book was not.
+    viable_position_notional=Decimal("2"),
+    # Crypto has no closing auction, so there is no whole-share quantum to
+    # clear and no second, larger floor.
+    auction_position_notional=Decimal("2"),
 )
 
 #: An option contract is a hundred shares. This is the single most important

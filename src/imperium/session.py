@@ -2544,6 +2544,15 @@ class TradingSession:
             "daily_loss_halt": self.limits.daily_loss_halt,
             "daily_loss_value": self.limits.daily_loss_halt * equity,
             "position_floor": floor,
+            #: What an auction order needs, which is a different and larger
+            #: number. Published separately because "why is it not trading
+            #: overnight" and "why is it not trading" have different answers:
+            #: market-on-close will not take a fractional quantity, so the
+            #: overnight strategy needs a whole share where every other
+            #: strategy needs $5.
+            "auction_floor": float(
+                assets_mod.spec_for(assets_mod.AssetClass.US_EQUITY)
+                .auction_position_notional),
             "scaled": bool(scale and not scale.unscaled),
             "note": scale.note if scale else "the account balance is not known yet",
             #: The most expensive share this account can hold overnight. Auction

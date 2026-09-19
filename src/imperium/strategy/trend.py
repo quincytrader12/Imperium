@@ -92,6 +92,17 @@ MIN_HOLD_DAYS = 1.0
 MAX_HOLD_DAYS = 40
 
 
+#: How far a held trend must turn against the position before the minimum
+#: holding period stops applying.
+#:
+#: Not zero. Zero is "the signal has gone", which is the ordinary end of a
+#: trend and is what the holding period is for -- a score wandering across
+#: zero on noise closed positions on the day they opened. This is the point
+#: where the measurement says the move is running the other way, and holding
+#: to a horizon chosen for the original direction no longer means anything.
+REVERSAL_SCORE = -0.15
+
+
 class TrendPhase(str, Enum):
     """Where a symbol is in the life of a trend position."""
 
@@ -396,11 +407,26 @@ def phase_for(*, held: bool, days_held: float, min_hold_days: float,
     whole round trip; *staying* requires only that the reason to be there still
     holds, because the entry cost is already spent. Exiting early throws away
     the cost without collecting the edge it bought.
+
+    Which is exactly what the first version of this did. ``score <= 0`` was
+    tested *before* the holding period, so a position entered on a real signal
+    that drifted to ``+0.00`` -- not negative, merely gone -- closed the same
+    session. One live position was opened and closed thirteen minutes later
+    "after 0 days", paying a full round trip to collect nothing. The minimum
+    holding period that the entire cost model exists to compute was
+    unreachable on the exit path.
+
+    So a trend that has merely faded is held to the horizon it was entered
+    for. A trend that has *reversed* is not: :data:`REVERSAL_SCORE` is a real
+    signal in the opposite direction, and waiting out a holding period against
+    one is not patience, it is refusing to read the tape.
     """
     if not held:
         return TrendPhase.ENTER if signal.eligible else TrendPhase.FLAT
-    if signal.score <= 0:
+    if signal.score <= REVERSAL_SCORE:
         return TrendPhase.EXIT
     if days_held < min_hold_days:
         return TrendPhase.HOLDING
+    if signal.score <= 0:
+        return TrendPhase.EXIT
     return TrendPhase.MATURE

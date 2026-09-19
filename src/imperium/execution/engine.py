@@ -27,7 +27,7 @@ import numpy as np
 from imperium.execution import costs
 from imperium.execution.bars import Bar, BarSeries
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
-from imperium.execution.risk import VIABLE_POSITION_NOTIONAL, RiskLimits
+from imperium.execution.risk import RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
 from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import regime as regime_mod
@@ -225,6 +225,13 @@ class SymbolEngine:
         #: and borrow are per-symbol facts, not class-wide ones.
         self.can_short: bool = self.asset.shortable
         self.tradable: bool = self.asset.tradeable
+        #: Smallest position worth opening with an ordinary order.
+        self.position_floor: float = float(self.asset.viable_position_notional)
+        #: Smallest position worth opening with an auction order. Only the
+        #: overnight strategy sends those, and it is the only path that pays
+        #: this floor -- charging it to the strategies that use ordinary
+        #: fractional orders priced a small account out of the whole market.
+        self.auction_floor: float = float(self.asset.auction_position_notional)
         self.decision = Decision(symbol=symbol, warmup_bars=self.params.warmup_bars)
         self.bid: float | None = None
         self.ask: float | None = None
@@ -461,6 +468,12 @@ class SymbolEngine:
             # A weight is a fraction; on a small account a fraction can be an
             # amount no venue will trade. The sizer needs the balance to know.
             equity=self.allocator.equity,
+            # This class's own floor, not the program's. The $25 figure is
+            # derived from equity facts -- closing auctions refusing fractional
+            # quantities, one share of a median US listing -- and applying it
+            # to crypto turned a correctly sized $10.70 position into 35% of a
+            # $70 book.
+            position_floor=self.position_floor,
         )
         d.raw_weight = sized.weight
         d.sizing_reason = sized.reason
@@ -561,7 +574,7 @@ class SymbolEngine:
         # per-symbol cap.
         equity = self.allocator.equity
         if equity > 0:
-            floor = VIABLE_POSITION_NOTIONAL / equity
+            floor = self.position_floor / equity
             if abs(before) >= floor > abs(after):
                 after = math.copysign(floor, before)
         cap = self.limits.max_position_weight
@@ -696,14 +709,14 @@ class SymbolEngine:
 
         equity = self.allocator.equity
         if equity > 0 and weight > 0:
-            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            floor_weight = self.position_floor / equity
             if weight < floor_weight:
                 if floor_weight > self.limits.max_position_weight:
                     d.verdict = Verdict.REJECTED
                     d.blocker = "account too small"
                     d.reason = (
                         f"a trend position here sizes to ${weight * equity:,.2f}, "
-                        f"and the ${VIABLE_POSITION_NOTIONAL:,.0f} minimum would "
+                        f"and the ${self.position_floor:,.0f} minimum would "
                         f"exceed the {self.limits.max_position_weight:.0%} "
                         f"per-symbol cap on a ${equity:,.2f} account")
                     self.decision = d
@@ -846,14 +859,14 @@ class SymbolEngine:
 
         equity = self.allocator.equity
         if equity > 0 and weight > 0:
-            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            floor_weight = self.position_floor / equity
             if weight < floor_weight:
                 if floor_weight > self.limits.max_position_weight:
                     d.verdict = Verdict.REJECTED
                     d.blocker = "account too small"
                     d.reason = (
                         f"this coin sizes to ${weight * equity:,.2f} and the "
-                        f"${VIABLE_POSITION_NOTIONAL:,.0f} minimum would "
+                        f"${self.position_floor:,.0f} minimum would "
                         f"exceed the {self.limits.max_position_weight:.0%} "
                         f"per-symbol cap on a ${equity:,.2f} account")
                     self.decision = d
@@ -1004,7 +1017,7 @@ class SymbolEngine:
         # position below one share cannot be entered at all.
         equity = self.allocator.equity
         if equity > 0 and weight > 0:
-            floor_weight = VIABLE_POSITION_NOTIONAL / equity
+            floor_weight = self.auction_floor / equity
             if weight < floor_weight:
                 if floor_weight > self.limits.max_position_weight:
                     d.verdict = Verdict.REJECTED
@@ -1013,7 +1026,7 @@ class SymbolEngine:
                         f"an overnight position here sizes to "
                         f"${weight * equity:,.2f}; the closing auction takes "
                         f"whole shares only, and raising it to the "
-                        f"${VIABLE_POSITION_NOTIONAL:,.0f} minimum would exceed "
+                        f"${self.auction_floor:,.0f} minimum would exceed "
                         f"the {self.limits.max_position_weight:.0%} per-symbol "
                         f"cap on a ${equity:,.2f} account")
                     self.decision = d

@@ -99,6 +99,35 @@ def momentum_signal(prices: np.ndarray, params: StrategyParams,
     )
 
 
+#: Beyond this many sigma a price is not mean-reverting, it is repricing.
+#:
+#: Four, and the number is bounded from both sides. Below it sit the moves any
+#: fat-tailed return series throws off regularly, which are the strategy's
+#: actual business. Above it, under any distribution with finite variance, the
+#: observation is evidence against the model that produced the sigma rather
+#: than a signal from it -- a 4-sigma event is one in sixteen thousand under a
+#: normal, and a series showing them hourly is not normal.
+#:
+#: Fading a break is the single most expensive thing a mean-reversion book can
+#: do, because the position grows as the loss does: conviction rises with the
+#: z-score, so the worse the read the larger the bet.
+REGIME_BREAK_Z = 4.0
+
+
+def attainable_z(n: int) -> float:
+    """The largest |z-score| a sample of ``n`` points can produce.
+
+    A sample standard deviation is computed from the same points the z-score
+    measures, so one extreme value inflates the denominator it is divided by.
+    The bound that follows is (n - 1) / sqrt(n), and it is what makes a large
+    z on a short window suspicious rather than informative: near the ceiling,
+    the window's whole dispersion is the single move being measured.
+    """
+    if n < 2:
+        return 0.0
+    return (n - 1) / math.sqrt(n)
+
+
 def mean_reversion_signal(prices: np.ndarray, params: StrategyParams) -> Signal:
     """Z-score of price against its own rolling mean.
 
@@ -117,6 +146,34 @@ def mean_reversion_signal(prices: np.ndarray, params: StrategyParams) -> Signal:
         return Signal("mean_reversion", 0.0, 0.0, "price has not moved")
 
     z = (float(p[-1]) - mean) / sd
+
+    # Situational awareness, and the one gate this strategy was missing.
+    #
+    # A live trade read "price is 8.6 sigma below its 96-bar mean" and sized to
+    # maximum conviction, because ``value`` below is clipped at 1.0 and has no
+    # upper band -- the further the price fell, the more certain the program
+    # became.
+    #
+    # Two reasons that is backwards. The first is distributional: 8.6 sigma is
+    # not a deviation any return distribution produces, so observing one means
+    # the model is wrong, not that the price is cheap. The second is
+    # arithmetic and decides the threshold. For a sample of n, the largest
+    # z-score attainable is (n - 1) / sqrt(n) -- 9.69 at n = 96. An 8.6 is 89%
+    # of that ceiling, which says the window's entire variance *is* this move:
+    # the denominator is being set by the numerator, and the "sigma" it is
+    # measured in no longer describes anything that happened before it.
+    #
+    # So beyond the band this is a regime break, and the right response to a
+    # regime break is to stand aside until the window contains it.
+    if abs(z) >= REGIME_BREAK_Z:
+        ceiling = attainable_z(window.size)
+        return Signal(
+            "mean_reversion", 0.0, 0.0,
+            f"z {z:+.1f} is past the ±{REGIME_BREAK_Z:.0f} sanity band "
+            f"({abs(z) / ceiling:.0%} of the {ceiling:.1f} this window can "
+            f"even produce) — the mean this would revert to is set by the move "
+            f"itself, so this is a break, not a deviation")
+
     if abs(z) < params.exit_z:
         return Signal("mean_reversion", 0.0, 0.0,
                       f"z {z:+.2f} is inside the exit band ±{params.exit_z}")

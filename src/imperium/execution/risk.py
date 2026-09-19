@@ -76,9 +76,25 @@ class RiskLimits:
 #:   at all, and the median US listing trades in the tens of dollars.
 #: * Non-fractionable symbols need whole shares for any order.
 #:
-#: Twenty-five dollars buys one share of a large part of the market, which is
-#: what keeps the overnight strategy and non-fractionable names reachable.
-VIABLE_POSITION_NOTIONAL = 25.0
+#: Five dollars, for an ordinary fractional order -- which is what almost
+#: every position this book takes actually is.
+#:
+#: This was $25 and the number was right for the wrong scope. Twenty-five buys
+#: one share of a large part of the US market, which is what an **auction**
+#: order needs, because market-on-close and market-on-open refuse fractional
+#: quantities. It is not what an ordinary order needs, and charging it to
+#: every strategy is what stopped a $70 account trading at all: five positions
+#: of $11 were called unviable, the book concentrated into two of $28, and one
+#: crypto name ended up holding 35% of the account.
+#:
+#: Alpaca fills fractional equity orders down to $1 of notional. A position
+#: that cannot be halved twice and still clear that minimum cannot be trimmed,
+#: which is the property this floor exists to protect, and $5 clears it.
+#:
+#: The auction floor did not go away -- it moved to
+#: ``AssetClassSpec.auction_position_notional``, where only the strategies
+#: that send auction orders pay it.
+VIABLE_POSITION_NOTIONAL = 5.0
 
 #: The concurrency the base limits were written for. Used as the reference point
 #: the scaling below measures against, so the two cannot drift apart.
@@ -88,6 +104,21 @@ REFERENCE_POSITIONS = 5
 #: itself into limits that are not risk management any more.
 MAX_SCALED_RISK_PER_TRADE = 0.02
 MAX_SCALED_DAILY_LOSS_HALT = 0.10
+
+#: The most one symbol may ever hold, however small the account is.
+#:
+#: The concentration rule below spreads the same gross exposure over fewer
+#: names as the balance falls, which is the right shape and had no floor under
+#: it: at two positions it produced ``0.80 / 2`` = a 40% per-symbol cap, and a
+#: single crypto name was allowed 35% of a $70 book. One position moving 30%
+#: against a book like that is a third of the account, and the daily-loss halt
+#: it trips is measured after the fact.
+#:
+#: A cap this size means a very small account sometimes cannot take a position
+#: at all. That is the honest outcome: an account that can only express a view
+#: by betting a third of itself on it does not have a portfolio, and the
+#: refusal says so rather than sizing up to meet a floor.
+MAX_SCALED_POSITION_WEIGHT = 0.25
 
 #: How far past the per-trade budget raising a position to the venue minimum
 #: may go. Some overspend is unavoidable on a small account -- the floor is an
@@ -171,7 +202,8 @@ def scale_for_equity(equity: float, base: RiskLimits | None = None) -> AccountSc
     concentration = REFERENCE_POSITIONS / positions
     # Gross is unchanged: the book still risks the same fraction of itself in
     # total. It is spread over fewer names, so each may be larger.
-    weight = min(1.0, base.max_gross_exposure / positions)
+    weight = min(MAX_SCALED_POSITION_WEIGHT,
+                 base.max_gross_exposure / positions)
     # The per-trade budget follows the concentration, or it becomes the binding
     # constraint and hands back the size the position cap just allowed.
     risk = min(MAX_SCALED_RISK_PER_TRADE, base.risk_per_trade * concentration)
