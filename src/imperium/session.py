@@ -40,6 +40,7 @@ from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
 from imperium.notify import briefing as brief_mod
 from imperium.notify import greeting as greeting_mod
+from imperium.notify import daily
 from imperium.notify import telegram as tg
 from imperium.notify import voice as voice_mod
 from imperium.strategy import crosssection as xs_mod
@@ -277,6 +278,14 @@ class TradingSession:
         #: High-water mark of each open position's unrealised gain. Dropped
         #: when the position closes -- see _protect_positions.
         self._peaks: dict[str, protect.PositionPeak] = {}
+        #: The trading day whose brief has already gone out. Persisted, not
+        #: just held: this program is started by a batch file that relaunches
+        #: it whenever it exits, so an in-memory flag would send a fresh brief
+        #: after every crash and every overnight reboot.
+        self._brief_sent_day: str = ""
+        #: Counted for the brief, reset when the trading day rolls.
+        self._today_protected: int = 0
+        self._today_halt_reason: str = ""
         #: The last greeting, held so the voice endpoint can speak exactly
         #: what the screen was shown rather than drawing a second quote.
         self.opening: greeting_mod.Opening | None = None
@@ -944,6 +953,9 @@ class TradingSession:
                  # credentials on every restart of a program designed to
                  # restart itself.
                  "attached": self.credential.name if self.credential else "",
+                 # The day whose brief has gone out. On disk because the
+                 # restart loop would otherwise re-send it every crash.
+                 "brief_sent_day": self._brief_sent_day,
                  "saved_at": time.time()}, indent=2), encoding="utf-8")
             try:
                 path.chmod(0o600)
@@ -979,6 +991,9 @@ class TradingSession:
                 "held overnight will be reported as unmanaged rather than "
                 "exited automatically", detail=str(exc))
             return
+        sent = payload.get("brief_sent_day")
+        if isinstance(sent, str):
+            self._brief_sent_day = sent
         try:
             carried = payload.get("trend_holdings")
             if isinstance(carried, dict):
@@ -1428,6 +1443,105 @@ class TradingSession:
                 f"{symbol}: closing on the auction rather than carrying it "
                 f"overnight — {engine.decision.reason}")
 
+    def _todays_activity(self) -> daily.Activity:
+        """What the book did today, from what the program actually recorded.
+
+        Fills are counted off the broker's own ring by timestamp rather than
+        from a counter kept alongside it. A counter is a second copy of the
+        same fact, and it is the copy that drifts -- one missed increment and
+        the brief under-reports a day's trading with no way to tell.
+        """
+        since = self._day_started_at()
+        buys = sells = 0
+        for fill in self.broker.fills:
+            if fill.ts < since:
+                continue
+            if str(fill.side).lower().startswith("b"):
+                buys += 1
+            else:
+                sells += 1
+        return daily.Activity(
+            buys=buys, sells=sells, protected=self._today_protected,
+            halted=bool(self._today_halt_reason),
+            halt_reason=self._today_halt_reason)
+
+    def _day_started_at(self) -> float:
+        """Epoch seconds for the start of the current trading day."""
+        if not self._trading_day:
+            return 0.0
+        try:
+            day = dt.date.fromisoformat(self._trading_day)
+        except ValueError:
+            return 0.0
+        return dt.datetime.combine(
+            day, dt.time.min, tzinfo=dt.timezone.utc).timestamp()
+
+    def _todays_brief(self) -> daily.Brief:
+        prices = {s: (self.feed.quote(s).last or 0.0)
+                  for s in self.broker.positions}
+        positions = [
+            daily.Position(
+                symbol=symbol,
+                value=float(p.quantity) * prices.get(symbol, 0.0),
+                unrealised=(prices.get(symbol, 0.0) - float(p.avg_price))
+                * float(p.quantity),
+                basis=float(p.avg_price) * float(p.quantity))
+            for symbol, p in self.broker.positions.items()
+            if not p.is_flat and prices.get(symbol)
+        ]
+        stamp = self.market_clock.timestamp or dt.datetime.now(tz=dt.timezone.utc)
+        return daily.Brief(
+            day=stamp.strftime("%a %d %b"),
+            equity=self.engine_equity(),
+            day_start_equity=self.day_start_equity,
+            cash=float(self.broker.cash),
+            positions=positions,
+            activity=self._todays_activity(),
+            mode=self.mode.value if hasattr(self.mode, "value") else str(self.mode),
+        )
+
+    async def _maybe_send_daily_brief(self) -> None:
+        """One message a day, and exactly one.
+
+        The guard is deliberately not "have I sent one since I started". This
+        program is launched by a batch file that relaunches it whenever it
+        exits, so that question is answered "no" after every crash, every
+        restart and every overnight reboot -- and the operator gets a fresh
+        brief each time. The guard is the trading day, written to disk beside
+        the overnight book.
+        """
+        if not self.running:
+            return
+        from zoneinfo import ZoneInfo
+
+        stamp = self.market_clock.timestamp or dt.datetime.now(tz=dt.timezone.utc)
+        # Eastern, matching trading_day(): the brief is due after the US close,
+        # and a UTC boundary would file a 17:00 ET brief under the next day for
+        # half the year -- which would make the once-a-day guard let a second
+        # one through on exactly the evenings it mattered.
+        eastern = stamp.astimezone(ZoneInfo("America/New_York"))
+        today = eastern.date().isoformat()
+        if not daily.is_due(last_sent_day=self._brief_sent_day,
+                            now=eastern, today=today):
+            return
+
+        # Claimed before it is sent, and saved before it is sent. A failure to
+        # deliver must not leave the day unclaimed: Telegram being down for a
+        # minute would otherwise mean the brief is retried on the next tick,
+        # and the next, for the rest of the evening.
+        self._brief_sent_day = today
+        self._save_overnight_state()
+        text = daily.build(self._todays_brief())
+        if await self.notify(text):
+            self.telemetry.event(Level.INFO, "brief",
+                                 "the daily brief was sent")
+        else:
+            self.telemetry.event(
+                Level.INFO, "brief",
+                "the daily brief could not be delivered; it is not retried, "
+                "because a brief that arrives at midnight is worse than one "
+                "that does not arrive", detail=text[:200])
+
     async def _protect_positions(self) -> None:
         """Close a position that has given back too much of its own best.
 
@@ -1487,6 +1601,7 @@ class TradingSession:
                 continue
 
             self._peaks.pop(symbol, None)
+            self._today_protected += 1
             self.allocator.observe(symbol).current_weight = 0.0
             self.telemetry.pulse(symbol, "decision", verdict.reason, 0.9)
             self.telemetry.event(Level.WARN, "protect",
@@ -1940,6 +2055,7 @@ class TradingSession:
             await self._exit_overnight_holdings()
             self._report_unmanaged_equity()
         await self._protect_positions()
+        await self._maybe_send_daily_brief()
         await self._refresh_account_limits()
         await self._reconcile_book()
         # Before the split is taken: arming changes the split, and the engine
@@ -1978,6 +2094,7 @@ class TradingSession:
             # The book stopping itself is the other thing worth a buzz. Fired
             # once per halt, not per tick: check_daily_loss returns True only
             # on the transition.
+            self._today_halt_reason = self.allocator.halt_reason
             self._pending_notice = (
                 f"🛑 BOOK HALTED\n{self.allocator.halt_reason}\n"
                 f"Exits still pass; no new exposure is opened.")
@@ -2048,6 +2165,9 @@ class TradingSession:
             return
         first = self._trading_day == ""
         self._trading_day = today
+        # The brief reports one day, so its tallies belong to one day.
+        self._today_protected = 0
+        self._today_halt_reason = ""
         if equity > 0:
             self._set_daily_loss_reference(equity)
         self._seeded_from_account = self._seeded_from_account and not first
