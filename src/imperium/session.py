@@ -48,7 +48,7 @@ from imperium.execution.newsdesk import NewsDesk
 from imperium.execution.sector_sleeve import (
     SectorRunner, plan as sector_plan, summarise as sector_summarise,
 )
-from imperium.execution.sleeve_ledger import SleeveLedger, trading_day
+from imperium.execution.sleeve_ledger import SleeveLedger, to_eastern, trading_day
 from imperium.execution.capital import ENGINE, Claim, CapitalPlan, divide
 from imperium.venues.fx import FxDesk
 from imperium.strategy import sector_config as sector_cfg
@@ -1512,14 +1512,16 @@ class TradingSession:
         """
         if not self.running:
             return
-        from zoneinfo import ZoneInfo
-
         stamp = self.market_clock.timestamp or dt.datetime.now(tz=dt.timezone.utc)
         # Eastern, matching trading_day(): the brief is due after the US close,
         # and a UTC boundary would file a 17:00 ET brief under the next day for
         # half the year -- which would make the once-a-day guard let a second
         # one through on exactly the evenings it mattered.
-        eastern = stamp.astimezone(ZoneInfo("America/New_York"))
+        #
+        # to_eastern rather than ZoneInfo directly. Windows has no IANA
+        # database, and calling ZoneInfo here raised inside the trading loop
+        # on the first tick after five in the afternoon.
+        eastern = to_eastern(stamp)
         today = eastern.date().isoformat()
         if not daily.is_due(last_sent_day=self._brief_sent_day,
                             now=eastern, today=today):

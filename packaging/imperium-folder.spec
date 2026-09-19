@@ -38,7 +38,11 @@ datas = [
 ]
 
 hiddenimports = (
-    collect_submodules("uvicorn")
+    # zoneinfo finds tzdata through importlib.resources rather than by
+    # importing it, so PyInstaller's module graph never sees it and the frozen
+    # build would ship without a time zone database.
+    ["tzdata"]
+    + collect_submodules("uvicorn")
     + collect_submodules("websockets")
     + ["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
        "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"]

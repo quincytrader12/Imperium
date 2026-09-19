@@ -233,6 +233,36 @@ class SleeveLedger:
             log.error("could not persist the sector sleeve ledger: %s", exc)
 
 
+def to_eastern(now: dt.datetime | None = None) -> dt.datetime:
+    """A moment in US Eastern terms, on a machine that may not know what that is.
+
+    Windows ships no IANA time zone database. ``ZoneInfo("America/New_York")``
+    raises ``ZoneInfoNotFoundError`` there unless the ``tzdata`` package is
+    installed, and this program's whole reason for existing is to run
+    unattended on a Windows desktop.
+
+    ``tzdata`` is a declared dependency precisely so the fallback below is
+    never reached -- a fixed -5 offset is Eastern Standard Time and is an hour
+    wrong for the eight months of the year that are Daylight Time. It is kept
+    anyway because the alternative to an hour of error is an exception, and
+    this is called from inside the trading loop: the first version of the
+    daily brief called ZoneInfo directly, and a missing database took the
+    whole loop down on the tick after five in the afternoon.
+
+    One function rather than the call at each site, because there were two
+    sites and only one of them was guarded.
+    """
+    moment = now or dt.datetime.now(tz=dt.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        return moment.astimezone(ZoneInfo("America/New_York"))
+    except Exception:                                       # pragma: no cover
+        return moment.astimezone(dt.timezone(dt.timedelta(hours=-5)))
+
+
 def trading_day(now: dt.datetime | None = None) -> str:
     """The calendar day a run belongs to, in US Eastern terms.
 
@@ -241,12 +271,4 @@ def trading_day(now: dt.datetime | None = None) -> str:
     date and the same run in December on another, and the idempotency guard
     would let a second run through on exactly the days it mattered.
     """
-    moment = now or dt.datetime.now(tz=dt.timezone.utc)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=dt.timezone.utc)
-    try:
-        from zoneinfo import ZoneInfo
-        eastern = moment.astimezone(ZoneInfo("America/New_York"))
-    except Exception:                                       # pragma: no cover
-        eastern = moment.astimezone(dt.timezone(dt.timedelta(hours=-5)))
-    return eastern.date().isoformat()
+    return to_eastern(now).date().isoformat()
