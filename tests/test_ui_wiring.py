@@ -155,6 +155,22 @@ def test_dependencies_are_loaded_before_the_script_that_reads_them():
                 f"{provider} is loaded after app.js, which reads it")
 
 
+def _as_served() -> str:
+    """The markup the browser actually receives.
+
+    Not the file on disk. The server stamps every asset URL with a content
+    hash on the way out, and these checks ran against the raw file, so they
+    stayed green while the real build check failed on four "is not referenced
+    by the page at all" errors for files it had just fetched successfully.
+
+    A test pointed at something the running code never sees is the failure
+    this whole module exists to prevent, one level up.
+    """
+    from imperium.server.app import version_assets
+
+    return version_assets(INDEX, "0123456789ab")
+
+
 def test_the_build_verifies_every_asset_the_page_asks_for():
     """The packaging check derives its list from the page for the same reason.
 
@@ -165,13 +181,41 @@ def test_the_build_verifies_every_asset_the_page_asks_for():
     from pathlib import Path as _P
 
     sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "packaging"))
-    from verify_build import page_assets
+    from verify_build import page_assets, without_token
 
-    found = page_assets(INDEX)
+    found = {without_token(a) for a in page_assets(_as_served())}
     for script in _script_order():
         assert f"/static/{script}" in found, (
             f"the build check would not verify {script} shipped")
     assert "/static/styles.css" in found, "the stylesheet is not checked either"
+
+
+def test_the_build_check_survives_the_cache_busting_token():
+    """The break this caused, kept.
+
+    Every asset carries ?v=<hash> now. The check compares names without it
+    and fetches with it -- so the URL the browser really requests is the one
+    exercised, and a build whose assets are all present is not reported
+    broken because their URLs grew a query string.
+    """
+    import sys
+    from pathlib import Path as _P
+
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "packaging"))
+    from verify_build import check_assets
+
+    requested: list[str] = []
+
+    def fetch(path, timeout=5):
+        requested.append(path)
+        return 200, "x" * 5000
+
+    failures: list[str] = []
+    check_assets(fetch, _as_served(), failures)
+    assert failures == [], f"a complete bundle was reported broken: {failures}"
+    assert any("?v=" in r for r in requested), (
+        "the versioned URL was never actually fetched, so the token is "
+        "unverified")
 
 
 def test_the_build_check_actually_fails_when_an_asset_is_missing():

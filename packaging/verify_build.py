@@ -71,9 +71,20 @@ def check_assets(fetch, body: str, failures: list[str]) -> list[str]:
     """
     notes: list[str] = []
     assets = list(page_assets(body))
+    # Compared without the cache-busting token, fetched with it.
+    #
+    # The page stamps every asset URL with a content hash, so the markup says
+    # "/static/app.js?v=e241e4cddcb5" and an exact membership test against
+    # "/static/app.js" fails on a build where every one of those files was
+    # served perfectly. Which is what happened: four "is not referenced by the
+    # page at all" failures on a run whose own log showed each file fetched.
+    #
+    # The token still has to be exercised, so the graph walk below keeps the
+    # full URL. Only this presence check drops it.
+    named = {without_token(a) for a in assets}
     for required in ("/static/app.js", "/static/styles.css",
                      "/static/orb.boot.js", "/static/palette.js"):
-        if required not in assets:
+        if required not in named:
             failures.append(f"{required} is not referenced by the page at all")
     if not assets:
         failures.append("the page references no static files at all")
@@ -106,13 +117,18 @@ def check_assets(fetch, body: str, failures: list[str]) -> list[str]:
     return notes
 
 
+def without_token(url: str) -> str:
+    """An asset URL with its cache-busting query removed."""
+    return url.split("?", 1)[0]
+
+
 def module_imports(asset: str, source: str) -> list[str]:
     """The relative imports of one module, as absolute /static paths.
 
     Bare specifiers such as "three" are skipped: those resolve through the
     page's import map, whose targets are already collected from the markup.
     """
-    base = posixpath.dirname(asset)
+    base = posixpath.dirname(without_token(asset))
     found = re.findall(r"""(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]""",
                        source)
     return [posixpath.normpath(posixpath.join(base, spec)) for spec in found]
