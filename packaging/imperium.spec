@@ -24,10 +24,7 @@ datas = [
 ]
 
 hiddenimports = (
-    # zoneinfo finds tzdata through importlib.resources rather than by
-    # importing it, so PyInstaller's module graph never sees it.
-    ["tzdata"]
-    + collect_submodules("uvicorn")
+    collect_submodules("uvicorn")
     + collect_submodules("websockets")
     + ["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
        "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"]
@@ -41,7 +38,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "scipy", "pytest", "PIL"],
+    excludes=["tkinter", "matplotlib", "scipy", "pytest", "PIL", "tzdata"],
     noarchive=False,
 )
 

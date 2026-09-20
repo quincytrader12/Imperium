@@ -208,8 +208,24 @@ def check_backtest(exe: Path, failures: list[str]) -> None:
     print("  --backtest ran and produced a report")
 
 
-def wait_for_server(proc: subprocess.Popen, timeout: float = 90.0) -> None:
-    deadline = time.time() + timeout
+#: The longest a build may take to answer, in seconds.
+#:
+#: Derived from the program, not chosen: ``_open_when_ready`` gives the server
+#: this long to respond before it gives up and does not open a browser, so a
+#: build slower than this is one whose own launcher has already declared it
+#: broken. Measured here because it is not a property any unit test can see.
+#:
+#: One build spent six seconds of its startup opening 605 bundled time zone
+#: files. On a Windows machine, where Defender scans each newly extracted file
+#: on first launch, that was enough to pass the limit -- and the operator saw
+#: "server did not answer within 20s, not opening browser".
+STARTUP_BUDGET = 20.0
+
+
+def wait_for_server(proc: subprocess.Popen, timeout: float = 90.0) -> float:
+    """Block until the build answers, and return how long that took."""
+    started = time.time()
+    deadline = started + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
             out = (proc.stdout.read() if proc.stdout else "") or ""
@@ -219,7 +235,7 @@ def wait_for_server(proc: subprocess.Popen, timeout: float = 90.0) -> None:
         try:
             status, _ = fetch("/api/health", timeout=2)
             if status == 200:
-                return
+                return time.time() - started
         except (urllib.error.URLError, OSError):
             time.sleep(0.5)
     raise SystemExit(f"the executable did not answer within {timeout:.0f}s")
@@ -239,8 +255,16 @@ def main(exe: str) -> int:
     )
     failures: list[str] = []
     try:
-        wait_for_server(proc)
-        print("  server answered /api/health")
+        took = wait_for_server(proc)
+        print(f"  server answered /api/health in {took:.1f}s")
+        if took > STARTUP_BUDGET:
+            failures.append(
+                f"the build took {took:.1f}s to answer, past the "
+                f"{STARTUP_BUDGET:.0f}s its own launcher waits before giving "
+                f"up on opening a browser. An operator would see 'server did "
+                f"not answer' and a window that never opens. This is usually "
+                f"the bundle having grown: every file in it is scanned on "
+                f"first launch.")
 
         status, body = fetch("/")
         if status != 200:

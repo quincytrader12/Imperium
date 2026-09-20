@@ -11,12 +11,6 @@ dependencies = [
     "websockets>=12.0",
     "numpy>=1.26",
     "pydantic>=2.7",
-    # Windows ships no IANA time zone database, so zoneinfo cannot resolve
-    # "America/New_York" there without this. Everything in this program that
-    # is scheduled against the US session -- the trading day boundary, the
-    # daily brief -- depends on that lookup, and without tzdata it falls back
-    # to a fixed -5 offset that is an hour wrong for most of the year.
-    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

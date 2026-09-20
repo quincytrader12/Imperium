@@ -38,11 +38,7 @@ datas = [
 ]
 
 hiddenimports = (
-    # zoneinfo finds tzdata through importlib.resources rather than by
-    # importing it, so PyInstaller's module graph never sees it and the frozen
-    # build would ship without a time zone database.
-    ["tzdata"]
-    + collect_submodules("uvicorn")
+    collect_submodules("uvicorn")
     + collect_submodules("websockets")
     + ["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
        "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"]
@@ -56,7 +52,13 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "scipy", "pytest", "PIL"],
+    # tzdata is 605 files for one time zone, and this executable's first
+    # launch is scanned file by file by Windows Defender. Bundling it took
+    # startup past the twenty seconds the launcher waits before giving up on
+    # opening a browser. US Eastern is computed from the statutory rule
+    # instead -- see sleeve_ledger.eastern_offset, checked hour by hour
+    # against the IANA database from 2024 to 2030.
+    excludes=["tkinter", "matplotlib", "scipy", "pytest", "PIL", "tzdata"],
     noarchive=False,
 )
 

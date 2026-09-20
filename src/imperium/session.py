@@ -483,6 +483,26 @@ class TradingSession:
         name = payload.get("attached") if isinstance(payload, dict) else ""
         return str(name or "")
 
+    def _set_client(self, client: "AlpacaClient | None") -> None:
+        """Assign the venue client, and re-point whatever is holding the old one.
+
+        LiveBroker takes its client at construction and keeps it. That is fine
+        until the client is replaced: attach_credential closes the old one and
+        builds a new one, and the broker is left holding a closed client. Every
+        tick reconciles the book through that broker, so the trading loop
+        raised "cannot send a request, as the client has been closed" on each
+        one, forever, with no way back short of a restart.
+
+        One assignment point, because the bug was an assignment that forgot
+        about a second reference. A new holder added later still has to be
+        added here -- but it has one obvious place to be added to, rather than
+        three call sites to be remembered at.
+        """
+        self.client = client
+        broker = getattr(self, "broker", None)
+        if client is not None and isinstance(broker, LiveBroker):
+            broker.client = client
+
     async def attach_credential(self, store: CredentialStore,
                                 name: str | None) -> None:
         """Attach a stored key, or run with none.
@@ -497,9 +517,9 @@ class TradingSession:
             self.lamps.key = "off"
             # No key: an unauthenticated client still serves the clock and the
             # public data endpoints, which is what the scanner renders from.
-            self.client = AlpacaClient("", "", paper=self.paper_endpoint,
-                                       data_url=self.spec.data_url,
-                                       feed=self.spec.default_feed)
+            self._set_client(AlpacaClient("", "", paper=self.paper_endpoint,
+                                          data_url=self.spec.data_url,
+                                          feed=self.spec.default_feed))
             return
         cred = store.require(name)
         # Written now rather than at the next overnight save: a session that
@@ -507,10 +527,10 @@ class TradingSession:
         # attached.
         self._remember_attached(cred.name)
         self.credential = cred
-        self.client = AlpacaClient(cred.api_key, cred.secret,
-                                   paper=self.paper_endpoint,
-                                   data_url=self.spec.data_url,
-                                   feed=self.spec.default_feed)
+        self._set_client(AlpacaClient(cred.api_key, cred.secret,
+                                      paper=self.paper_endpoint,
+                                      data_url=self.spec.data_url,
+                                      feed=self.spec.default_feed))
         self.feed.set_credentials(cred.api_key, cred.secret)
         try:
             # The key check already costs this request, so the balance arrives

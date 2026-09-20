@@ -233,24 +233,57 @@ class SleeveLedger:
             log.error("could not persist the sector sleeve ledger: %s", exc)
 
 
+def _nth_sunday(year: int, month: int, nth: int) -> int:
+    """Day of the month of the nth Sunday. ``nth`` is 1-based."""
+    first = dt.date(year, month, 1)
+    # weekday(): Monday is 0, Sunday is 6.
+    return 1 + (6 - first.weekday()) % 7 + 7 * (nth - 1)
+
+
+def eastern_offset(moment: dt.datetime) -> dt.timedelta:
+    """The UTC offset for US Eastern, from the statutory rule.
+
+    Since the Energy Policy Act of 2005 took effect in 2007, US daylight time
+    runs from 02:00 local on the second Sunday in March to 02:00 local on the
+    first Sunday in November. Those two instants are 07:00 and 06:00 UTC, and
+    the offset is -4 between them and -5 outside.
+
+    Computed rather than looked up because the alternative is shipping the
+    IANA database -- 605 files, for one zone -- inside a Windows executable
+    whose first launch is already scanned file by file by Defender. That is
+    what this program did for exactly one build, and that build did not start
+    inside the twenty seconds its own launcher waits.
+
+    The liability is that this is law, and law changes: a US move to permanent
+    daylight time would make it wrong, silently, by an hour. That is why the
+    IANA database is still preferred wherever it exists -- see to_eastern --
+    and why this is the fallback rather than the rule.
+    """
+    year = moment.year
+    begins = dt.datetime(year, 3, _nth_sunday(year, 3, 2), 7,
+                         tzinfo=dt.timezone.utc)
+    ends = dt.datetime(year, 11, _nth_sunday(year, 11, 1), 6,
+                       tzinfo=dt.timezone.utc)
+    return dt.timedelta(hours=-4 if begins <= moment < ends else -5)
+
+
 def to_eastern(now: dt.datetime | None = None) -> dt.datetime:
     """A moment in US Eastern terms, on a machine that may not know what that is.
 
-    Windows ships no IANA time zone database. ``ZoneInfo("America/New_York")``
-    raises ``ZoneInfoNotFoundError`` there unless the ``tzdata`` package is
-    installed, and this program's whole reason for existing is to run
+    Windows ships no IANA time zone database, so
+    ``ZoneInfo("America/New_York")`` raises there unless ``tzdata`` is
+    installed -- and this program's whole reason for existing is to run
     unattended on a Windows desktop.
 
-    ``tzdata`` is a declared dependency precisely so the fallback below is
-    never reached -- a fixed -5 offset is Eastern Standard Time and is an hour
-    wrong for the eight months of the year that are Daylight Time. It is kept
-    anyway because the alternative to an hour of error is an exception, and
-    this is called from inside the trading loop: the first version of the
-    daily brief called ZoneInfo directly, and a missing database took the
-    whole loop down on the tick after five in the afternoon.
+    Bundling tzdata solved that and caused a worse problem: 605 files for one
+    zone, in an executable Defender scans file by file on first launch, and a
+    build that did not answer within the twenty seconds its own launcher
+    waits before giving up on opening a browser.
 
-    One function rather than the call at each site, because there were two
-    sites and only one of them was guarded.
+    So the database is used where it already exists, which is every developer
+    machine and every CI runner, and the statutory rule stands in where it
+    does not. The fallback is now *correct* rather than an hour wrong, which
+    is what makes it safe to rely on.
     """
     moment = now or dt.datetime.now(tz=dt.timezone.utc)
     if moment.tzinfo is None:
@@ -259,8 +292,8 @@ def to_eastern(now: dt.datetime | None = None) -> dt.datetime:
         from zoneinfo import ZoneInfo
 
         return moment.astimezone(ZoneInfo("America/New_York"))
-    except Exception:                                       # pragma: no cover
-        return moment.astimezone(dt.timezone(dt.timedelta(hours=-5)))
+    except Exception:
+        return moment.astimezone(dt.timezone(eastern_offset(moment)))
 
 
 def trading_day(now: dt.datetime | None = None) -> str:

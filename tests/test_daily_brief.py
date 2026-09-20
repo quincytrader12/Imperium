@@ -14,6 +14,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 
+import pytest
+
 from imperium import config
 from imperium.notify import daily
 
@@ -168,3 +170,56 @@ def test_a_position_with_no_basis_shows_no_percentage():
         day="x", equity=100.0, day_start_equity=100.0, cash=50.0,
         positions=[daily.Position("X", 50.0, 5.0, basis=0.0)]))
     assert "%" not in text.split("Positions")[1].split("Activity")[0]
+
+
+# -- knowing what time it is in New York, without 605 files ------------------
+
+
+def test_the_computed_rule_matches_the_real_database_exactly():
+    """The fallback has to be right, because it is what the .exe uses.
+
+    Bundling the IANA database cost 605 files and six seconds of first-launch
+    startup, and the build that shipped it did not answer inside the twenty
+    seconds its own launcher waits. So US Eastern is computed from the
+    statutory rule -- second Sunday in March to first Sunday in November --
+    and this checks it against the database hour by hour rather than at the
+    four transitions, because an off-by-one in the nth-Sunday arithmetic moves
+    a boundary by a week and still passes a spot check.
+    """
+    import datetime as dt
+
+    zoneinfo = pytest.importorskip("zoneinfo")
+    from imperium.execution.sleeve_ledger import eastern_offset
+
+    try:
+        ny = zoneinfo.ZoneInfo("America/New_York")
+    except zoneinfo.ZoneInfoNotFoundError:          # pragma: no cover
+        pytest.skip("no IANA database on this machine to check against")
+
+    moment = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2031, 1, 1, tzinfo=dt.timezone.utc)
+    mismatches = []
+    while moment < end:
+        if moment.astimezone(ny).utcoffset() != eastern_offset(moment):
+            mismatches.append(moment.isoformat())
+        moment += dt.timedelta(hours=1)
+    assert not mismatches, (
+        f"{len(mismatches)} hours disagree with the real database, first at "
+        f"{mismatches[0]}")
+
+
+def test_the_transitions_land_on_the_right_sundays():
+    """Named explicitly, so a failure says which end moved."""
+    import datetime as dt
+
+    from imperium.execution.sleeve_ledger import _nth_sunday
+
+    # 2026: March 8 is the second Sunday, November 1 the first.
+    assert _nth_sunday(2026, 3, 2) == 8
+    assert _nth_sunday(2026, 11, 1) == 1
+    # 2027: March 14 and November 7.
+    assert _nth_sunday(2027, 3, 2) == 14
+    assert _nth_sunday(2027, 11, 1) == 7
+    # A month starting on a Sunday must not skip a week.
+    assert _nth_sunday(2026, 2, 1) == 1
+    assert dt.date(2026, 2, 1).weekday() == 6

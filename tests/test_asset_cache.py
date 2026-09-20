@@ -115,3 +115,50 @@ def test_index_html_is_not_part_of_the_token():
 def test_a_url_that_already_has_a_query_is_left_alone():
     markup = '<img src="/static/x.png?size=2">'
     assert version_assets(markup, "abc") == markup
+
+
+# -- what the bundle may cost to start ---------------------------------------
+
+
+def test_the_time_zone_database_is_not_bundled():
+    """605 files for one time zone, and it broke the build that shipped it.
+
+    Windows Defender scans every newly extracted file on a PyInstaller
+    bundle's first launch. Adding tzdata took the file count from 132 to 782
+    and first-launch startup from 0.7s to 6s here -- on Linux, with no
+    antivirus at all. On the operator's machine it passed the twenty seconds
+    the launcher waits, and they saw "server did not answer within 20s, not
+    opening browser" on a terminal that never opened.
+
+    US Eastern is computed from the statutory rule instead. That rule is
+    checked hour by hour against the real database in test_daily_brief.py.
+    """
+    from pathlib import Path
+
+    spec = (Path(__file__).resolve().parents[1]
+            / "packaging" / "imperium-folder.spec").read_text(encoding="utf-8")
+    assert '"tzdata"' not in spec.split("excludes=")[0], (
+        "tzdata is a hidden import again; the bundle will grow six-fold")
+    assert "tzdata" in spec.split("excludes=")[1].split("]")[0], (
+        "nothing stops a dependency pulling tzdata back into the bundle")
+
+
+def test_the_build_check_enforces_a_startup_budget():
+    """The property no unit test can see.
+
+    A build that is correct in every way and takes half a minute to answer is
+    a build whose own launcher gives up on it. The budget is read from the
+    launcher rather than chosen, so the two cannot drift apart.
+    """
+    import sys
+    from pathlib import Path as _P
+
+    sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "packaging"))
+    from verify_build import STARTUP_BUDGET
+
+    from imperium.server.app import _open_when_ready
+
+    waits = _open_when_ready.__defaults__[0]
+    assert STARTUP_BUDGET <= waits, (
+        f"the build check allows {STARTUP_BUDGET}s but the launcher only "
+        f"waits {waits}s, so a build can pass and still never open a window")
