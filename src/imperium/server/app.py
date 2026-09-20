@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import ipaddress
 import logging
+import re
 import sys
 import threading
 import time
@@ -48,6 +50,96 @@ log = logging.getLogger("imperium.server")
 #: frame rate is what the client needs, and it bounds the server's work
 #: regardless of how busy the book is.
 SNAPSHOT_HZ = 1.0
+
+#: Memoised by asset_version(). The files cannot change under a running
+#: process: in a frozen build they are unpacked once, and from source a
+#: developer restarts.
+_ASSET_VERSION = ""
+
+
+class VersionedStatic(StaticFiles):
+    """Static files that cannot serve a stale build, and still cache well.
+
+    Versioning the URLs in the page closes most of the hole but not all of
+    it: the orb is ES modules, and ``import { ProcessOrb } from './orb.js'``
+    resolves to an unversioned URL that no rewrite of the markup can reach.
+    Leaving those to heuristic caching is how a new build renders an old orb.
+
+    So the rule is per-request rather than per-file:
+
+    * **With a ``?v=`` token** the URL changes whenever the bytes do, so the
+      response is safe to keep forever and is marked immutable. This is the
+      fast path and it covers every entry point the page names.
+    * **Without one** -- a relative import between modules -- the response
+      must be revalidated before use. ``no-cache`` does not mean "do not
+      store"; it means "ask first", and with the ETag that Starlette already
+      sends the answer is a 304 with no body. Over loopback that is free.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        query = scope.get("query_string", b"")
+        versioned = b"v=" in query
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable" if versioned else "no-cache")
+        return response
+
+
+def asset_version() -> str:
+    """A token that changes exactly when the static files change.
+
+    The bug this fixes, which would have recurred on every build shipped:
+    ``/`` is regenerated from disk on each request, so the markup was always
+    current, while every asset it names -- app.js, styles.css, palette.js,
+    orb.boot.js, the vendored three.js -- was an unversioned URL served with
+    no Cache-Control header at all.
+
+    With no cache directive a browser is free to apply heuristic freshness,
+    and a normal refresh does not revalidate subresources; only a hard reload
+    does. The result is new HTML running old JavaScript, which presents as
+    "the terminal is showing an old build even after refreshing" and is
+    impossible to distinguish from a build that did not install.
+
+    A content hash rather than the version string, because two builds of the
+    same version are exactly the case that goes wrong -- and rather than an
+    mtime, because PyInstaller's unpack sets its own timestamps and a file
+    restored from a backup can have an older one than the file it replaced.
+
+    Read once. The cost is one pass over a few hundred kilobytes at startup,
+    and it buys a URL that is safe to cache forever.
+    """
+    global _ASSET_VERSION
+    if _ASSET_VERSION:
+        return _ASSET_VERSION
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(static_dir().rglob("*")):
+            if path.is_file() and path.name != "index.html":
+                digest.update(path.name.encode("utf-8"))
+                digest.update(path.read_bytes())
+    except OSError:
+        # Never fatal. A version that cannot be computed becomes the process
+        # start time, which is still correct across a restart -- the only way
+        # the files change in a packaged build.
+        _ASSET_VERSION = f"{int(time.time()):x}"
+        return _ASSET_VERSION
+    _ASSET_VERSION = digest.hexdigest()[:12]
+    return _ASSET_VERSION
+
+
+#: Matches every /static/… URL the page names, in a tag or in the import map.
+_ASSET_URL = re.compile(r'(["\'])(/static/[^"\'?]+)\1')
+
+
+def version_assets(markup: str, token: str) -> str:
+    """Stamp every /static URL in the page with the build token.
+
+    Rewritten on the way out rather than written into index.html, because the
+    import map names files no tag points at -- a hand-maintained list would go
+    stale exactly when a new module was added, which is when it matters.
+    """
+    return _ASSET_URL.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}?v={token}{m.group(1)}", markup)
 
 
 def static_dir() -> Path:
@@ -322,7 +414,12 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         # Explicit utf-8: the platform default is cp1252 on Windows, and one
         # box-drawing character would fail the Windows build while passing
         # everywhere it was tested.
-        return HTMLResponse(page.read_text(encoding=config.TEXT_ENCODING))
+        markup = version_assets(
+            page.read_text(encoding=config.TEXT_ENCODING), asset_version())
+        # The page itself must never be cached. It is the only thing that
+        # carries the current asset version, so a stale copy of it pins the
+        # browser to a stale build no matter how new the files on disk are.
+        return HTMLResponse(markup, headers={"Cache-Control": "no-store"})
 
     @app.get("/diagnose", response_class=PlainTextResponse)
     async def diagnose(venue: str = registry.DEFAULT_VENUE) -> PlainTextResponse:
@@ -852,7 +949,8 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         finally:
             session.lamps.link = "off"
 
-    app.mount("/static", StaticFiles(directory=str(static_dir())), name="static")
+    app.mount("/static", VersionedStatic(directory=str(static_dir())),
+              name="static")
     return app
 
 
