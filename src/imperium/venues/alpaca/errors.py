@@ -39,7 +39,10 @@ _TABLE: dict[int, Remedy] = {
         "the account is not permitted to do this",
         "Usually insufficient buying power, or an attempt to sell more than is "
         "held. It also covers an account that is restricted, or an asset the "
-        "account is not approved to trade.",
+        "account is not approved to trade. On a sell, check for an open sell "
+        "order on the same symbol first: the venue holds those shares until "
+        "it fills or is cancelled, so a second exit is selling stock that is "
+        "already spoken for even though the position is still shown.",
     ),
     40310010: Remedy(
         40310010,

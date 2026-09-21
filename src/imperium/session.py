@@ -1622,17 +1622,31 @@ class TradingSession:
                     f"could not be closed: {exc}")
                 continue
 
+            # Dropped whether or not an order went out. The verdict will be
+            # the same on the next tick and the one after it, and repeating it
+            # six seconds apart buries the log it is written to.
             self._peaks.pop(symbol, None)
+            self.telemetry.pulse(symbol, "decision", verdict.reason, 0.9)
+            if fill is None:
+                # The broker declined, and it has already said why -- most
+                # often because an exit for these shares is already working at
+                # the venue. Counting it would put a close in the daily brief
+                # that never happened, and the point of that brief is that its
+                # numbers can be trusted.
+                self.telemetry.event(
+                    Level.WARN, "protect",
+                    f"{symbol} {verdict.reason}, but no order was sent; the "
+                    f"order log says why")
+                continue
+
             self._today_protected += 1
             self.allocator.observe(symbol).current_weight = 0.0
-            self.telemetry.pulse(symbol, "decision", verdict.reason, 0.9)
             self.telemetry.event(Level.WARN, "protect",
                                  f"{symbol} {verdict.reason}")
-            if fill:
-                self._pending_notice = (
-                    f"🛡️ PROTECTED {symbol}\n"
-                    f"closed at {gain:+.1%} after a {peak:+.1%} best.\n"
-                    f"{verdict.band:.1%} was the most it could give back.")
+            self._pending_notice = (
+                f"🛡️ PROTECTED {symbol}\n"
+                f"closed at {gain:+.1%} after a {peak:+.1%} best.\n"
+                f"{verdict.band:.1%} was the most it could give back.")
 
     def _bar_sigma(self, symbol: str) -> float:
         """Per-bar return volatility, so the give-back band clears the noise.

@@ -454,6 +454,12 @@ async def test_an_auction_order_never_reaches_a_crypto_symbol():
         async def asset(self, symbol):
             return None
 
+        async def open_orders(self, symbols=None):
+            # Nothing working, so nothing is reserved. Asked on every sell,
+            # because the venue holds stock against an open sell order while
+            # the local book still shows the position.
+            return []
+
         async def place_order(self, symbol, side, **kw):
             sent.append((symbol, kw.get("time_in_force")))
             return {"id": "x", "client_order_id": "c", "filled_qty": "1",
@@ -488,6 +494,12 @@ async def test_an_auction_order_is_rounded_down_to_whole_shares():
 
         async def asset(self, symbol):
             return None
+
+        async def open_orders(self, symbols=None):
+            # Nothing working, so nothing is reserved. Asked on every sell,
+            # because the venue holds stock against an open sell order while
+            # the local book still shows the position.
+            return []
 
         async def place_order(self, symbol, side, *, qty, **kw):
             sent.append(qty)

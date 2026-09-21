@@ -476,6 +476,42 @@ class LiveBroker(_BaseBroker):
             if qty != 0:
                 self.positions[symbol] = Position(symbol, qty, avg)
 
+    async def reserved_for_sale(self, symbol: str) -> Decimal:
+        """Shares already committed to an open sell order at the venue.
+
+        The venue reserves stock against a working sell. The local book does
+        not: it still shows the position, correctly, because nothing has sold
+        yet. So a second exit for the same shares passes every check here and
+        is rejected there, with a message about selling more than is held --
+        which reads like a book that has drifted, and is not.
+
+        The live case: the overnight exit lodges a market-on-open sell that
+        sits until the auction. Anything that then decides to exit the same
+        position -- the give-back ratchet, or a retry of the overnight exit
+        itself -- sends an order that cannot fill. That is what leaves orders
+        showing a quantity and a filled quantity of zero.
+
+        Returns zero when the venue cannot be asked. Failing open is right
+        here: refusing to sell because the order list is unavailable would
+        trap a position, and the venue rejects the duplicate anyway.
+        """
+        try:
+            orders = await self.client.open_orders([symbol])
+        except VenueError:
+            return Decimal("0")
+        total = Decimal("0")
+        for row in orders:
+            if row.get("symbol") != symbol:
+                continue
+            if str(row.get("side", "")).lower() != "sell":
+                continue
+            # What is still working, not what was asked for: a partially
+            # filled order only reserves the remainder.
+            asked = to_decimal(row.get("qty") or 0)
+            done = to_decimal(row.get("filled_qty") or 0)
+            total += max(Decimal("0"), asked - done)
+        return total
+
     async def apply_target(self, symbol: str, target_weight: float, price: float,
                            equity: float, *, order: str = MARKET) -> Fill | None:
         if not self._armed:
@@ -511,10 +547,28 @@ class LiveBroker(_BaseBroker):
         side = "buy" if delta > 0 else "sell"
         if side == "sell":
             held = self.position(symbol).quantity
+            # Only when stock is actually held. A sell against a flat or short
+            # book is opening or extending a short, not disposing of shares,
+            # and nothing is reserved against it -- asking the venue would be a
+            # round trip to learn nothing, and subtracting would refuse a
+            # legitimate order.
             if held > 0:
-                # Never try to sell more than is held; that is a rejection, and
-                # rounding is the usual cause.
-                qty = min(qty, held)
+                # Minus whatever a working sell has already spoken for. Without
+                # this the order is sized against stock the venue has reserved
+                # and comes back "not permitted ... an attempt to sell more
+                # than is held", which sends the operator looking for a book
+                # that has drifted when nothing has.
+                available = held - await self.reserved_for_sale(symbol)
+                if available <= 0:
+                    self._refuse(
+                        symbol,
+                        f"an exit for all {held} is already working at the "
+                        f"venue, which holds the stock until it fills or is "
+                        f"cancelled. Another would be rejected, not queued.")
+                    return None
+                # Never try to sell more than is available; that is a
+                # rejection, and rounding is the usual cause.
+                qty = min(qty, available)
             if qty <= 0:
                 return None
 
