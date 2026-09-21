@@ -1407,7 +1407,22 @@
     var ws = new WebSocket(proto + '://' + location.host + '/ws');
     state.ws = ws;
 
-    ws.onopen = function () { state.retry = 1000; };
+    ws.onopen = function () {
+      state.retry = 1000;
+      state.linkOpenedAt = Date.now();
+      /* A keepalive, because an idle localhost socket is not guaranteed to
+       * stay open. Windows security software and some VPN filter drivers reap
+       * connections that carry no traffic, and the server only ever sends --
+       * so from the operating system's point of view this socket is
+       * one-directional and idle in the inbound direction. One tiny frame
+       * every fifteen seconds is cheaper than a reconnect. */
+      if (state.linkPing) clearInterval(state.linkPing);
+      state.linkPing = setInterval(function () {
+        if (ws.readyState === 1) {
+          try { ws.send('ping'); } catch (e) { /* the close handler deals */ }
+        }
+      }, 15000);
+    };
     ws.onmessage = function (ev) {
       var s;
       try { s = JSON.parse(ev.data); } catch (e) { return; }
@@ -1428,8 +1443,30 @@
         console.error('render failed', e);
       }
     };
-    ws.onclose = function () {
-      $('lamp-link').className = 'lamp bad';
+    ws.onclose = function (ev) {
+      /* The close code, kept rather than discarded.
+       *
+       * "the link goes red often" is unanswerable without it, and it was
+       * being thrown away: this handler took no argument at all. The codes
+       * say different things and point at different culprits -- 1006 is an
+       * abnormal close with no close frame, which means something below the
+       * application dropped the connection (a firewall, an antivirus filter
+       * driver, a VPN); 1001 is a page navigating away; 1011 is the server
+       * failing. Guessing between those costs a build each time. */
+      if (state.linkPing) { clearInterval(state.linkPing); state.linkPing = null; }
+      var held = state.linkOpenedAt
+        ? Math.round((Date.now() - state.linkOpenedAt) / 1000) : 0;
+      var code = (ev && ev.code) || 0;
+      var why = (ev && ev.reason) || '';
+      state.linkDrops = (state.linkDrops || 0) + 1;
+      state.lastLinkClose = { code: code, reason: why, heldSeconds: held };
+      console.warn('link closed: code ' + code + (why ? ' (' + why + ')' : '')
+                   + ' after ' + held + 's — drop #' + state.linkDrops);
+      var lamp = $('lamp-link');
+      lamp.className = 'lamp bad';
+      /* On the lamp itself, so the operator can read it without a console. */
+      lamp.title = 'link closed: code ' + code + (why ? ' — ' + why : '')
+                 + ' after ' + held + 's (' + state.linkDrops + ' so far)';
       setTimeout(connect, state.retry);
       state.retry = Math.min(10000, state.retry * 2);
     };

@@ -888,8 +888,34 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         # would have them stealing each other's rows.
         since_pulse = 0
         since_event = 0
+
+        # Drained, rather than left to pile up.
+        #
+        # This loop only ever sent. Starlette buffers whatever the client
+        # sends until the application receives it, and the client now sends a
+        # small keepalive -- so without a reader those frames accumulate for
+        # as long as the tab is open.
+        #
+        # It also fixes the thing the comment below used to describe rather
+        # than solve: a socket that closes is noticed here immediately, on the
+        # disconnect message, instead of on the next send several hundred
+        # milliseconds later.
+        gone = asyncio.Event()
+
+        async def drain() -> None:
+            try:
+                while True:
+                    message = await ws.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        break
+            except Exception:
+                pass
+            finally:
+                gone.set()
+
+        reader = asyncio.create_task(drain())
         try:
-            while True:
+            while not gone.is_set():
                 start = time.perf_counter()
                 try:
                     # A client whose cursor has fallen behind the ring cannot be
@@ -941,12 +967,20 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                 with contextlib.suppress(Exception):
                     await session.supervise()
                 elapsed = time.perf_counter() - start
-                await asyncio.sleep(max(0.05, (1.0 / SNAPSHOT_HZ) - elapsed))
+                # Woken by the drain task on disconnect rather than sleeping
+                # out the rest of the frame and discovering it on the next
+                # send.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        gone.wait(), max(0.05, (1.0 / SNAPSHOT_HZ) - elapsed))
         except WebSocketDisconnect:
             pass
         except Exception:
             log.exception("the websocket loop failed")
         finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reader
             session.lamps.link = "off"
 
     app.mount("/static", VersionedStatic(directory=str(static_dir())),

@@ -86,13 +86,40 @@ export class OrbBridge {
     }
 
     const now = performance.now();
+    // Stamped by when the work happened, not by when the frame carrying it
+    // arrived.
+    //
+    // The bug this fixes was visible rather than subtle: the orb sat almost
+    // still, and the one time it moved fluently was when the link dropped.
+    // A reconnect re-sends everything since the client's cursor, so a few
+    // seconds of backlog landed in a single frame -- and stamped at arrival,
+    // eighty pulses all fell inside the three-second rate window at once.
+    // The orb read that as maximum activity and slammed into its intense
+    // state. The most dramatic thing on the panel was an artefact of the
+    // connection breaking.
+    //
+    // The server already sends each pulse's own ts. Mapping it onto the
+    // performance clock means replayed history ages out of the window
+    // immediately, which is what it should do: a pulse from eight seconds ago
+    // is not evidence of what the book is doing now.
+    const epochNow = Date.now();
     for (const p of fresh) {
       const kind = this.stamps[p.kind] ? p.kind : 'scan';
-      this.stamps[kind].push(now);
-      this._allStamps.push(now);
+      // Clamped to now: a client clock behind the server's would otherwise
+      // stamp pulses in the future and hold them in the window for ever.
+      const age = Number.isFinite(p.ts) ? Math.max(0, epochNow - p.ts * 1000) : 0;
+      const at = now - age;
+      this.stamps[kind].push(at);
+      this._allStamps.push(at);
       this.orb.event(kind, p.symbol, p.intensity);
+      // The alert is not rate-based, so it keeps arrival time: a halt that
+      // reaches the operator late is still the thing they must see now.
       if (ALERT_KINDS[p.kind]) this.lastAlert = now;
     }
+    // Pushed in stamp order, or one late arrival leaves the array unsorted
+    // and _expire's shift-from-the-front stops trimming correctly.
+    for (const kind of this.kinds) this.stamps[kind].sort((a, b) => a - b);
+    this._allStamps.sort((a, b) => a - b);
     this._expire();
     this._push();
     return fresh.length;
