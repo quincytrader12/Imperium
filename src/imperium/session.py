@@ -379,6 +379,11 @@ class TradingSession:
         #: When the trading loop last began an iteration. A loop that stops
         #: ticking is invisible from every other indicator.
         self._loop_beat: float = 0.0
+        #: Set by the server, which starts the measurement -- the
+        #: question it answers is asked when the session is *not*
+        #: running as often as when it is. None in tests that build a
+        #: session without a server.
+        self.loop_watch = None
         #: How many times the supervisor has had to restart the loop. Published
         #: rather than hidden: a terminal that quietly restarts itself all night
         #: is a terminal with a problem worth seeing.
@@ -2658,6 +2663,13 @@ class TradingSession:
             "reconciliations": self.reconciliations,
             "keep_awake": self.keep_awake.as_dict(),
             "loop_age": (time.time() - self._loop_beat) if self._loop_beat else None,
+            # How late the event loop itself has been running. Separate
+            # from loop_age, which says whether the trading loop is
+            # beating: this says whether *anything* could run at all.
+            "loop_lag": (self.loop_watch.report()
+                         if self.loop_watch is not None else None),
+            "loop_lag_verdict": (self.loop_watch.verdict()
+                                 if self.loop_watch is not None else ""),
             "limits": self._limits_block(),
             "account_scale": self._scale_block(),
             "regime_census": self._regime_census(),

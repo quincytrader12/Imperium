@@ -600,7 +600,22 @@
         note.className = s.restarts ? 'warn' : '';
       }
       hz.title = (ka.note || '') + (s.loop_age !== null && s.loop_age !== undefined
-        ? '\nlast loop tick ' + s.loop_age.toFixed(1) + 's ago' : '');
+        ? '\nlast loop tick ' + s.loop_age.toFixed(1) + 's ago' : '')
+        /* The server's own answer to "did the terminal stall?". The link lamp
+         * carries the browser's side of a dropped connection; this carries the
+         * other end, so the two can be read together instead of guessed at. */
+        + (s.loop_lag_verdict ? '\nevent loop: ' + s.loop_lag_verdict : '');
+      /* Said out loud when it is the answer to something. A stall long enough
+       * to drop the link is not a tooltip detail -- it is the reason the
+       * terminal went quiet. */
+      if (s.loop_lag && s.loop_lag.stalls) {
+        var un = $('hz-uptime-note');
+        if (un) {
+          un.textContent = (un.textContent ? un.textContent + ' · ' : '')
+            + s.loop_lag.stalls + ' stall' + (s.loop_lag.stalls > 1 ? 's' : '');
+          un.className = 'warn';
+        }
+      }
     }
 
     state.ecg.push(h.score);

@@ -32,14 +32,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from imperium import config, logging_setup
+from imperium import config, logging_setup, loopwatch
 from imperium.diagnostics.layers import NetworkDiagnostic
 from imperium.notify import ask as ask_mod
 from imperium.notify import telegram, voice
 from imperium.execution.broker import LIVE_CONFIRMATION_PHRASE, Mode, ModeSwitchRefused
 from imperium.security.credentials import CredentialError, CredentialStore
 from imperium.execution.sleeve_ledger import trading_day
-from imperium.session import TradingSession
+from imperium.session import LOOP_STALL_SECONDS, TradingSession
 from imperium.telemetry.streams import Level
 from imperium.venues import registry
 from imperium.venues.alpaca.client import VenueError
@@ -390,7 +390,49 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                 Level.ERROR, "security",
                 "the credentials file could not be loaded",
                 detail=state["store_error"])
-        yield
+        # Started here rather than with the trading loop, because the
+        # question it answers -- did this process stall? -- is asked most
+        # often when nothing is running.
+        session_ = state["session"]
+        watch = loopwatch.LoopWatch()
+        session_.loop_watch = watch
+
+        def _say(lag: float) -> None:
+            session_.telemetry.event(
+                Level.WARN, "health",
+                f"the terminal was busy or blocked for {lag:.1f}s and could "
+                f"not do anything else in that time",
+                detail="Long enough to drop the browser link if it passes "
+                       "20s. Recorded so 'the link went red' has evidence "
+                       "behind it.")
+
+        watcher = asyncio.create_task(loopwatch.watch(watch, on_stall=_say),
+                                      name="loop-watch")
+
+        async def heartbeat() -> None:
+            """Restart a trading loop that has stopped beating.
+
+            This used to run on the websocket's frame, which made the
+            terminal's own watchdog depend on a browser being connected to
+            it. That is backwards for a program built to run unattended for
+            weeks: the moment the link went red -- a closed tab, a refresh, a
+            dropped socket -- the one thing watching for a dead trading loop
+            stopped watching, and it stayed stopped for as long as the link
+            did. Nothing about a browser is load-bearing here.
+            """
+            while True:
+                await asyncio.sleep(1.0)
+                with contextlib.suppress(Exception):
+                    await session_.supervise()
+
+        pulse = asyncio.create_task(heartbeat(), name="session-heartbeat")
+        try:
+            yield
+        finally:
+            for task in (watcher, pulse):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
         await state["session"].stop()
         await state["session"].detach_client()
 
@@ -888,6 +930,7 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         # would have them stealing each other's rows.
         since_pulse = 0
         since_event = 0
+        opened_at = time.time()
 
         # Drained, rather than left to pile up.
         #
@@ -959,13 +1002,6 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
                     if _is_closed_socket(exc):
                         break
                     raise
-                # Checked on the frame the operator is already paying for. A
-                # dead trading loop cannot notice itself, and every other
-                # indicator on screen -- session running, feed live, health
-                # green -- keeps saying the terminal is fine while it evaluates
-                # nothing at all.
-                with contextlib.suppress(Exception):
-                    await session.supervise()
                 elapsed = time.perf_counter() - start
                 # Woken by the drain task on disconnect rather than sleeping
                 # out the rest of the frame and discovering it on the next
@@ -982,6 +1018,17 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader
             session.lamps.link = "off"
+            # Both ends of the story. The browser records its close code on
+            # the lamp's tooltip; this records how long the connection lasted
+            # and whether this end knew it was ending. A socket that closes
+            # with code 1006 in the browser and no disconnect message here was
+            # dropped underneath both of them -- which is the difference
+            # between a bug in this program and something outside it, and it
+            # cannot be told apart from one side alone.
+            log.info("link closed after %.0fs (%s)",
+                     time.time() - opened_at,
+                     "the client said goodbye" if gone.is_set()
+                     else "no disconnect reached us")
 
     app.mount("/static", VersionedStatic(directory=str(static_dir())),
               name="static")
@@ -1073,7 +1120,24 @@ def run_server(host: str = "127.0.0.1", port: int = config.DEFAULT_PORT,
     print("  Press Ctrl+C to stop.")
     print(bar, flush=True)
 
-    uvicorn.run(create_app(), host=host, port=chosen, log_level="warning")
+    uvicorn.run(
+        create_app(), host=host, port=chosen, log_level="warning",
+        # uvicorn's defaults are 20 seconds to ping and 20 more to give up.
+        # Giving up means dropping the TCP connection without a close frame,
+        # which is exactly the close code 1006 an operator sees when the link
+        # lamp goes red -- and it is the wrong trade here. The default is sized
+        # for a public server with thousands of peers, where a client that
+        # stops answering is a resource leak. This server has one client, on
+        # the loopback interface, where there is no network to lose packets on:
+        # a late pong means one end was briefly too busy to answer, and tearing
+        # the connection down blanks the terminal for something that was about
+        # to recover.
+        #
+        # Still pinged, so a browser that really has gone is still reaped --
+        # just not before the trading loop itself would be declared stalled.
+        ws_ping_interval=20.0,
+        ws_ping_timeout=float(LOOP_STALL_SECONDS),
+    )
     return 0
 
 
