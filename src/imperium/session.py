@@ -401,6 +401,10 @@ class TradingSession:
         #: orders are not doing what it thinks.
         self.reconciliations: int = 0
         self._reconciled_at: float = 0.0
+        #: The last reconcile failure's text, so a venue that is down
+        #: is reported once rather than once a tick.
+        self._reconcile_failure: str = ""
+        self._reconcile_failures: int = 0
         #: Where the evaluation sweep has reached, and how many full passes it
         #: has completed. Published so "is it actually looking at anything" has
         #: a number rather than an impression.
@@ -1579,7 +1583,10 @@ class TradingSession:
             cash=float(self.broker.cash),
             positions=positions,
             activity=self._todays_activity(),
-            mode=self.mode.value if hasattr(self.mode, "value") else str(self.mode),
+            # The broker's, because the session has no `mode` of its own --
+            # that attribute never existed, and reading it raised every
+            # evening at five o'clock for as long as this brief has been in.
+            mode=self.broker.mode.value,
         )
 
     async def _maybe_send_daily_brief(self) -> None:
@@ -1615,7 +1622,30 @@ class TradingSession:
         # and the next, for the rest of the evening.
         self._brief_sent_day = today
         self._save_overnight_state()
-        text = daily.build(self._todays_brief())
+        try:
+            text = daily.build(self._todays_brief())
+        except Exception as exc:                            # noqa: BLE001
+            # Building the brief is pure local work on numbers this session
+            # already holds, so a failure here is a bug in the brief and not a
+            # condition -- but it must be reported as one rather than thrown.
+            #
+            # It was thrown, and that is why no brief ever arrived: reading a
+            # session attribute that did not exist raised out of here, through
+            # the tick, into the loop's catch-all, where it read as "the
+            # trading loop raised AttributeError" and looked like anything at
+            # all. The day had already been claimed a line earlier, so it was
+            # never tried again -- and every other Telegram message kept
+            # arriving, which is what made it look like the brief was simply
+            # not implemented.
+            log.exception("the daily brief could not be built")
+            self.telemetry.event(
+                Level.ERROR, "brief",
+                f"the daily brief could not be built "
+                f"({type(exc).__name__}: {exc}); none was sent today",
+                detail="This is a fault in the brief itself, not in the "
+                       "account or the connection. Everything else on this "
+                       "tick continues.")
+            return
         if await self.notify(text):
             self.telemetry.event(Level.INFO, "brief",
                                  "the daily brief was sent")
@@ -2298,10 +2328,35 @@ class TradingSession:
         try:
             drift = await broker.reconcile()
         except VenueError as exc:
-            self.telemetry.event(Level.WARN, "order",
-                                 "could not reconcile the book with the venue",
-                                 detail=exc.message)
+            # Backed off to the ordinary cadence rather than retried on the
+            # next tick. _reconciled_at only moved on success, so a venue that
+            # was timing out got asked again a second later, and again, and
+            # wrote the same warning each time -- the level-triggered repeat
+            # this program has had to fix three times now. A reconcile that
+            # failed is a correction delayed, not one lost: the book is still
+            # optimistic, and the next pass corrects it.
+            self._reconciled_at = time.time()
+            self._reconcile_failures += 1
+            if exc.message != self._reconcile_failure:
+                self._reconcile_failure = exc.message
+                self.telemetry.event(
+                    Level.WARN, "order",
+                    "could not reconcile the book with the venue",
+                    detail=f"{exc.message}. The book keeps what it believes "
+                           f"until the next pass, in "
+                           f"{RECONCILE_SECONDS}s. A read timeout here is "
+                           f"usually the venue being slow or this process "
+                           f"being busy, not a book that has drifted.")
             return
+        if self._reconcile_failure:
+            # Said once, when it clears, with what it cost. Silence after a
+            # warning reads as the warning still being true.
+            self.telemetry.event(
+                Level.GOOD, "order",
+                f"the book reconciled again after "
+                f"{self._reconcile_failures} failed attempt(s)")
+            self._reconcile_failure = ""
+            self._reconcile_failures = 0
         self._reconciled_at = time.time()
         for symbol, local, actual in drift:
             self.reconciliations += 1

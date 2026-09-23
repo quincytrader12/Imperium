@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from imperium.execution.broker import LiveBroker
+from imperium.execution.broker import LiveBroker, Mode
 from imperium.session import TradingSession
 from imperium.venues import registry
 from imperium.venues.alpaca.client import VenueError
@@ -218,3 +218,80 @@ async def test_a_correction_is_reported_loudly_not_absorbed():
     assert any(e["level"] == "error" and "AAPL" in e["message"] for e in events)
     assert any("venue holds" in e["message"] for e in events)
     assert session.snapshot()["reconciliations"] == 1
+
+
+# -- a venue that is not answering ----------------------------------------
+
+
+class _TimingOutBroker:
+    """A live broker whose reconcile keeps timing out."""
+
+    simulated = False
+    mode = Mode.PAPER
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.positions: dict = {}
+        self.cash = 0
+
+    async def reconcile(self):
+        self.calls += 1
+        raise VenueError("the venue did not answer within the timeout "
+                         "(ReadTimeout)")
+
+    def weight_of(self, *a, **kw):
+        return 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_timing_out_reconcile_is_not_retried_every_tick():
+    """_reconciled_at only moved on success, so a venue that was timing out
+    got asked again a second later, and again, and wrote the same warning with
+    it. That is the level-triggered repeat this program has had to fix three
+    times: BOOK HALTED, the order refusals, and now this."""
+    session = TradingSession()
+    session.broker = _TimingOutBroker()
+
+    for _ in range(20):
+        await session._reconcile_book()
+
+    assert session.broker.calls == 1, (
+        f"the venue was asked {session.broker.calls} times in twenty ticks "
+        f"while it was timing out")
+    said = [e for e in session.telemetry.events()
+            if "could not reconcile" in e.get("message", "")]
+    assert len(said) == 1, f"{len(said)} identical warnings"
+
+
+@pytest.mark.asyncio
+async def test_the_warning_says_what_a_failed_reconcile_actually_costs():
+    """"Could not reconcile the book with the venue (ReadTimeout)" reads like
+    a book that has drifted. It is a correction delayed, not one lost."""
+    session = TradingSession()
+    session.broker = _TimingOutBroker()
+    await session._reconcile_book()
+
+    said = [e for e in session.telemetry.events()
+            if "could not reconcile" in e.get("message", "")][0]
+    assert "next pass" in said["detail"], said["detail"]
+
+
+@pytest.mark.asyncio
+async def test_it_says_so_when_the_venue_comes_back():
+    """Silence after a warning reads as the warning still being true."""
+    session = TradingSession()
+    broken = _TimingOutBroker()
+    session.broker = broken
+    await session._reconcile_book()
+
+    class _Fine(_TimingOutBroker):
+        async def reconcile(self):
+            return []
+
+    session.broker = _Fine()
+    session._reconciled_at = 0.0
+    await session._reconcile_book()
+
+    said = [e for e in session.telemetry.events()
+            if "reconciled again" in e.get("message", "")]
+    assert said, "the recovery was never reported"

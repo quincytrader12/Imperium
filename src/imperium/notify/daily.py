@@ -119,6 +119,16 @@ class Brief:
 
     @property
     def day_pnl(self) -> float:
+        """The day's profit, or NaN when there is nothing to measure it from.
+
+        Not ``equity - 0``. A session that has not yet marked an opening
+        equity -- one started mid-session, or restarted before the first
+        account read -- would otherwise report the entire account as the day's
+        gain, with a green dot next to it. A brief whose headline number can
+        be the whole balance is worse than a brief that says it does not know.
+        """
+        if self.day_start_equity <= 0:
+            return float("nan")
         return self.equity - self.day_start_equity
 
     @property
@@ -149,11 +159,13 @@ def build(brief: Brief) -> str:
     failing to send.
     """
     pnl, change = brief.day_pnl, brief.day_change
-    lines = [
-        f"\U0001F4CA DAILY BRIEF — {brief.day}",
-        f"{dot(pnl)} Day {money(pnl, brief.currency)}"
-        + (f"  ({percent(change)})" if math.isfinite(change) else ""),
-    ]
+    lines = [f"\U0001F4CA DAILY BRIEF — {brief.day}"]
+    if math.isfinite(pnl):
+        lines.append(
+            f"{dot(pnl)} Day {money(pnl, brief.currency)}"
+            + (f"  ({percent(change)})" if math.isfinite(change) else ""))
+    else:
+        lines.append(f"{FLAT} Day — no opening mark to measure against")
 
     held = sum(p.value for p in brief.positions)
     where = f"Equity ${brief.equity:,.2f} · cash ${brief.cash:,.2f}"

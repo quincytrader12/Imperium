@@ -223,3 +223,108 @@ def test_the_transitions_land_on_the_right_sundays():
     # A month starting on a Sunday must not skip a week.
     assert _nth_sunday(2026, 2, 1) == 1
     assert dt.date(2026, 2, 1).weekday() == 6
+
+
+# -- the whole path, on a real session ------------------------------------
+#
+# The gap that let the brief never arrive once. Every test above builds a
+# Brief by hand and checks the text; not one of them asked the session to
+# build its own. So a session attribute that did not exist -- `self.mode`,
+# which is `self.broker.mode` -- raised out of _todays_brief, through the
+# tick, into the trading loop's catch-all, where it read as "the trading loop
+# raised AttributeError" and looked like anything at all. The day had already
+# been claimed a line earlier, so it was never retried, and every other
+# Telegram message kept arriving as normal.
+
+
+import datetime as dt
+
+import pytest
+
+from imperium.session import TradingSession
+
+
+class _Notifier:
+    linked = True
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, text: str) -> bool:
+        self.sent.append(text)
+        return True
+
+
+def _evening_session() -> tuple[TradingSession, _Notifier]:
+    session = TradingSession()
+    session.running = True
+    notifier = _Notifier()
+    session.notifier = notifier
+    # 21:30 UTC is 17:30 in New York, which is when the brief is due.
+    session.market_clock.timestamp = dt.datetime(2026, 9, 23, 21, 30,
+                                                 tzinfo=dt.timezone.utc)
+    return session, notifier
+
+
+@pytest.mark.asyncio
+async def test_the_session_can_actually_build_and_send_its_own_brief():
+    session, notifier = _evening_session()
+    await session._maybe_send_daily_brief()
+    assert notifier.sent, "no brief was sent at half past five in the evening"
+    assert "DAILY BRIEF" in notifier.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_a_brief_that_cannot_be_built_does_not_take_the_tick_with_it():
+    """The second half of the same fault. Raising out of here aborted the rest
+    of the tick -- the account refresh, the reconcile, the sleeve's arming
+    check -- and reported itself as a trading-loop failure."""
+    session, notifier = _evening_session()
+
+    def boom() -> None:
+        raise ValueError("a number that is not there")
+
+    session._todays_brief = boom
+
+    await session._maybe_send_daily_brief()          # must not raise
+
+    assert not notifier.sent
+    said = [e for e in session.telemetry.events()
+            if e.get("source") == "brief"]
+    assert said, "the failure was swallowed without a word"
+    assert "could not be built" in said[0]["message"], said[0]["message"]
+    assert "ValueError" in said[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_it_is_still_only_sent_once_a_day():
+    session, notifier = _evening_session()
+    for _ in range(5):
+        await session._maybe_send_daily_brief()
+    assert len(notifier.sent) == 1, (
+        f"{len(notifier.sent)} briefs in five ticks; this is the "
+        f"repeat-notification bug the whole design exists to avoid")
+
+
+@pytest.mark.asyncio
+async def test_nothing_goes_out_before_the_close():
+    session, notifier = _evening_session()
+    # 14:30 UTC is 10:30 in New York: the day has not finished.
+    session.market_clock.timestamp = dt.datetime(2026, 9, 23, 14, 30,
+                                                 tzinfo=dt.timezone.utc)
+    await session._maybe_send_daily_brief()
+    assert not notifier.sent
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_opening_mark_does_not_claim_the_account():
+    """A session restarted before its first account read has no opening
+    equity. Subtracting from zero reported the whole balance as the day's
+    profit, with a green dot beside it."""
+    session, notifier = _evening_session()
+    session.day_start_equity = 0.0
+    await session._maybe_send_daily_brief()
+
+    said = notifier.sent[0]
+    assert "no opening mark" in said, said
+    assert "🟢" not in said.splitlines()[1], said
