@@ -357,6 +357,11 @@ class TradingSession:
         #: warning is said once rather than once per tick.
         self._unmanaged_reported: set[str] = set()
         self._daily_loaded_at: float = 0.0
+        #: Symbols the venue has already been asked for daily bars,
+        #: whether or not it had any. Bounded by the distinct symbols
+        #: the scanner has ever admitted -- strings, and few enough
+        #: that pruning would cost more than it saves.
+        self._daily_asked: set[str] = set()
         self._equity_curve: list[tuple[float, float]] = []
         self._account_checked_at: float = 0.0
         #: The account as the venue reports it, refreshed on a timer. Held
@@ -379,6 +384,9 @@ class TradingSession:
         #: When the trading loop last began an iteration. A loop that stops
         #: ticking is invisible from every other indicator.
         self._loop_beat: float = 0.0
+        #: What the loop was last doing, so a stall can be named in
+        #: the message rather than left as a duration.
+        self._loop_where: str = ""
         #: Set by the server, which starts the measurement -- the
         #: question it answers is asked when the session is *not*
         #: running as often as when it is. None in tests that build a
@@ -857,16 +865,6 @@ class TradingSession:
                   if classify_symbol(s) is not AssetClass.US_OPTION]
         equities = [s for s in wanted
                     if classify_symbol(s) is AssetClass.US_EQUITY]
-        # Daily bars change once a day, so the interval exists to stop this
-        # spending request budget to learn nothing. It must not strand a symbol
-        # the scanner admitted since the last pull: that symbol would carry no
-        # history for up to six hours and refuse every night in that window
-        # with "warming up", which describes this method rather than the market.
-        missing = any(not self.engines.get(s) or not self.engines[s].daily_bars
-                      for s in wanted)
-        if (not force and not missing
-                and time.time() - self._daily_loaded_at < OVERNIGHT_REFRESH_SECONDS):
-            return
         if not wanted:
             self.overnight_note = ("nothing in the universe has a daily series "
                                    "to measure")
@@ -874,10 +872,45 @@ class TradingSession:
             self.pooled_trend = None
             return
 
+        # Two reasons to do any of this, and they want different work.
+        #
+        # The six-hourly one re-reads everything, because yesterday's close is
+        # now history and every series is a day short.
+        #
+        # The other is a symbol the scanner has just admitted. It must not be
+        # stranded -- with no daily history it refuses every night for up to
+        # six hours with "warming up", which describes this method rather than
+        # the market. But it is one symbol, and the cohort rotates every twenty
+        # seconds, so treating it as a reason to re-read the *whole* universe
+        # meant a hundred and fifty symbols and four hundred rows each, pulled
+        # and re-parsed roughly every minute, against a request budget shared
+        # with the book it is supposed to be trading. Four and a half seconds
+        # of unbroken Python each time. That is what stopped the trading loop
+        # ticking, and the supervisor then restarted a loop that was never
+        # dead, over and over.
+        #
+        # So: new symbols get a pull of their own, and only the timer re-reads
+        # everything.
+        #
+        # "New" means never asked about -- not "has no rows". The two are the
+        # same thing until the venue answers "I have nothing for that", and
+        # then they are opposites: a newly listed name, one halted for a year,
+        # a pair the daily endpoint does not cover, each comes back empty, and
+        # an empty list read as "still missing" is a condition that can never
+        # become false.
+        fresh = [s for s in wanted
+                 if s not in self._daily_asked
+                 and not (self.engines.get(s) and self.engines[s].daily_bars)]
+        due = (force
+               or time.time() - self._daily_loaded_at >= OVERNIGHT_REFRESH_SECONDS)
+        if not due and not fresh:
+            return
+        asking = wanted if due else fresh
+
         start = (dt.datetime.now(tz=dt.timezone.utc)
                  - dt.timedelta(days=OVERNIGHT_HISTORY_DAYS))
         try:
-            batches = await self.client.bars(wanted, timeframe="1Day",
+            batches = await self.client.bars(asking, timeframe="1Day",
                                              limit=OVERNIGHT_HISTORY_DAYS,
                                              start=start)
         except VenueError as exc:
@@ -885,11 +918,35 @@ class TradingSession:
             self.telemetry.event(Level.WARN, "overnight", self.overnight_note,
                                  detail=exc.remedy)
             return
-        self._daily_loaded_at = time.time()
+        if due:
+            # Only a full re-read restarts the six-hourly clock. Letting a
+            # one-symbol top-up reset it would mean the universe is never
+            # re-read at all: a new symbol arrives well inside every six hour
+            # window, so the timer would be pushed back forever.
+            self._daily_loaded_at = time.time()
+        # Only after the venue has answered. A VenueError returns above without
+        # reaching this, so a failed pull is retried on the next pass rather
+        # than recorded as done and left for the six-hourly timer.
+        self._daily_asked.update(asking)
 
         splits: dict[str, Any] = {}
         scored: dict[str, tuple[Any, Any]] = {}
-        for symbol in wanted:
+        for at, symbol in enumerate(asking):
+            # Handed back to the event loop periodically. Measured at 28ms a
+            # symbol -- almost all of it in _trend_observations -- so the whole
+            # traded universe is four and a half seconds of unbroken Python,
+            # during which nothing else in this process runs: not the websocket
+            # frame, not the pong the browser's connection depends on, not
+            # another strategy's await.
+            #
+            # Measured over 150 symbols: yielding every 25 leaves a longest
+            # blocked span of 2.2s, every 10 leaves 880ms, every 5 leaves
+            # 450ms. Five, because the cost of the yields is not readable in
+            # the total (4.32s against 4.43s without any) so there is nothing
+            # to trade off -- and half a second keeps the once-a-second frame
+            # comfortably inside its own period rather than at the edge of it.
+            if at and at % 5 == 0:
+                await asyncio.sleep(0)
             rows = batches.get(symbol) or []
             bars: list[Bar] = []
             for row in rows:
@@ -2359,11 +2416,14 @@ class TradingSession:
         while self.running:
             self._loop_beat = time.time()
             try:
+                self._loop_where = "evaluating the book"
                 await self._tick()
                 if time.time() - last_universe > 60:
                     # The fast loop re-prices only what is traded: one request.
+                    self._loop_where = "re-pricing the universe"
                     await self.refresh_universe()
                     # Cheap: it returns immediately unless a day has passed.
+                    self._loop_where = "pulling daily history"
                     await self.refresh_daily_history()
                     # Started, not awaited. See kick_news: a third party's
                     # latency must never sit on this loop.
@@ -2373,6 +2433,7 @@ class TradingSession:
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
                 # what has not been looked at yet.
+                self._loop_where = "rotating the cohort"
                 await self.rotate_cohort()
                 if time.time() - last_full_scan > FULL_SCAN_SECONDS:
                     # The slow loop re-ranks the whole market. Kept off the
@@ -2380,6 +2441,7 @@ class TradingSession:
                     # scanner that spends its budget ranking cannot re-price
                     # the book it is holding.
                     last_full_scan = time.time()
+                    self._loop_where = "scanning the whole market"
                     await self.scan_universe()
             except asyncio.CancelledError:
                 raise
@@ -2453,10 +2515,18 @@ class TradingSession:
                 "the trading loop had stopped and was restarted",
                 detail=detail or "the task ended without raising")
         elif stalled:
+            # Named, not just timed. "The trading loop has not ticked for 90s"
+            # is true of every stall and tells the operator nothing about which
+            # one this was; it sent the last investigation looking for a dead
+            # loop when the loop was alive and stuck inside one slow call.
             self.telemetry.event(
                 Level.ERROR, "session",
                 f"the trading loop has not ticked for "
-                f"{time.time() - self._loop_beat:.0f}s; restarting it")
+                f"{time.time() - self._loop_beat:.0f}s while "
+                f"{self._loop_where or 'between passes'}; restarting it",
+                detail="It is alive but has not come back from that step. "
+                       "If this repeats, that step is the one to look at -- "
+                       "not the loop.")
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
