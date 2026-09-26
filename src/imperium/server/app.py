@@ -290,6 +290,25 @@ def _is_closed_socket(exc: RuntimeError) -> bool:
     return any(marker in text for marker in _CLOSED_SOCKET_MARKERS)
 
 
+def link_reason(farewell: dict[str, Any]) -> str:
+    """Why a websocket ended, from what the receive side actually recorded.
+
+    A function rather than three lines inside the handler because the bug this
+    replaces was precisely that the decision read the wrong variable, and a
+    decision worth getting wrong once is worth being able to test.
+
+    An empty dict is the meaningful case: nothing arrived on the receive side,
+    so this end let go first -- a shutdown, a failed send, or the socket
+    dropped underneath both ends. The old message called that "the client said
+    goodbye" too, because it was reading an event its own cleanup had set.
+    """
+    if "code" in farewell:
+        return f"the client closed it, code {farewell['code']}"
+    if "error" in farewell:
+        return f"the receive side failed -- {farewell['error']}"
+    return "no disconnect arrived; this end let go first"
+
+
 def create_app(session: TradingSession | None = None) -> FastAPI:
     state: dict[str, Any] = {}
 
@@ -931,6 +950,8 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         since_pulse = 0
         since_event = 0
         opened_at = time.time()
+        state["links"] = mine = state.get("links", 0) + 1
+        state["live_links"] = state.get("live_links", 0) + 1
 
         # Drained, rather than left to pile up.
         #
@@ -944,15 +965,34 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         # disconnect message, instead of on the next send several hundred
         # milliseconds later.
         gone = asyncio.Event()
+        #: What the receive side actually saw, recorded where it is known.
+        #:
+        #: Read from `gone` instead, and this reported the wrong thing every
+        #: single time: the close-down path cancels the reader and awaits it,
+        #: which runs the `finally` below and sets the event -- so by the time
+        #: it was tested, it was true whatever had happened. Three days of
+        #: logs said "the client said goodbye" on every one of several
+        #: thousand closes, including the ones where nothing of the sort
+        #: arrived, and the line that was supposed to settle where the drops
+        #: come from could not have said anything else.
+        farewell: dict[str, Any] = {}
 
         async def drain() -> None:
             try:
                 while True:
                     message = await ws.receive()
                     if message.get("type") == "websocket.disconnect":
+                        # 1005 is "no code given", which is what a browser
+                        # sends when the page navigates away.
+                        farewell["code"] = message.get("code", 1005)
                         break
-            except Exception:
-                pass
+            except asyncio.CancelledError:
+                # This end closed first, and the cancel is how it says so.
+                # Deliberately not recorded as a farewell: that is the case
+                # the whole field exists to distinguish.
+                raise
+            except Exception as exc:                        # noqa: BLE001
+                farewell["error"] = f"{type(exc).__name__}: {exc}"
             finally:
                 gone.set()
 
@@ -1018,17 +1058,15 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reader
             session.lamps.link = "off"
+            state["live_links"] = max(0, state.get("live_links", 1) - 1)
             # Both ends of the story. The browser records its close code on
-            # the lamp's tooltip; this records how long the connection lasted
-            # and whether this end knew it was ending. A socket that closes
-            # with code 1006 in the browser and no disconnect message here was
-            # dropped underneath both of them -- which is the difference
-            # between a bug in this program and something outside it, and it
-            # cannot be told apart from one side alone.
-            log.info("link closed after %.0fs (%s)",
-                     time.time() - opened_at,
-                     "the client said goodbye" if gone.is_set()
-                     else "no disconnect reached us")
+            # the lamp's tooltip; this records how long the connection lasted,
+            # which end let go, and how many other sockets were open at the
+            # time -- two tabs left open look exactly like one tab dropping
+            # twice as often, and the logs could not tell them apart.
+            log.info("link #%d closed after %.0fs, %d still open — %s",
+                     mine, time.time() - opened_at, state["live_links"],
+                     link_reason(farewell))
 
     app.mount("/static", VersionedStatic(directory=str(static_dir())),
               name="static")

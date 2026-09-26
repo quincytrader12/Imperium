@@ -59,6 +59,9 @@ class LoopWatch:
     stall_after: float = STALL_SECONDS
     #: Most recent measurement, in seconds of lateness.
     last: float = 0.0
+    #: Processor time this process used during the worst stall. The number
+    #: that says whose fault it was -- see :meth:`observe`.
+    worst_cpu: float = 0.0
     #: Worst single measurement since the process started.
     worst: float = 0.0
     #: When that worst one happened, as a unix timestamp.
@@ -68,23 +71,62 @@ class LoopWatch:
     #: How many of those were long enough to have dropped a websocket.
     socket_killers: int = 0
     samples: int = 0
+    #: Processor time used during the most recent measurement.
+    last_cpu: float = 0.0
     _now: "callable" = field(default=time.time, repr=False)
 
-    def observe(self, slept: float) -> float:
+    @staticmethod
+    def blamed(lag: float, cpu: float) -> str:
+        """Who held the loop, in the operator's terms.
+
+        The threshold is deliberately generous. A loop genuinely busy in
+        Python spends nearly all of the window on the processor; one that was
+        not scheduled spends almost none. Anything in between is reported as
+        such rather than forced into one of the two.
+        """
+        if lag <= 0:
+            return "nothing held it"
+        share = cpu / lag
+        if share >= 0.5:
+            return (f"this process was busy -- it used {cpu:.1f}s of "
+                    f"processor time, so the work is in here")
+        if share <= 0.1:
+            return (f"this process was not running -- it used only {cpu:.1f}s "
+                    f"of processor time, so the machine was not scheduling it")
+        return (f"partly busy -- {cpu:.1f}s of processor time out of "
+                f"{lag:.1f}s")
+
+    def observe(self, slept: float, cpu: float = 0.0) -> float:
         """Record one sleep that asked for ``interval`` and took ``slept``.
 
-        Returns the lateness, so the caller can decide whether to say anything
-        about it. Negative lateness -- a sleep that returned early, which some
-        platforms allow by a hair -- is recorded as zero rather than as a
-        negative number that would make ``worst`` meaningless.
+        ``cpu`` is the processor time this process used over the same window,
+        and it is the difference between the two faults this measurement can
+        see. Lateness alone cannot tell them apart:
+
+        * the loop was **busy** -- a blocking call or a long computation held
+          it, and the process burned processor time doing so. Ours to fix.
+        * the loop was **not running** -- the operating system did not
+          schedule this process, because the machine was paging, throttling,
+          or briefly suspended. No amount of async code helps, and a fix
+          aimed at the first case would be aimed at nothing.
+
+        Three days of live logs reported stalls up to 142 seconds without
+        distinguishing these, which is a measurement that raises a question
+        and cannot answer it.
+
+        Returns the lateness. Negative lateness -- a sleep that returned early,
+        which some platforms allow by a hair -- is recorded as zero rather than
+        as a negative number that would make ``worst`` meaningless.
         """
         lag = slept - self.interval
         if lag < 0:
             lag = 0.0
         self.last = lag
+        self.last_cpu = max(0.0, cpu)
         self.samples += 1
         if lag > self.worst:
             self.worst = lag
+            self.worst_cpu = self.last_cpu
             self.worst_at = self._now()
         if lag >= self.stall_after:
             self.stalls += 1
@@ -97,6 +139,7 @@ class LoopWatch:
         return {
             "last_ms": round(self.last * 1000, 1),
             "worst_ms": round(self.worst * 1000, 1),
+            "worst_cpu_ms": round(self.worst_cpu * 1000, 1),
             "worst_at": self.worst_at or None,
             "stalls": self.stalls,
             "socket_killers": self.socket_killers,
@@ -114,10 +157,12 @@ class LoopWatch:
         if self.socket_killers:
             return (f"the loop has stalled past {PING_TIMEOUT_SECONDS:.0f}s "
                     f"{self.socket_killers} time(s), long enough to drop the "
-                    f"link by itself")
+                    f"link by itself; worst {self.worst:.0f}s, "
+                    f"{self.blamed(self.worst, self.worst_cpu)}")
         if self.stalls:
             return (f"{self.stalls} stall(s) over {self.stall_after:.0f}s, "
-                    f"worst {self.worst:.1f}s")
+                    f"worst {self.worst:.1f}s, "
+                    f"{self.blamed(self.worst, self.worst_cpu)}")
         return f"no stall; worst lateness {self.worst * 1000:.0f}ms"
 
 
@@ -130,10 +175,16 @@ async def watch(record: LoopWatch, *, on_stall=None) -> None:
     """
     while True:
         started = time.perf_counter()
+        # Processor time, not wall time: the whole point is to tell "we were
+        # busy" from "we were not scheduled", and only the two together say
+        # which.
+        cpu_at = time.process_time()
         await asyncio.sleep(record.interval)
-        lag = record.observe(time.perf_counter() - started)
+        lag = record.observe(time.perf_counter() - started,
+                             time.process_time() - cpu_at)
         if lag >= record.stall_after:
-            log.warning("the event loop was %.1fs late; something held it", lag)
+            log.warning("the event loop was %.1fs late: %s", lag,
+                        record.blamed(lag, record.last_cpu))
             if on_stall is not None:
                 try:
                     on_stall(lag)

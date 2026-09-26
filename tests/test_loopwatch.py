@@ -278,3 +278,57 @@ def test_the_watchdog_does_not_need_a_browser():
     assert calls, (
         "the trading loop's watchdog never ran with no browser attached; a "
         "loop that dies while the link is red would stay dead")
+
+
+# -- three days of logs that could not answer their own question -----------
+
+
+def test_a_stall_says_whether_this_process_was_busy_or_not_running():
+    """Lateness alone cannot tell the two apart, and they need opposite
+    responses. A loop held by a blocking call burns processor time doing it;
+    a process the operating system is not scheduling burns none. Three days
+    of live logs reported stalls up to 142 seconds without saying which."""
+    busy = LoopWatch.blamed(lag=30.0, cpu=29.0)
+    assert "busy" in busy and "29.0s" in busy, busy
+
+    starved = LoopWatch.blamed(lag=142.0, cpu=0.3)
+    assert "not running" in starved, starved
+    assert "machine" in starved, starved
+
+
+def test_the_worst_stall_keeps_the_processor_time_that_went_with_it():
+    """Kept alongside the worst case, not as a running total: the question is
+    what was happening during *that* stall."""
+    w = LoopWatch(interval=1.0)
+    w.observe(1.0 + 40.0, cpu=0.2)
+    w.observe(1.0 + 2.0, cpu=2.0)
+    assert w.worst == pytest.approx(40.0)
+    assert w.worst_cpu == pytest.approx(0.2)
+    assert "not running" in w.verdict(), w.verdict()
+
+
+@pytest.mark.asyncio
+async def test_a_real_block_is_reported_as_this_process_being_busy():
+    """End to end against a genuinely blocked loop, which is the case the
+    verdict must not get backwards."""
+    seen: list[float] = []
+    record = LoopWatch(interval=0.05, stall_after=0.2)
+    task = asyncio.create_task(loopwatch.watch(record, on_stall=seen.append))
+    try:
+        await asyncio.sleep(0.1)
+        # Spin rather than sleep: this has to cost processor time.
+        until = time.perf_counter() + 0.5
+        while time.perf_counter() < until:
+            pass
+        await asyncio.sleep(0.2)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    assert seen, "a half-second spin on the loop was not noticed"
+    assert "busy" in record.verdict(), (
+        f"a spin that burned processor time was not blamed on this process: "
+        f"{record.verdict()}")
