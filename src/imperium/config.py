@@ -41,6 +41,15 @@ def journal_path() -> Path:
     return home_dir() / "journal.sqlite3"
 
 
+def trades_path() -> Path:
+    return home_dir() / "trades.csv"
+
+
+def equity_history_path(mode: str = "") -> Path:
+    suffix = f"_{mode}" if mode else ""
+    return home_dir() / f"equity_history{suffix}.json"
+
+
 def state_path() -> Path:
     return home_dir() / "state.json"
 
@@ -147,6 +156,17 @@ SETTINGS_TEMPLATE = """\
 # universe clears Alpaca's $1 minimum order at the default allocation.
 # SECTOR_TREND_ARM_AT_EQUITY=200
 
+# ----------------------------------------------------------- passive entries
+# An entry first rests as a limit order at the midpoint between bid and ask.
+# If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
+# sent as an ordinary market order -- the trade happens either way; resting is
+# only a chance not to pay the spread. Exits, stops and auction orders always
+# go at market. Applies to paper and live, which send real orders; dry run
+# fills nothing. Set to false to send every entry at market as before.
+
+# IMPERIUM_PASSIVE_ENTRIES=true
+# IMPERIUM_PASSIVE_SECONDS=20
+
 # ------------------------------------------------------------ second currency
 # Show the account balance in a second currency beside the dollar figure.
 # Display only: every decision this program makes stays in dollars. Blank
@@ -190,6 +210,8 @@ SETTABLE = frozenset({
     "IMPERIUM_FX_RATE",
     "IMPERIUM_OPERATOR",
     "IMPERIUM_OPERATOR_SPOKEN",
+    "IMPERIUM_PASSIVE_ENTRIES",
+    "IMPERIUM_PASSIVE_SECONDS",
 })
 
 

@@ -18,8 +18,9 @@ The guards that matter:
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Protocol
 
+from imperium.execution import passive as passive_mod
 from imperium.execution.costs import one_way_cost_bps
 from imperium.venues.alpaca.client import AlpacaClient, VenueError
 from imperium.venues.alpaca.filters import format_decimal, to_decimal
@@ -101,6 +103,10 @@ MARKET_ON_OPEN = "market-on-open"
 #: only, and both are rejected outright on a crypto symbol.
 _AUCTION_TIF = {MARKET_ON_CLOSE: "cls", MARKET_ON_OPEN: "opg"}
 
+#: Order states after which nothing more will fill.
+_TERMINAL = frozenset({"filled", "canceled", "cancelled", "expired",
+                       "rejected", "done_for_day", "replaced"})
+
 
 @dataclass
 class Position:
@@ -138,6 +144,10 @@ class Fill:
     #: is the overnight move, not a crossing, and learning crossing costs from
     #: it would charge the intraday gate for the overnight strategy's drift.
     order: str = ""
+    #: The profit or loss this fill realised, as the per-strategy book
+    #: counted it. Filled in by attribution when it books the fill; zero for
+    #: an entry, which realises nothing.
+    realised: float = 0.0
 
     @property
     def slippage_bps(self) -> float:
@@ -160,7 +170,8 @@ class Fill:
                 "client_order_id": self.client_order_id, "note": self.note,
                 "slippage_bps": round(self.slippage_bps, 2),
                 "notional": float(self.notional),
-                "strategy": self.strategy}
+                "strategy": self.strategy,
+                "realised": round(self.realised, 4)}
 
 
 class Broker(Protocol):
@@ -389,6 +400,12 @@ class LiveBroker(_BaseBroker):
         #: symbol -> (message, when it was first said, how many were held back
         #: since). See :meth:`_refuse`.
         self._refusals: dict[str, tuple[str, float, int]] = {}
+        #: symbol -> (bid, ask, age in seconds), set by the session from its
+        #: feed. Without it no entry rests, and every order crosses as before.
+        self.quote_for: Callable[[str], tuple[float, float, float]] | None = None
+        #: Entries resting at the mid. See imperium.execution.passive.
+        self.working: dict[str, passive_mod.Working] = {}
+        self.passive_stats = passive_mod.PassiveStats()
         # Instance attribute, shadowing the class one. The same order path
         # serves the venue's paper account and its live account -- that is the
         # point of it: the code that will one day move real money is the code
@@ -535,6 +552,22 @@ class LiveBroker(_BaseBroker):
         if not self._armed:
             raise ModeSwitchRefused(
                 "the live broker is not armed; no order will be sent")
+        resting = self.working.get(symbol)
+        if resting is not None:
+            wants_out = target_weight == 0 or bool(order) or (
+                (target_weight > 0) != (resting.side == "buy"))
+            if not wants_out:
+                # The entry is already on its way; it finishes on its own,
+                # at the mid or at market.
+                return None
+            # Leaving, or changing direction: the resting entry is withdrawn
+            # first, and whatever of it filled is booked, so the exit is sized
+            # against what is really held.
+            if not await self._withdraw(symbol):
+                self._refuse(symbol, "a resting entry is still being cancelled "
+                                     "at the venue; the exit follows once it "
+                                     "has gone")
+                return None
         delta = self._delta_quantity(symbol, target_weight, price, equity)
         if delta == 0:
             return None
@@ -608,6 +641,14 @@ class LiveBroker(_BaseBroker):
                                         f"take fractions")
                     return None
 
+        if tif is None:
+            rested = await self._rest_at_mid(
+                symbol, side, qty, order=order, price=price, strategy=strategy,
+                increment=getattr(asset, "price_increment", None),
+                fractionable=bool(getattr(asset, "fractionable", True)))
+            if rested is not False:
+                return rested
+
         coid = self.client.new_client_order_id("imp")
         result = await self.client.place_order(
             symbol, side, qty=qty, order_type="market", client_order_id=coid,
@@ -632,6 +673,189 @@ class LiveBroker(_BaseBroker):
                                  + (f", {order}]" if order else "]"),
                             reference_price=to_decimal(price),
                             strategy=strategy, order=order)
+
+    # -- resting entries -------------------------------------------------
+
+    async def _rest_at_mid(self, symbol: str, side: str, qty: Decimal, *,
+                           order: str, price: float, strategy: str,
+                           increment: Decimal | None,
+                           fractionable: bool) -> "Fill | None | bool":
+        """Place an entry as a limit at the mid, if it may rest.
+
+        Returns False when it should cross instead -- the caller then sends
+        the market order exactly as it always has -- or the fill (or None)
+        from the resting order it placed.
+        """
+        if not passive_mod.enabled() or self.quote_for is None:
+            return False
+        try:
+            bid, ask, age = self.quote_for(symbol)
+        except Exception:                                  # noqa: BLE001
+            return False
+        held = self.position(symbol).quantity
+        reason = passive_mod.why_not(side=side, held=held, order=order,
+                                     bid=bid, ask=ask, quote_age=age)
+        limit = None
+        if not reason:
+            limit = passive_mod.limit_price(side, bid, ask,
+                                            passive_mod.tick_for(price, increment))
+            if limit is None:
+                reason = "the spread is one tick, with no price inside it"
+        if reason:
+            self.passive_stats.skip(reason)
+            return False
+
+        coid = self.client.new_client_order_id("imp")
+        try:
+            result = await self.client.place_order(
+                symbol, side, qty=qty, order_type="limit", limit_price=limit,
+                client_order_id=coid)
+        except VenueError as exc:
+            if exc.ambiguous:
+                raise
+            # A limit the venue will not take is no reason not to trade: the
+            # market order that would have gone anyway goes now.
+            self.passive_stats.skip(f"the venue refused the limit: {exc.message}")
+            return False
+        now = time.time()
+        working = passive_mod.Working(
+            symbol=symbol, side=side, quantity=qty, limit=limit,
+            client_order_id=result.get("client_order_id", coid),
+            order_id=str(result.get("id") or ""), placed_at=now,
+            deadline=now + passive_mod.window_seconds(),
+            reference_price=to_decimal(price), strategy=strategy,
+            bid=bid, ask=ask, fractionable=fractionable)
+        self.working[symbol] = working
+        self.passive_stats.rested += 1
+        fills = self._book_progress(working, result)
+        if working.remaining <= 0:
+            self.working.pop(symbol, None)
+            self.passive_stats.filled += 1
+        return fills[-1] if fills else None
+
+    def _book_progress(self, w: "passive_mod.Working", row: dict) -> list[Fill]:
+        """Book whatever of a resting order has filled since last looked at.
+
+        The venue reports the cumulative quantity and its average price; the
+        part not yet booked is priced so that everything booked averages to
+        what the venue says, which is exact however many pieces it came in.
+        """
+        filled = to_decimal(row.get("filled_qty") or 0)
+        avg = to_decimal(row.get("filled_avg_price") or 0)
+        fresh = filled - w.booked
+        if fresh <= 0 or avg <= 0:
+            return []
+        piece_price = (avg * filled - w.booked_value) / fresh
+        w.booked_value = avg * filled
+        w.booked = filled
+        self.passive_stats.saved += w.touch_saving(fresh, piece_price)
+        signed = fresh if w.side == "buy" else -fresh
+        return [self._record(
+            w.symbol, signed, piece_price, w.client_order_id,
+            note=f"rested at {w.limit} (mid of {w.bid}/{w.ask})",
+            reference_price=w.reference_price, strategy=w.strategy,
+            order=passive_mod.PASSIVE)]
+
+    async def _withdraw(self, symbol: str) -> bool:
+        """Cancel a resting entry and book what filled. True once it has
+        gone; False while the venue still has it working."""
+        w = self.working.get(symbol)
+        if w is None:
+            return True
+        with contextlib.suppress(VenueError):
+            await self.client.cancel_order(w.order_id)
+        try:
+            row = await self.client.get_order_by_client_id(w.client_order_id)
+        except VenueError:
+            return False
+        self._book_progress(w, row)
+        if str(row.get("status", "")).lower() in _TERMINAL:
+            self.working.pop(symbol, None)
+            return True
+        return False
+
+    async def service_passive(self, now: float | None = None) -> list[Fill]:
+        """Each tick: book what rested orders filled, and send the remainder
+        of any whose window has closed at market.
+
+        The market order goes only once the venue confirms the resting order
+        has stopped -- cancelled, expired, or filled. Sent while a cancel was
+        still in flight, the limit could fill as well, and the entry would be
+        bought twice.
+        """
+        now = time.time() if now is None else now
+        out: list[Fill] = []
+        for symbol, w in list(self.working.items()):
+            try:
+                row = await self.client.get_order_by_client_id(w.client_order_id)
+            except VenueError:
+                continue                   # asked again next tick
+            out.extend(self._book_progress(w, row))
+            status = str(row.get("status", "")).lower()
+            if status == "filled" or w.remaining <= 0:
+                self.working.pop(symbol, None)
+                self.passive_stats.filled += 1
+                continue
+            if status not in _TERMINAL:
+                if now < w.deadline:
+                    continue
+                if not w.cancelling:
+                    with contextlib.suppress(VenueError):
+                        await self.client.cancel_order(w.order_id)
+                    w.cancelling = True
+                try:
+                    row = await self.client.get_order_by_client_id(
+                        w.client_order_id)
+                except VenueError:
+                    continue
+                out.extend(self._book_progress(w, row))
+                status = str(row.get("status", "")).lower()
+                if status == "filled" or w.remaining <= 0:
+                    self.working.pop(symbol, None)
+                    self.passive_stats.filled += 1
+                    continue
+                if status not in _TERMINAL:
+                    continue               # the cancel is still in flight
+            # Stopped, with some left: the rest crosses, as it always would
+            # have. The trade is never simply dropped.
+            self.working.pop(symbol, None)
+            if w.booked > 0:
+                self.passive_stats.partial += 1
+            else:
+                self.passive_stats.crossed += 1
+            crossed = await self._cross_remainder(w)
+            if crossed is not None:
+                out.append(crossed)
+        return out
+
+    async def _cross_remainder(self, w: "passive_mod.Working") -> Fill | None:
+        qty = w.remaining
+        if not w.fractionable:
+            qty = qty.to_integral_value(rounding="ROUND_DOWN")
+        if qty <= 0:
+            return None
+        coid = self.client.new_client_order_id("imp")
+        try:
+            result = await self.client.place_order(
+                w.symbol, w.side, qty=qty, order_type="market",
+                client_order_id=coid)
+        except VenueError as exc:
+            self._refuse(w.symbol, f"the rest of a resting entry could not be "
+                                   f"sent at market: {exc.message}")
+            return None
+        filled = to_decimal(result.get("filled_qty") or 0)
+        avg = to_decimal(result.get("filled_avg_price") or 0)
+        executed = filled if filled > 0 else qty
+        # The best estimate of an unfilled market order's price is the touch
+        # it will cross, not the mid it failed to get.
+        touch = w.ask if w.side == "buy" else w.bid
+        fill_price = avg if avg > 0 else to_decimal(touch or w.reference_price)
+        signed = executed if w.side == "buy" else -executed
+        return self._record(
+            w.symbol, signed, fill_price, result.get("client_order_id", coid),
+            note=f"venue order {result.get('id')} [market, after "
+                 f"{passive_mod.window_seconds():.0f}s resting at {w.limit}]",
+            reference_price=w.reference_price, strategy=w.strategy)
 
     async def reconcile(self) -> list[tuple[str, Decimal, Decimal]]:
         """Correct the local book from the positions the venue actually holds.
@@ -706,6 +930,8 @@ class LiveBroker(_BaseBroker):
         Retirement and mode switches must not depend on the book's belief about
         what is held; the venue knows.
         """
+        if symbol in self.working:
+            await self._withdraw(symbol)
         try:
             await self.client.close_position(symbol)
         except VenueError as exc:

@@ -503,6 +503,31 @@ def create_app(session: TradingSession | None = None) -> FastAPI:
         result = await NetworkDiagnostic(spec.base_url).run()
         return JSONResponse(result.as_dict())
 
+    # -- the record ------------------------------------------------------
+
+    @app.get("/api/chart")
+    async def chart(span: str = "1W") -> JSONResponse:
+        """The centre chart's data for one range. Asked for by the page every
+        half minute rather than pushed every second: a week of points is the
+        single largest thing the terminal draws and it changes once in five
+        minutes."""
+        return JSONResponse(get_session().chart_data(span))
+
+    @app.get("/api/trades.csv")
+    async def trades_csv(mode: str = "") -> Response:
+        """Every fill ever made, as a spreadsheet. Symbols, prices and
+        quantities: the journal holds no key material to leak."""
+        # Only a known mode: it is written into a response header below.
+        if mode not in ("", "dry_run", "paper", "live"):
+            return Response(content="unknown mode", status_code=400)
+        text = get_session().trade_journal.export(mode=mode or None)
+        stamp = time.strftime("%Y-%m-%d")
+        name = f"imperium-trades-{mode + '-' if mode else ''}{stamp}.csv"
+        return Response(content=text, media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{name}"',
+                                 "Cache-Control": "no-store"})
+
     # -- credentials -----------------------------------------------------
 
     @app.get("/api/connections")

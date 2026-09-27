@@ -512,14 +512,18 @@ class Attribution:
         book = self.book_for(str(mode))
         batch = ring[len(ring) - fresh:]
         for fill in batch:
+            before = sum(r.realised for r in book.records.values())
             owner = book.book(
                 symbol=fill.symbol, side=fill.side,
                 quantity=float(fill.quantity), price=float(fill.price),
                 ts=float(fill.ts), strategy=getattr(fill, "strategy", "") or "",
                 reference_price=float(getattr(fill, "reference_price", 0) or 0))
-            # Written back, so the journal on screen shows who placed it.
+            # Written back, so the journal on screen shows who placed it and
+            # the permanent one what it made.
+            realised = sum(r.realised for r in book.records.values()) - before
             try:
                 fill.strategy = owner
+                fill.realised = realised
             except AttributeError:
                 pass
         self._seen = total

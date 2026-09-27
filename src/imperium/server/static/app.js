@@ -99,8 +99,10 @@
   function renderHeader(s) {
     $('h-venue').textContent = s.venue || '—';
     var mode = $('h-mode');
-    mode.textContent = s.mode === 'live' ? 'LIVE — REAL ORDERS'
-      : s.mode === 'paper' ? 'paper (simulated)' : 'dry run (no orders)';
+    mode.textContent = s.mode === 'live' ? 'LIVE' : s.mode === 'paper' ? 'paper' : 'dry run';
+    mode.title = s.mode === 'live' ? 'Real orders against real money'
+      : s.mode === 'paper' ? 'Simulated fills: nothing reaches the market'
+      : 'No orders at all: decisions only';
     mode.className = 'v mode-' + s.mode;
     /* The account balance is the headline, not the simulated book's. A
      * terminal showing a made-up default where the money goes is worse than
@@ -109,6 +111,7 @@
      * because in dry run and paper they are different numbers on purpose. */
     var acct = s.account || {};
     var eq = $('h-equity');
+    renderHero(s, acct);
     if (acct.known) {
       eq.textContent = fmtMoney(acct.equity);
       eq.title = 'account ' + fmtMoney(acct.equity) + ' · cash ' +
@@ -522,16 +525,87 @@
       m.toFixed(2) + '</td>';
   }
 
+  /* The headline: the balance, today's change, the last thirty closes.
+   *
+   * Today's change is the venue's own figure against its previous close when
+   * the account is real, and the book's against its last saved close when it
+   * is simulated -- the same pairing the balance beside it uses, so the two
+   * numbers can never be about different money. */
+  var heroLast = null;
+  function renderHero(s, acct) {
+    var hero = s.hero || {};
+    var real = acct.known && !acct.simulated;
+    var day = real ? acct.day_pnl : hero.book_day_pnl;
+    var pct = real ? (acct.last_equity ? acct.day_pnl / acct.last_equity : null)
+                   : hero.book_day_pct;
+    var d = $('h-day'), dp = $('h-day-pct');
+    if (d) {
+      var known = day !== null && day !== undefined && isFinite(day);
+      var tone = !known ? '' : day > 0 ? 'up' : day < 0 ? 'down' : '';
+      d.textContent = known ? (day > 0 ? '+' : '') + fmtMoney(day) : '—';
+      d.className = 'hero-pnl num ' + tone;
+      dp.textContent = (pct !== null && pct !== undefined && isFinite(pct))
+        ? (pct > 0 ? '+' : '') + (pct * 100).toFixed(2) + '%' : '';
+      dp.className = 'hero-pct num ' + tone;
+      d.parentNode.title = real ? "against the venue's previous close"
+        : 'the book against its last saved close';
+    }
+    /* The balance ticks in the direction it moved: noticed without being
+     * read. Only on a real change, never on the first paint. */
+    var value = acct.known ? acct.equity : null;
+    var eq = $('h-equity');
+    if (value !== null && heroLast !== null && Math.abs(value - heroLast) >= 0.005) {
+      eq.classList.remove('tick-up', 'tick-down');
+      void eq.offsetWidth;                 // restart the animation
+      eq.classList.add(value > heroLast ? 'tick-up' : 'tick-down');
+    }
+    if (value !== null) heroLast = value;
+    if (window.ImperiumChart) {
+      window.ImperiumChart.spark($('h-spark'), hero.spark || []);
+      var chart = window.ImperiumChart.start();
+      if (chart && hero.book) chart.setLive(hero.book);
+    }
+  }
+
+  /* A fill is an event, not a row: it glows once, and pulses on the chart
+   * where it lands. Keyed by time and order id, so a redraw of the same
+   * journal never replays an old one -- and the first paint replays none. */
+  var fillsSeen = null;
+  var fillsSignature = '';
   function renderFills(s) {
     var body = $('fill-body');
     if (!s.fills.length) {
-      setHTML(body, '<tr><td colspan="5" class="dimmer">no fills yet</td></tr>');
+      setHTML(body, '<tr><td colspan="6" class="dimmer">no fills yet</td></tr>');
+      if (fillsSeen === null) fillsSeen = {};
       return;
     }
+    var first = fillsSeen === null;
+    if (first) fillsSeen = {};
+    var fresh = {};
+    s.fills.forEach(function (f) {
+      var key = f.ts + '|' + f.client_order_id + '|' + f.quantity;
+      if (!fillsSeen[key]) {
+        fillsSeen[key] = true;
+        if (!first) {
+          fresh[key] = true;
+          var chart = window.ImperiumChart && window.ImperiumChart.start();
+          if (chart) chart.pulse(f);
+        }
+      }
+    });
+    /* Rebuilt only when the journal changed. Rebuilt every second, a new
+     * row's glow was cut off a second in, and restarted with every frame. */
+    var signature = s.fills.map(function (f) {
+      return f.ts + '|' + f.client_order_id + '|' + f.quantity + '|' + (f.strategy || '');
+    }).join(',');
+    if (signature === fillsSignature && body.childElementCount) return;
+    fillsSignature = signature;
     setHTML(body, s.fills.map(function (f) {
       var slip = f.slippage_bps || 0;
       var slipTone = slip > 5 ? 'down' : slip <= 0 ? 'up' : 'muted';
-      return '<tr><td class="dimmer">' + fmtTime(f.ts) + '</td>' +
+      var key = f.ts + '|' + f.client_order_id + '|' + f.quantity;
+      var glow = fresh[key] ? ' class="fresh-' + (f.side === 'BUY' ? 'buy' : 'sell') + '"' : '';
+      return '<tr' + glow + '><td class="dimmer">' + fmtTime(f.ts) + '</td>' +
         '<td>' + esc(f.symbol) + '</td>' +
         '<td class="' + (f.side === 'BUY' ? 'up' : 'down') + '">' + esc(f.side) +
         (f.simulated ? ' <span class="dimmer">sim</span>' : '') + '</td>' +
@@ -772,32 +846,7 @@
     ctx.beginPath(); ctx.arc(last.x - 1, last.y, 1.8, 0, Math.PI * 2); ctx.fill();
   }
 
-  function renderPnl(s) {
-    var fit = fitCanvas($('pnl'));
-    if (!fit) return;
-    var ctx = fit.ctx, w = fit.w, h = fit.h;
-    var pts = s.equity_curve || [];
-    if (pts.length < 2) {
-      ctx.fillStyle = '#46536a'; ctx.font = '11px monospace';
-      ctx.fillText('no equity history yet', 10, h / 2);
-      return;
-    }
-    var vals = pts.map(function (p) { return p[1]; });
-    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-    if (hi - lo < 1e-9) { hi = lo + 1; }
-    var first = vals[0], last = vals[vals.length - 1];
-    var col = last >= first ? '#35d69b' : '#ff5c6c';
-    ctx.strokeStyle = col; ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    vals.forEach(function (v, i) {
-      var x = (i / (vals.length - 1)) * (w - 8) + 4;
-      var y = h - 6 - ((v - lo) / (hi - lo)) * (h - 20);
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-    ctx.fillStyle = '#6b7b91'; ctx.font = '10px monospace';
-    ctx.fillText(fmtMoney(last), 6, 12);
-  }
+
 
   /* ---------- risk, limits and the halt control ---------- */
 
@@ -1395,6 +1444,27 @@
    * cell per asset class that has any real fills. "modelled" until there are
    * enough to correct anything, then the correction the gate now carries --
    * coloured, because it is the model being told it was wrong. */
+  /* Entries resting at the mid: how often the market came to them, and
+   * what not crossing has saved against the touch they saw. */
+  function passiveCell(p) {
+    if (!p) return '';
+    if (!p.enabled) return cell('at the mid', 'off', 'dimmer', 'all at market');
+    if (p.simulated) return cell('at the mid', '—', 'dimmer', 'paper & live only');
+    var done = (p.filled || 0) + (p.partial || 0) + (p.crossed || 0);
+    var skipped = Object.keys(p.skipped || {}).map(function (k) {
+      return k + ': ' + p.skipped[k];
+    }).join('\n');
+    var title = 'Entries rest at the mid for ' + p.seconds + 's, then cross at market.\n' +
+      (p.filled || 0) + ' filled resting, ' + (p.partial || 0) + ' partly, ' +
+      (p.crossed || 0) + ' crossed.' + (skipped ? '\nSent straight to market:\n' + skipped : '');
+    var v = done ? Math.round(100 * (p.filled || 0) / done) + '%' : '—';
+    var sub = (p.working ? p.working + ' resting · ' : '') +
+      (p.saved ? 'saved $' + p.saved.toFixed(2) : done + ' of ' + (p.rested || 0) + ' done');
+    return '<div title="' + esc(title) + '"><span class="k">at the mid</span>' +
+      '<span class="v ' + (p.filled ? 'up' : '') + '">' + v +
+      ' <small>' + esc(sub) + '</small></span></div>';
+  }
+
   function crossingCells(rows) {
     return rows.map(function (r) {
       var label = (r.asset_class === 'crypto' ? 'crypto' : 'equity') +
@@ -1442,7 +1512,7 @@
            'warn', 'assumed') +
       cell('spreads live', c.spreads_measured + '/' + c.spreads_total,
            c.spreads_measured < c.spreads_total ? 'warn' : 'good') +
-      crossingCells(s.crossing || []));
+      crossingCells(s.crossing || []) + passiveCell(s.passive));
 
     var parts = [];
     if (c.cheapest) parts.push('cheapest ' + c.cheapest.symbol + ' ' +
@@ -1647,7 +1717,6 @@
     renderFills(s);
     renderLog(s);
     renderHealth(s);
-    renderPnl(s);
     renderRisk(s);
     renderCensus(s);
     renderTrend(s);
@@ -1660,8 +1729,41 @@
     renderStats(s);
     renderExecution(s);
     renderFooter(s);
+    renderQuiet(s);
 
     renderOrb(s);
+  }
+
+  /* Panels with nothing to show fold to their header and one line saying
+   * why, and open by themselves the moment they have something. A click
+   * opens one anyway, for as long as the page is open. */
+  var quietOpen = {};
+  function quietPanel(noteId, isQuiet, text) {
+    var note = $(noteId);
+    var sec = note && note.closest('section');
+    if (!sec) return;
+    var on = !!isQuiet && !quietOpen[noteId];
+    if (sec.classList.contains('quiet') !== on) sec.classList.toggle('quiet', on);
+    sec.dataset.quietKey = noteId;
+    var h2 = sec.querySelector('h2');
+    if (on && h2.getAttribute('data-quiet') !== text) h2.setAttribute('data-quiet', text);
+  }
+
+  function renderQuiet(s) {
+    var census = s.regime_census || {};
+    var total = Object.keys(census).reduce(function (a, k) { return a + census[k]; }, 0);
+    quietPanel('census-note', total > 0 && (census.warming_up || 0) === total,
+               'all ' + total + ' warming up');
+    var t = s.trend || {};
+    quietPanel('tr-note', !t.measured && !(t.holdings || []).length, 'not yet measured');
+    var x = s.cross_section || {};
+    quietPanel('xs-note', !x.credible && !(x.cohort || 0),
+               x.cohort_note ? 'waiting for coins' : 'not enough coins yet');
+    var o = s.overnight || {};
+    quietPanel('on-note', !o.measured && !(o.holdings || []).length, 'not yet measured');
+    var n = s.news || {};
+    quietPanel('news-note', !n.enabled, 'off');
+    quietPanel('pos-note', !(s.positions || []).length, 'flat');
   }
 
   /* The orb, and the line of text under it.
@@ -2256,11 +2358,19 @@
       function (panel, i) {
         var h2 = panel.querySelector('h2');
         if (!h2) return;
+        // The console carries its own controls in its header; folding it
+        // would hide the one panel the layout is built around.
+        if (panel.id === 'cluster-panel') return;
         var key = panelKey(panel, i);
         if (folded.has(key)) panel.classList.add('collapsed');
         h2.tabIndex = 0;
         h2.title = 'click to fold this panel';
         var toggle = function () {
+          if (panel.classList.contains('quiet')) {
+            quietOpen[panel.dataset.quietKey] = true;
+            panel.classList.remove('quiet');
+            return;
+          }
           panel.classList.toggle('collapsed');
           var now = foldedSet();
           if (panel.classList.contains('collapsed')) now.add(key); else now.delete(key);
@@ -2290,6 +2400,14 @@
     var r = orb();
     if (r) r.resize();
   });
+  /* The orb now shares the centre with the chart, so its box changes when
+   * the layout does, not only when the window does. */
+  if (window.ResizeObserver && $('cluster-wrap')) {
+    new ResizeObserver(function () {
+      var r = orb();
+      if (r) r.resize();
+    }).observe($('cluster-wrap'));
+  }
   document.addEventListener('visibilitychange', function () {
     // Repaint on return rather than showing a second of stale panel.
     if (!document.hidden && state.snapshot) {

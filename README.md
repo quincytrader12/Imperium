@@ -744,6 +744,45 @@ A change of verdict is announced once, on screen and on Telegram. The brief
 lists every verdict, and a fading or reversed strategy's name turns amber or
 red in the Strategies panel.
 
+### Entries rest at the mid, and cross only if they have to
+
+An entry is first placed as a limit order at the midpoint between bid and ask
+(`execution/passive.py`). If it has not filled within
+`IMPERIUM_PASSIVE_SECONDS` (20 by default), it is cancelled. Once the venue
+confirms the cancel, whatever is left goes as an ordinary market order, so
+the trade always happens. The worst case is the market order that would have
+been sent anyway, a few seconds later; the best case is half a spread saved.
+
+These orders always go straight to market:
+
+* exits, stops, give-back exits and flattening;
+* auction orders;
+* orders on a stale, one-sided or crossed quote;
+* orders where the spread is a single tick.
+
+The loop never waits for a resting order; each tick checks on it. A partial
+fill is booked exactly once. The market order for the remainder goes out only
+after the venue confirms the limit has stopped, so nothing is bought twice.
+Set `IMPERIUM_PASSIVE_ENTRIES=false` in `settings.txt` to send every entry at
+market.
+
+### The record
+
+Every fill is appended to `trades.csv` beside the settings file, and never
+rewritten. Each row carries the strategy that placed the fill and the P&L it
+realised. The **Trades CSV** button in the console downloads it.
+
+The book's equity is saved every five minutes for a week, and once a day
+after that, per mode. That history drives:
+
+* the console chart;
+* the headline 30-day sparkline;
+* the equity picture sent with each evening brief;
+* the Sunday weekly summary, with the week's best and worst trades.
+
+The pictures are drawn with numpy and written as PNG directly. The Windows
+build carries no imaging library.
+
 ---
 
 ## Sector Trend (a sleeve, off by default)
@@ -936,6 +975,8 @@ src/imperium/
     book_risk.py            covariance, independent bets, beta
     market_regime.py        capital by market state
     research.py             the nightly decay check
+    passive.py              entries resting at the mid
+    journal.py              the trade CSV and the equity history
   telemetry/streams.py      the two rings
   server/app.py + static/   the terminal
 ```

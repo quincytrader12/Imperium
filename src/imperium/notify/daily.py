@@ -285,3 +285,94 @@ def build(brief: Brief) -> str:
     if lines[-1] == "Activity":
         lines.append("Nothing traded today.")
     return "\n".join(lines)
+
+
+# -- the weekly summary ----------------------------------------------------------
+
+#: Trades named at each end of the week.
+WEEK_LISTED = 3
+
+
+@dataclass(frozen=True)
+class WeekTrade:
+    """One closing fill, and what it realised."""
+
+    symbol: str
+    strategy: str
+    realised: float
+    ts: float
+
+
+@dataclass
+class Week:
+    """Seven days, from the saved equity history and the trade journal."""
+
+    label: str
+    start_equity: float = 0.0
+    end_equity: float = 0.0
+    #: The largest fall from a high inside the week, as a fraction (<= 0).
+    max_drawdown: float = 0.0
+    fills: int = 0
+    #: (strategy, change in its running profit over the week), best first.
+    strategies: tuple[tuple[str, float], ...] = ()
+    #: Every fill that realised something, for the best and the worst.
+    closes: tuple[WeekTrade, ...] = ()
+    currency: str = "USD"
+
+    @property
+    def change(self) -> float:
+        if self.start_equity <= 0:
+            return float("nan")
+        return self.end_equity - self.start_equity
+
+
+def build_weekly(week: Week) -> str:
+    """The Sunday message: the week's result, who made it, and the trades at
+    either end of it. Plain text, for the same reason the brief is."""
+    lines = [f"📅 WEEKLY SUMMARY — {week.label}", ""]
+    change = week.change
+    if math.isfinite(change):
+        pct = change / week.start_equity
+        lines.append(f"{dot(change)} Week {money(change, week.currency)}  "
+                     f"({percent(pct)})")
+        lines.append(f"Equity ${week.end_equity:,.2f} · from "
+                     f"${week.start_equity:,.2f}")
+        if week.max_drawdown < 0:
+            lines.append(f"Deepest fall from a high: {week.max_drawdown:.1%}")
+    else:
+        lines.append(f"{FLAT} Week — no equity history for the whole week yet")
+
+    closes = list(week.closes)
+    wins = sum(1 for t in closes if t.realised > 0)
+    lines.append("")
+    lines.append(f"{week.fills} fills · {len(closes)} closed"
+                 + (f" · {wins / len(closes):.0%} won" if closes else ""))
+
+    if week.strategies:
+        lines.append("")
+        lines.append("By strategy (this week)")
+        for name, value in week.strategies:
+            label = STRATEGY_LABEL.get(name, name)
+            lines.append(f"{dot(value)} {label:<16} {money(value, week.currency)}")
+
+    ranked = sorted(closes, key=lambda t: t.realised, reverse=True)
+    best = [t for t in ranked if t.realised > 0][:WEEK_LISTED]
+    worst = [t for t in reversed(ranked) if t.realised < 0][:WEEK_LISTED]
+
+    def line(t: WeekTrade) -> str:
+        day = dt.datetime.fromtimestamp(t.ts, tz=dt.timezone.utc).strftime("%a")
+        label = STRATEGY_LABEL.get(t.strategy, t.strategy or "—")
+        return (f"{dot(t.realised)} {t.symbol:<9} {money(t.realised, week.currency)}"
+                f"  · {label}, {day}")
+
+    if best:
+        lines.append("")
+        lines.append("Best trades")
+        lines.extend(line(t) for t in best)
+    if worst:
+        lines.append("")
+        lines.append("Worst trades")
+        lines.extend(line(t) for t in worst)
+    if not closes:
+        lines.append("Nothing closed this week.")
+    return "\n".join(lines)

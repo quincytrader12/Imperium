@@ -470,6 +470,12 @@ export class ProcessOrb {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
+    // Framed by the narrower side. The field of view is vertical, so in a
+    // pane taller than it is wide the orb kept its height and lost its
+    // sides; stepping back by the aspect keeps all of it in view.
+    const back = Math.max(1, 0.78 / this.camera.aspect);
+    this.camera.position.set(0, 0.30 * back, 6.4 * back);
+    this.camera.lookAt(0, 0, 0);
     this.camera.updateProjectionMatrix();
     if (this.composer) {
       this.composer.setPixelRatio(this.renderer.getPixelRatio());

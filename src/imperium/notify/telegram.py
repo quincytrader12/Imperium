@@ -71,14 +71,24 @@ class BotIdentity:
 
 
 async def _call(token: str, method: str, payload: dict | None = None,
-                *, transport: httpx.AsyncBaseTransport | None = None) -> dict:
+                *, transport: httpx.AsyncBaseTransport | None = None,
+                files: dict | None = None) -> dict:
     """One Telegram API call. Failures are returned as TelegramError, never
-    raised as a transport exception into the trading loop."""
+    raised as a transport exception into the trading loop.
+
+    With ``files`` the call is multipart -- the only way Telegram accepts a
+    picture that is not already on a public URL -- and the payload travels
+    as form fields beside it."""
     url = f"{API}/bot{token}/{method}"
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT,
                                      transport=transport) as client:
-            response = await client.post(url, json=payload or {})
+            if files:
+                response = await client.post(
+                    url, data={k: str(v) for k, v in (payload or {}).items()},
+                    files=files)
+            else:
+                response = await client.post(url, json=payload or {})
     except httpx.HTTPError as exc:
         raise TelegramError(
             f"could not reach Telegram ({type(exc).__name__})",
@@ -188,6 +198,37 @@ class Notifier:
                 self.failed += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 log.exception("telegram send raised")
+                return False
+            self.sent += 1
+            self.last_error = ""
+            self._last_sent_at = loop.time()
+            return True
+
+    async def send_photo(self, image: bytes, caption: str = "") -> bool:
+        """A picture with a short caption. Best effort, never raises, and
+        paced with every other send."""
+        if not self.enabled or not image:
+            return False
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            wait = MIN_INTERVAL - (loop.time() - self._last_sent_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            try:
+                # Telegram's caption limit; the brief itself goes as text.
+                await _call(self.token, "sendPhoto",
+                            {"chat_id": self.chat_id, "caption": caption[:1024]},
+                            files={"photo": ("equity.png", image, "image/png")},
+                            transport=self.transport)
+            except TelegramError as exc:
+                self.failed += 1
+                self.last_error = exc.operator_text()
+                log.warning("telegram photo failed: %s", self.last_error)
+                return False
+            except Exception as exc:                      # pragma: no cover
+                self.failed += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                log.exception("telegram photo raised")
                 return False
             self.sent += 1
             self.last_error = ""

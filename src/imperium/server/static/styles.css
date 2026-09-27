@@ -226,7 +226,9 @@ tbody tr:hover { background: #15171b; }
 .v-trading      { color: #08120d; background: var(--good); font-weight: 700; }
 .v-not_admitted { color: var(--accent-2); border-color: #3a3f48; background: #15171b; }
 .v-rejected     { color: var(--dim); border-color: #2b2e35; }
-.v-unscanned    { color: var(--dimmer); border-color: #202329; }
+/* Not yet scanned is a queue position, not a verdict: said quietly, without
+   the chip's border, so thirty of them do not read as thirty findings. */
+.v-unscanned    { color: #5d626a; border-color: transparent; letter-spacing: .4px; }
 .v-warmup       { color: var(--warn); border-color: #4a3a12; background: #1d1708; }
 
 /* ---------- reasoning ---------- */
@@ -920,3 +922,181 @@ button:active, .btn:active { background: #0c0e11; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ======================================================================
+   Hero, console and chart.
+
+   The same instrument-panel language as the rest: chrome hairlines, one
+   neutral accent, colour reserved for signal. What changes is hierarchy --
+   the balance and its line are now the largest things on the screen,
+   because they are the thing the operator is here for.
+   ====================================================================== */
+
+/* ---------- hero ---------- */
+
+.hero {
+  display: flex; align-items: center; gap: 16px;
+  padding: 2px 16px 2px 14px; margin: -6px 0;
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(223, 229, 236, .035), transparent 70%);
+  min-height: 52px;
+}
+.hero .k { color: var(--dimmer); font-size: 9px; letter-spacing: 1.4px;
+           text-transform: uppercase; }
+.hero-main, .hero-day { display: flex; flex-direction: column; line-height: 1.1;
+                        min-width: 0; }
+.hero-value {
+  font-size: 24px; font-weight: 600; letter-spacing: -.2px; color: var(--accent-2);
+  text-shadow: 0 0 18px rgba(223, 229, 236, .18);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.hero-main .v-alt { font-size: 10px; color: var(--dimmer); }
+.hero-pnl { font-size: 15px; font-weight: 600; white-space: nowrap;
+            font-variant-numeric: tabular-nums; }
+.hero-pct { font-size: 10px; color: var(--dim); }
+.hero-pnl.up, .hero-pct.up { color: var(--good); }
+.hero-pnl.down, .hero-pct.down { color: var(--bad); }
+.hero-spark { width: 120px; height: 34px; display: block; opacity: .95; }
+
+/* The balance ticking: a brief tint in the direction it moved. */
+.tick-up   { animation: tick-up .9s ease-out; }
+.tick-down { animation: tick-down .9s ease-out; }
+@keyframes tick-up   { 0% { color: var(--good); text-shadow: 0 0 14px rgba(47, 224, 164, .55); } }
+@keyframes tick-down { 0% { color: var(--bad);  text-shadow: 0 0 14px rgba(255, 92, 108, .55); } }
+
+/* ---------- console ---------- */
+
+#cluster-panel > h2 { align-items: center; padding-top: 3px; padding-bottom: 3px; }
+.console-title { display: flex; align-items: center; gap: 12px; }
+.console-tools { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.console-tools .note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* A segmented control, drawn as part of the header bar rather than on it. */
+.seg { display: inline-flex; border: 1px solid var(--line-hot); border-radius: 3px;
+       overflow: hidden; background: #0b0c0f; }
+.seg button {
+  font: inherit; font-size: 9px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--dimmer); background: transparent; border: 0; border-radius: 0;
+  padding: 2px 8px; cursor: pointer; line-height: 1.5;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button:hover { color: var(--text); background: #14161a; }
+.seg button.on {
+  color: var(--accent-2);
+  background: linear-gradient(180deg, #23272e, #16181c);
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+.seg button:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+.export {
+  color: var(--dim); text-decoration: none; font-size: 9px; letter-spacing: 1px;
+  text-transform: uppercase; border: 1px solid var(--line-hot); border-radius: 3px;
+  padding: 1px 7px; white-space: nowrap;
+}
+.export:hover { color: var(--accent-2); border-color: var(--chrome-mid); }
+
+.console {
+  flex: 1 1 auto; min-height: 0; display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 1px; background: var(--line);
+}
+.chart-pane, .orb-pane { position: relative; min-width: 0; min-height: 0;
+                         background: linear-gradient(180deg, #0c0d10, var(--panel) 30%); }
+.chart-pane { display: flex; flex-direction: column; }
+
+/* The period in four numbers, above the line they summarise. */
+.chart-stats {
+  display: flex; gap: 22px; padding: 8px 14px 4px; flex: 0 0 auto;
+  border-bottom: 1px solid #14161a;
+}
+.chart-stats div { display: flex; flex-direction: column; line-height: 1.2; }
+.chart-stats .k { color: var(--dimmer); font-size: 9px; letter-spacing: 1.2px;
+                  text-transform: uppercase; }
+.chart-stats .v { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--text); }
+.chart-stats .v small { font-size: 10px; color: var(--dim); margin-left: 3px; }
+
+.chart-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
+#equity-chart { display: block; width: 100%; height: 100%; cursor: crosshair; }
+
+.chart-tip {
+  position: absolute; pointer-events: none; z-index: 5; min-width: 150px;
+  background: rgba(9, 10, 13, .96); border: 1px solid var(--line-hot);
+  border-radius: 3px; padding: 6px 8px; font-size: 10.5px; line-height: 1.5;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .65);
+}
+.chart-tip .t { color: var(--dimmer); font-size: 9.5px; letter-spacing: .5px; }
+.chart-tip .row { display: flex; justify-content: space-between; gap: 14px; }
+.chart-tip .row b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+.chart-tip .sw { display: inline-block; width: 8px; height: 2px; margin-right: 5px;
+                 vertical-align: middle; border-radius: 1px; }
+.chart-tip hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+
+.chart-legend {
+  position: absolute; left: 14px; top: 8px; display: flex; flex-wrap: wrap;
+  gap: 4px 12px; font-size: 9.5px; color: var(--dim); pointer-events: none;
+}
+.chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend i { width: 10px; height: 2px; border-radius: 1px; display: inline-block; }
+
+.chart-empty {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; text-align: center; color: var(--dimmer);
+  font-size: 11px; line-height: 1.7; padding: 20px; pointer-events: none;
+}
+.chart-empty b { color: var(--dim); font-weight: 500; display: block; font-size: 12px; }
+
+/* The orb in its half: legend wraps rather than running under the ticker. */
+.orb-pane .cluster-legend { flex-wrap: wrap; right: 8px; gap: 4px 10px; }
+.orb-pane .orb-ticker { bottom: 44px; }
+
+@media (max-width: 1450px) {
+  .console { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
+  .chart-stats { gap: 16px; }
+}
+
+/* ---------- a trade, as an event ---------- */
+
+/* A new fill's row glows once and settles. Colour by side, not by outcome:
+   an entry has no outcome yet. */
+tr.fresh-buy  { animation: fresh-buy 2.4s ease-out; }
+tr.fresh-sell { animation: fresh-sell 2.4s ease-out; }
+@keyframes fresh-buy  { 0% { background: rgba(47, 224, 164, .22);
+                             box-shadow: inset 2px 0 0 var(--good); } }
+@keyframes fresh-sell { 0% { background: rgba(255, 92, 108, .20);
+                             box-shadow: inset 2px 0 0 var(--bad); } }
+
+/* ---------- folded panels ---------- */
+
+/* A panel with nothing to show keeps its header and says so in one line;
+   it opens by itself when it has something. */
+.panel.quiet > :not(h2) { display: none !important; }
+.panel.quiet { flex: 0 0 auto !important; min-height: 0 !important; }
+.panel.quiet > h2 { opacity: .72; }
+.panel.quiet > h2::after {
+  content: attr(data-quiet); color: var(--dimmer); font-weight: 400;
+  letter-spacing: .5px; text-transform: none; margin-left: auto; font-size: 9.5px;
+}
+.panel.quiet > h2 .note { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tick-up, .tick-down, tr.fresh-buy, tr.fresh-sell { animation: none; }
+}
+
+/* The header keeps to one line: the secondary figures give way first. */
+@media (max-width: 1720px) { header .stat.opt { display: none; } }
+@media (max-width: 1400px) { .hero-spark { display: none; } .hero { gap: 12px; } }
+/* The lamps as a compact grid: five states in the width of two words. */
+.lamps { display: grid; grid-template-columns: repeat(3, auto); gap: 1px 10px;
+         margin-left: auto; }
+.lamp { font-size: 8.5px; line-height: 1.35; }
+header .controls button, header .controls select { padding-left: 9px; padding-right: 9px; }
+@media (max-width: 1500px) { header .stat.opt2 { display: none; } }
+.seg button, .chart-stats .k, .chart-stats .v { white-space: nowrap; }
+@media (max-width: 1450px) {
+  .chart-stats { gap: 14px; padding-left: 12px; padding-right: 12px; }
+  .chart-stats .v { font-size: 13px; }
+  .seg button { padding: 2px 6px; }
+}
+/* The console does not fold, so it carries no fold mark and no fold cursor. */
+#cluster-panel > h2 { cursor: default; }
+#cluster-panel > h2::after { content: none; }

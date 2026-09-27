@@ -14,22 +14,36 @@
 <header>
   <div class="brand">IMPERIUM</div>
 
-  <div class="stat"><span class="k">Venue</span><span class="v" id="h-venue">—</span></div>
-  <div class="stat"><span class="k">Mode</span><span class="v" id="h-mode">—</span></div>
+  <!-- Venue and mode share one stat: the header has room for one line, and
+       the headline figures earned the space. -->
+  <div class="stat"><span class="k"><span id="h-venue">—</span> · mode</span><span class="v" id="h-mode">—</span></div>
   <div class="stat"><span class="k">Market</span><span class="v" id="h-market">—</span></div>
-  <div class="stat"><span class="k">Equity</span><span class="v num" id="h-equity">—</span>
-    <!-- The same money in a second currency. Display only; every decision
-         this program makes stays in dollars. Hidden until a rate is known,
-         because a converted figure with no rate behind it is a claim the
-         program cannot support. -->
-    <span class="v-alt num" id="h-equity-alt" hidden></span></div>
+  <!-- The headline. Readable from across the room: the balance, what today
+       has done to it, and the last thirty closes. Everything else in the
+       header is context for these three. -->
+  <div class="hero" id="hero">
+    <div class="hero-main">
+      <span class="k">Equity</span>
+      <span class="hero-value num" id="h-equity">—</span>
+      <!-- The same money in a second currency. Display only; every decision
+           stays in dollars. Hidden until a rate is known. -->
+      <span class="v-alt num" id="h-equity-alt" hidden></span>
+    </div>
+    <div class="hero-day">
+      <span class="k">Today</span>
+      <span class="hero-pnl num" id="h-day">—</span>
+      <span class="hero-pct num" id="h-day-pct"></span>
+    </div>
+    <canvas class="hero-spark" id="h-spark" width="120" height="34"
+            title="The book's last thirty daily closes"></canvas>
+  </div>
   <!-- The simulated book, shown only when it has diverged from the account.
        In live mode they are the same number and this stays hidden. -->
   <div class="stat" hidden><span class="k">Book</span><span class="v num" id="h-book">—</span></div>
-  <div class="stat"><span class="k">Realised</span><span class="v num" id="h-realised">—</span></div>
-  <div class="stat"><span class="k">Unrealised</span><span class="v num" id="h-unrealised">—</span></div>
-  <div class="stat"><span class="k">Gross</span><span class="v num" id="h-gross">—</span></div>
-  <div class="stat"><span class="k">Trading</span><span class="v num" id="h-trading">—</span></div>
+  <div class="stat opt"><span class="k">Realised</span><span class="v num" id="h-realised">—</span></div>
+  <div class="stat opt"><span class="k">Unrealised</span><span class="v num" id="h-unrealised">—</span></div>
+  <div class="stat opt2"><span class="k">Gross</span><span class="v num" id="h-gross">—</span></div>
+  <div class="stat opt2"><span class="k">Trading</span><span class="v num" id="h-trading">—</span></div>
 
   <div class="lamps">
     <span class="lamp" id="lamp-link"><i></i>link</span>
@@ -187,30 +201,59 @@
     </section>
   </div>
 
-  <!-- ---------------- neural cluster ---------------- -->
+  <!-- ---------------- centre console ---------------- -->
+  <!-- The money and the machine, side by side. The equity line is what the
+       operator is here for; the orb is what the process is doing right now.
+       One panel with a hairline between them, so they read as one console
+       rather than two widgets that happen to be adjacent. -->
   <section class="panel" id="cluster-panel">
-    <h2>Process orb
-      <span class="note" id="cluster-note">—</span>
+    <h2>
+      <span class="console-title">Console
+        <span class="seg" id="chart-view" role="tablist" aria-label="Chart view">
+          <button data-view="equity" class="on" role="tab">Equity</button>
+          <button data-view="strategies" role="tab">By strategy</button>
+        </span>
+        <span class="seg" id="chart-span" role="tablist" aria-label="Range">
+          <button data-span="1D" role="tab">1D</button>
+          <button data-span="1W" class="on" role="tab">1W</button>
+          <button data-span="1M" role="tab">1M</button>
+          <button data-span="3M" role="tab">3M</button>
+          <button data-span="ALL" role="tab">All</button>
+        </span>
+      </span>
+      <span class="console-tools">
+        <a class="export" id="btn-export" href="/api/trades.csv" download
+           title="Every fill ever made, with its strategy, cost and realised P&amp;L">&#8595; Trades CSV</a>
+        <span class="note" id="cluster-note">—</span>
+      </span>
     </h2>
-    <div class="cluster-wrap" id="cluster-wrap">
-      <canvas id="orb"></canvas>
-      <!-- What just fired, in words. The orb says which kind and roughly
-           where; this says which symbol. Between them nothing the 2D pulse
-           field used to carry has been lost -- and unlike the field, this
-           part is still readable with WebGL switched off. -->
-      <div id="orb-ticker" class="orb-ticker"></div>
-      <!-- The swatches are painted from the shared palette at startup.
-           Written out here as hex they were a second copy of the same fact,
-           and a legend that disagrees with the field it explains is worse
-           than no legend. -->
-      <div class="cluster-legend" id="cluster-legend">
-        <span data-kind="scan"><i></i>scan</span>
-        <span data-kind="decision"><i></i>decision</span>
-        <span data-kind="refused"><i></i>refused</span>
-        <span data-kind="cap"><i></i>cap</span>
-        <span data-kind="order"><i></i>order</span>
-        <span data-kind="warmup"><i></i>warmup</span>
-        <span data-kind="halt"><i></i>halt</span>
+    <div class="console">
+      <div class="chart-pane">
+        <div class="chart-stats" id="chart-stats"></div>
+        <div class="chart-wrap" id="chart-wrap">
+          <canvas id="equity-chart"></canvas>
+          <div class="chart-tip" id="chart-tip" hidden></div>
+          <div class="chart-legend" id="chart-legend"></div>
+          <div class="chart-empty" id="chart-empty" hidden></div>
+        </div>
+      </div>
+      <div class="orb-pane cluster-wrap" id="cluster-wrap">
+        <canvas id="orb"></canvas>
+        <!-- What just fired, in words. The orb says which kind and roughly
+             where; this says which symbol. Unlike the orb, this part is still
+             readable with WebGL switched off. -->
+        <div id="orb-ticker" class="orb-ticker"></div>
+        <!-- The swatches are painted from the shared palette at startup, so
+             the legend cannot disagree with the field it explains. -->
+        <div class="cluster-legend" id="cluster-legend">
+          <span data-kind="scan"><i></i>scan</span>
+          <span data-kind="decision"><i></i>decision</span>
+          <span data-kind="refused"><i></i>refused</span>
+          <span data-kind="cap"><i></i>cap</span>
+          <span data-kind="order"><i></i>order</span>
+          <span data-kind="warmup"><i></i>warmup</span>
+          <span data-kind="halt"><i></i>halt</span>
+        </div>
       </div>
     </div>
   </section>
@@ -287,7 +330,6 @@
   <div id="bottom-panel">
     <section class="panel">
       <h2>Performance <span class="note" id="perf-note">—</span></h2>
-      <canvas id="pnl"></canvas>
       <div class="stat-grid" id="stat-grid"></div>
     </section>
 
@@ -426,6 +468,7 @@
 
 <script src="/static/fmt.js"></script>
 <script src="/static/palette.js"></script>
+<script src="/static/chart.js"></script>
 <script src="/static/app.js"></script>
 <!-- The vendored three.js addons import from a bare "three" specifier. An
      import map resolves it in the browser, which is how this project keeps

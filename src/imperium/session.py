@@ -40,6 +40,7 @@ from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
 from imperium.notify import briefing as brief_mod
 from imperium.notify import greeting as greeting_mod
+from imperium.notify import chart_png
 from imperium.notify import daily
 from imperium.notify import telegram as tg
 from imperium.notify import voice as voice_mod
@@ -64,6 +65,9 @@ from imperium.execution import cost_learning as cost_learning_mod
 from imperium.execution import evidence as evidence_mod
 from imperium.execution import market_regime as market_regime_mod
 from imperium.execution import research as research_mod
+from imperium.execution import journal as journal_mod
+from imperium.execution import passive as passive_mod
+from imperium.execution.passive import PASSIVE
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
@@ -294,6 +298,9 @@ class TradingSession:
         #: it whenever it exits, so an in-memory flag would send a fresh brief
         #: after every crash and every overnight reboot.
         self._brief_sent_day: str = ""
+        #: The Sunday whose weekly summary has gone out, on disk for the same
+        #: reason the brief's day is.
+        self._weekly_sent_day: str = ""
         #: Counted for the brief, reset when the trading day rolls.
         self._today_protected: int = 0
         self._today_halt_reason: str = ""
@@ -377,6 +384,10 @@ class TradingSession:
         #: that pruning would cost more than it saves.
         self._daily_asked: set[str] = set()
         self._equity_curve: list[tuple[float, float]] = []
+        # The permanent record: every fill, and the equity over time, per
+        # mode. See execution/journal.py.
+        self.trade_journal = journal_mod.TradeJournal(config.trades_path())
+        self._equity_histories: dict[str, journal_mod.EquityHistory] = {}
         self._account_checked_at: float = 0.0
         #: The account as the venue reports it, refreshed on a timer. Held
         #: separately from the book because in dry run and paper the book is
@@ -1112,6 +1123,7 @@ class TradingSession:
                 # The day whose brief has gone out. On disk because the
                 # restart loop would otherwise re-send it every crash.
                 brief_sent_day=self._brief_sent_day,
+                weekly_sent_day=self._weekly_sent_day,
                 saved_at=time.time())
         except OSError as exc:
             self.telemetry.event(
@@ -1144,6 +1156,9 @@ class TradingSession:
         sent = payload.get("brief_sent_day")
         if isinstance(sent, str):
             self._brief_sent_day = sent
+        weekly = payload.get("weekly_sent_day")
+        if isinstance(weekly, str):
+            self._weekly_sent_day = weekly
         try:
             carried = payload.get("trend_holdings")
             if isinstance(carried, dict):
@@ -1749,6 +1764,17 @@ class TradingSession:
         if await self.notify(text):
             self.telemetry.event(Level.INFO, "brief",
                                  "the daily brief was sent")
+            # After the text, and neither can take it back: a picture that
+            # fails to draw or send is a missing picture, never a lost brief.
+            try:
+                await self._send_brief_chart()
+            except Exception:                              # noqa: BLE001
+                log.exception("the brief's chart could not be sent")
+            if eastern.weekday() == 6:
+                try:
+                    await self._send_weekly(today)
+                except Exception:                          # noqa: BLE001
+                    log.exception("the weekly summary could not be sent")
         else:
             self.telemetry.event(
                 Level.INFO, "brief",
@@ -2179,6 +2205,91 @@ class TradingSession:
         """
         return brief_mod.build(self.snapshot())
 
+    async def _render_chart(self, points, title: str) -> bytes | None:
+        """The chart as PNG, drawn off the event loop: half a second of numpy
+        is half a second nothing else in this process would run."""
+        try:
+            return await asyncio.to_thread(chart_png.render_equity, points,
+                                           title=title)
+        except Exception:                                  # noqa: BLE001
+            log.exception("could not draw the chart for Telegram")
+            return None
+
+    async def _send_brief_chart(self) -> bool:
+        """The brief's picture: thirty days of closes, or today's line while
+        there are not yet two closes to draw between."""
+        history = self.equity_history()
+        points, title = history.series(31 * 86_400), "EQUITY 30 DAYS"
+        if len(points) < 3:
+            points, title = history.series(86_400), "EQUITY TODAY"
+        image = await self._render_chart(points, title)
+        if image is None:
+            return False
+        first, last = points[0][1], points[-1][1]
+        caption = (f"{title.title()}: ${last:,.2f}, "
+                   f"{daily.money(last - first)} ({daily.percent(last / first - 1)})")
+        send = getattr(self.notifier, "send_photo", None)
+        return bool(send and await send(image, caption))
+
+    def _week(self, today: str, now: float | None = None) -> "daily.Week":
+        """The last seven days, from the saved record: the equity history,
+        the trade journal, and each strategy's daily marks."""
+        now = time.time() if now is None else now
+        mode = self.broker.mode.value
+        since = now - 7 * 86_400
+        points = self.equity_history(mode).series(7 * 86_400, now)
+        start = points[0][1] if points else 0.0
+        end = points[-1][1] if points else 0.0
+        worst, peak = 0.0, 0.0
+        for _, value in points:
+            peak = max(peak, value)
+            if peak > 0:
+                worst = min(worst, value / peak - 1.0)
+        rows = self.trade_journal.read(since=since, mode=mode)
+        closes = tuple(daily.WeekTrade(r.symbol, r.strategy, r.realised, r.ts)
+                       for r in rows if abs(r.realised) > 1e-9)
+        week_ago = (dt.date.fromisoformat(today) - dt.timedelta(days=7)).isoformat()
+        strategies: list[tuple[str, float]] = []
+        book = self.attribution.books.get(mode)
+        if book is not None:
+            prices = self._marks()
+            for name, rec in book.records.items():
+                before = [v for d, v in rec.daily if d <= week_ago]
+                base = before[-1] if before else (rec.daily[0][1] if rec.daily else 0.0)
+                value = rec.realised + rec.unrealised(prices)
+                if rec.daily or abs(value) > 1e-9:
+                    strategies.append((name, value - base))
+        strategies.sort(key=lambda kv: kv[1], reverse=True)
+        label = "week to " + dt.date.fromisoformat(today).strftime("%a %d %b")
+        return daily.Week(label=label, start_equity=start, end_equity=end,
+                          max_drawdown=worst, fills=len(rows),
+                          strategies=tuple(strategies), closes=closes,
+                          currency=self.account_currency or "USD")
+
+    async def _send_weekly(self, today: str) -> bool:
+        """Sunday's summary, once, claimed on disk before it is sent."""
+        if self._weekly_sent_day == today:
+            return False
+        self._weekly_sent_day = today
+        self._save_overnight_state()
+        try:
+            text = daily.build_weekly(self._week(today))
+        except Exception:                                  # noqa: BLE001
+            log.exception("the weekly summary could not be built")
+            self.telemetry.event(Level.ERROR, "brief",
+                                 "the weekly summary could not be built; "
+                                 "none was sent this week")
+            return False
+        sent = await self.notify(text)
+        points = self.equity_history().series(7 * 86_400)
+        image = await self._render_chart(points, "EQUITY THIS WEEK")
+        send = getattr(self.notifier, "send_photo", None)
+        if image is not None and send is not None:
+            await send(image, "This week")
+        if sent:
+            self.telemetry.event(Level.INFO, "brief", "the weekly summary was sent")
+        return sent
+
     async def notify(self, text: str) -> bool:
         """Send to Telegram if it is linked, and never let it matter if not.
 
@@ -2250,6 +2361,21 @@ class TradingSession:
             # does nothing. It would never clear.
             self.overnight_holdings[decision.symbol] = decision.target_weight
             self._save_overnight_state()
+        resting = getattr(self.broker, "working", {}).get(decision.symbol)
+        if fill is None and resting is not None and time.time() - resting.placed_at < 5:
+            # Placed, not filled: said, so a TRADING verdict followed by no
+            # fill is never a mystery for the twenty seconds it rests.
+            self.telemetry.pulse(decision.symbol, "order",
+                                 f"resting {resting.side} at {resting.limit}", 0.7)
+            self.telemetry.event(
+                Level.INFO, "order",
+                f"{resting.side.upper()} {format_decimal(resting.quantity)} "
+                f"{decision.symbol} resting at {resting.limit}, the mid of "
+                f"{resting.bid}/{resting.ask}",
+                detail=f"Crosses at market after "
+                       f"{resting.deadline - resting.placed_at:.0f}s if it has "
+                       f"not filled. The trade happens either way; resting "
+                       f"is only a chance not to pay the spread.")
         if fill:
             self.allocator.observe(decision.symbol).current_weight = \
                 self.broker.weight_of(decision.symbol, price,
@@ -2268,6 +2394,39 @@ class TradingSession:
                 f"{fill.side.upper()} {qty_text} {decision.symbol} @ {px_text}\n"
                 f"{self.broker.mode.value} · {decision.strategy or 'strategy'}\n"
                 f"{decision.reason[:180]}")
+
+    def _quote_for_resting(self, symbol: str) -> tuple[float, float, float]:
+        """The touch a resting entry is priced from: bid, ask, and its age."""
+        q = self.feed.quote(symbol)
+        return float(q.bid or 0.0), float(q.ask or 0.0), float(q.age)
+
+    async def _service_resting(self) -> None:
+        """Book what resting entries filled, and cross what is left of any
+        whose window closed. Never raises: an entry that cannot be checked
+        this tick is checked on the next."""
+        broker = self.broker
+        if not getattr(broker, "working", None):
+            return
+        try:
+            fills = await broker.service_passive()
+        except Exception:                                  # noqa: BLE001
+            log.exception("could not check the resting entries")
+            return
+        for fill in fills:
+            price = self.feed.quote(fill.symbol).last or float(fill.price)
+            self.allocator.observe(fill.symbol).current_weight = \
+                broker.weight_of(fill.symbol, price, self.engine_equity())
+            how = ("filled resting at the mid" if fill.order == PASSIVE
+                   else "crossed after resting unfilled")
+            qty_text, px_text = format_decimal(fill.quantity), format_decimal(fill.price)
+            self.telemetry.pulse(fill.symbol, "order",
+                                 f"{fill.side} {qty_text} at {px_text}", 1.0)
+            self.telemetry.event(Level.INFO, "order",
+                                 f"{fill.side} {qty_text} {fill.symbol} at "
+                                 f"{px_text} — {how}")
+            await self.notify(
+                f"{fill.side.upper()} {qty_text} {fill.symbol} @ {px_text}\n"
+                f"{broker.mode.value} · {fill.strategy or 'strategy'} · {how}")
 
     async def _tick(self) -> None:
         if self._pending_notice:
@@ -2291,6 +2450,10 @@ class TradingSession:
         await self._maybe_send_daily_brief()
         await self._refresh_account_limits()
         await self._reconcile_book()
+        # Entries resting at the mid: booked when they fill, crossed when their
+        # window closes. Before attribution, so their fills are booked this
+        # tick rather than the next.
+        await self._service_resting()
         # After the reconcile, so the book it is checked against is the one
         # the venue agrees with.
         self._attribute()
@@ -2338,6 +2501,11 @@ class TradingSession:
         self._equity_curve.append((time.time(), equity))
         if len(self._equity_curve) > 2000:
             self._equity_curve = self._equity_curve[-2000:]
+        # The whole book, not the engine's share of it: the chart is the
+        # account's line, and the share moves whenever a sleeve arms.
+        history = self.equity_history()
+        history.record(time.time(), self.equity(), trading_day())
+        history.maybe_save()
 
     def apply_account_scale(self, equity: float) -> bool:
         """Re-derive the limits for what this balance can actually trade.
@@ -2441,6 +2609,8 @@ class TradingSession:
             corrected = book.sync(attribution_mod.positions_of(self.broker))
             for fill in fresh:
                 self._learn_crossing(fill)
+            self.trade_journal.append(
+                journal_mod.row_from_fill(fill) for fill in fresh)
         except Exception:                                  # noqa: BLE001
             log.exception("attribution failed")
             return
@@ -3009,7 +3179,65 @@ class TradingSession:
         self._loop_beat = time.time()
         self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
 
+    def equity_history(self, mode: str | None = None) -> "journal_mod.EquityHistory":
+        """The saved equity history for a mode, the current one by default.
+
+        One per mode: a paper book and a live account are different money, and
+        a line that ran from one into the other would chart a switch as a
+        gain or a loss.
+        """
+        mode = mode or self.broker.mode.value
+        found = self._equity_histories.get(mode)
+        if found is None:
+            found = journal_mod.EquityHistory.load(
+                config.equity_history_path(mode))
+            self._equity_histories[mode] = found
+        return found
+
+    CHART_RANGES = {"1D": 86_400, "1W": 7 * 86_400, "1M": 31 * 86_400,
+                    "3M": 92 * 86_400, "ALL": None}
+
+    def chart_data(self, span: str = "1W") -> dict[str, Any]:
+        """What the centre chart draws: equity, each strategy's running
+        profit, and the trades, over one range."""
+        span = span if span in self.CHART_RANGES else "1W"
+        seconds = self.CHART_RANGES[span]
+        mode = self.broker.mode.value
+        now = time.time()
+        equity = self.equity_history(mode).series(seconds, now)
+        start = equity[0][0] if equity else now - (seconds or 0)
+        trades = [row.as_dict() for row in
+                  self.trade_journal.read(since=start, mode=mode)][-400:]
+        strategies: dict[str, list[list[float]]] = {}
+        book = self.attribution.books.get(mode)
+        if book is not None:
+            prices = self._marks()
+            for name, rec in book.records.items():
+                points = []
+                for day, value in rec.daily:
+                    try:
+                        stamp = dt.datetime.fromisoformat(day).replace(
+                            hour=21, tzinfo=dt.timezone.utc).timestamp()
+                    except ValueError:
+                        continue
+                    if stamp > now:
+                        continue
+                    if seconds is None or stamp >= now - seconds:
+                        points.append([stamp, round(value, 4)])
+                points.append([now, round(rec.realised + rec.unrealised(prices), 4)])
+                strategies[name] = points
+        return {"span": span, "mode": mode, "now": now,
+                "equity": [[round(t, 1), round(v, 4)] for t, v in equity],
+                "strategies": strategies, "trades": trades}
+
     async def stop(self) -> None:
+        for history in self._equity_histories.values():
+            history.save()
+        # A resting entry left behind would fill with nobody watching it, and
+        # the next session would meet a position it never decided on.
+        for symbol in list(getattr(self.broker, "working", {}) or {}):
+            with contextlib.suppress(Exception):
+                await self.broker._withdraw(symbol)
         self.running = False
         self.lamps.session = "off"
         # Handed back promptly: a stopped session has no claim on the machine.
@@ -3050,6 +3278,7 @@ class TradingSession:
             tradeable = self.credential.trade_enabled
             broker = LiveBroker(self.spec, self.client, self.credential.name,
                                telemetry=self.telemetry)
+            broker.quote_for = self._quote_for_resting
             broker.arm(phrase, tradeable)
             await broker.sync()
             self.broker = broker
@@ -3077,6 +3306,7 @@ class TradingSession:
                 broker = LiveBroker(self.spec, self.client,
                                     self.credential.name, mode=Mode.PAPER,
                                     telemetry=self.telemetry)
+                broker.quote_for = self._quote_for_resting
                 broker.arm_for_paper()
                 await broker.sync()
                 self.broker = broker
@@ -3224,6 +3454,10 @@ class TradingSession:
             "crossing": self.cost_calibration.rows(),
             "book_risk": self.book_risk.assessment.as_dict(),
             "market_regime": self._market_now(),
+            "passive": (self.broker.passive_stats.as_dict(len(self.broker.working))
+                        if hasattr(self.broker, "passive_stats")
+                        else {"enabled": passive_mod.enabled(), "simulated": True}),
+            "hero": self._hero_block(),
             "research": self.research.rows(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
@@ -3374,6 +3608,21 @@ class TradingSession:
             #: market.
             "overnight_max_share_price": self.limits.max_position_weight * equity,
         }
+
+    def _hero_block(self) -> dict[str, Any]:
+        """The header's headline figures beyond the balance itself: the
+        book's change since the last close, and its last thirty closes."""
+        history = self.equity_history()
+        closes = [v for _, v in history.daily[-31:]]
+        today = trading_day()
+        before = [v for d, v in history.daily if d < today]
+        book = self.equity()
+        previous = before[-1] if before else 0.0
+        return {"spark": [round(v, 2) for v in closes[-30:]],
+                "book": round(book, 4),
+                "book_day_pnl": (book - previous) if previous > 0 else None,
+                "book_day_pct": ((book / previous - 1.0) if previous > 0
+                                 else None)}
 
     def _account_block(self) -> dict[str, Any]:
         """The real account, kept distinct from the simulated book.
