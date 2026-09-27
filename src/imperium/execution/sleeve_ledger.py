@@ -210,22 +210,7 @@ class SleeveLedger:
         whole book.
         """
         try:
-            config.ensure_home()
-            path = config.state_path()
-            payload: dict[str, Any] = {}
-            try:
-                loaded = json.loads(path.read_text(encoding=config.TEXT_ENCODING))
-                if isinstance(loaded, dict):
-                    payload = loaded
-            except (OSError, ValueError):
-                payload = {}
-            payload[STATE_KEY] = self.as_dict()
-            path.write_text(json.dumps(payload, indent=2),
-                            encoding=config.TEXT_ENCODING)
-            try:
-                path.chmod(0o600)
-            except (OSError, NotImplementedError):
-                pass
+            config.update_state(**{STATE_KEY: self.as_dict()})
         except OSError as exc:
             # Best effort, like every other write to this file -- but unlike
             # the others this one loses stops, so it is logged loudly rather

@@ -107,6 +107,28 @@ class Activity:
 
 
 @dataclass(frozen=True)
+class StrategyLine:
+    """One strategy's standing, as the brief reports it."""
+
+    name: str
+    total: float
+    round_trips: int | None = None
+    hit_rate: float | None = None
+
+
+#: What each strategy is called in the brief. The code's names are for the
+#: code; a phone screen at the end of the day wants words.
+STRATEGY_LABEL = {
+    "intraday": "Intraday",
+    "trend": "Multi-day trend",
+    "overnight": "Overnight drift",
+    "cross_section": "Crypto ranking",
+    "sector": "Sector trend",
+    "unattributed": "Unattributed",
+}
+
+
+@dataclass(frozen=True)
 class Brief:
     day: str
     equity: float
@@ -116,6 +138,9 @@ class Brief:
     activity: Activity = field(default_factory=Activity)
     currency: str = "USD"
     mode: str = ""
+    #: Best first. Empty until any strategy has traded, and then the section is
+    #: left out rather than printed with nothing in it.
+    strategies: tuple[StrategyLine, ...] = ()
 
     @property
     def day_pnl(self) -> float:
@@ -195,6 +220,22 @@ def build(brief: Brief) -> str:
                 f"{dot(sum(p.unrealised for p in rest))} and "
                 f"{len(rest)} more, {money(sum(p.unrealised for p in rest))} "
                 f"between them")
+
+    if brief.strategies:
+        # Which strategy earned it. The question the rest of the brief could
+        # not answer: a green day made by one strategy while another bled is
+        # a different day from one they all contributed to.
+        lines.append("")
+        lines.append("By strategy (to date)")
+        for line in brief.strategies:
+            label = STRATEGY_LABEL.get(line.name, line.name)
+            tail = ""
+            if line.round_trips:
+                tail = f"  · {line.round_trips} closed"
+                if line.hit_rate is not None:
+                    tail += f", {line.hit_rate:.0%} won"
+            lines.append(f"{dot(line.total)} {label:<16} "
+                         f"{money(line.total, brief.currency)}{tail}")
 
     lines.append("")
     lines.append("Activity")

@@ -438,6 +438,52 @@
     }).join(''));
   }
 
+  /* What each strategy is called on screen. Kept in step with the brief's
+   * labels in imperium/notify/daily.py. */
+  var STRATEGY_LABEL = {
+    intraday: 'Intraday', trend: 'Multi-day trend', overnight: 'Overnight drift',
+    cross_section: 'Crypto ranking', sector: 'Sector trend',
+    unattributed: 'Unattributed'
+  };
+
+  function renderStrategies(s) {
+    var body = $('strat-body');
+    var block = s.strategies || {rows: []};
+    var rows = block.rows || [];
+    var note = $('strat-note');
+    var bits = [block.mode || ''];
+    /* Said on the panel, not hidden in a tooltip: a book the venue had to
+     * correct, or fills that were never read, are reasons to trust the table
+     * a little less, and the operator should know which. */
+    if (block.corrections) bits.push(block.corrections + ' corrected');
+    if (block.missed) bits.push(block.missed + ' unread');
+    note.textContent = bits.filter(Boolean).join(' · ') || '—';
+    if (!rows.length) {
+      setHTML(body, '<tr><td colspan="5" class="dimmer">no strategy has ' +
+        'traded in this mode yet</td></tr>');
+      return;
+    }
+    setHTML(body, rows.map(function (r) {
+      var tone = r.total > 0 ? 'up' : r.total < 0 ? 'down' : 'muted';
+      var closed = r.round_trips == null ? '—' : String(r.round_trips);
+      /* None, not zero, when nothing has closed: "has not traded yet" and
+       * "never wins" are different facts. */
+      var won = r.hit_rate == null ? '—' : Math.round(r.hit_rate * 100) + '%';
+      var open = (r.open || []).length;
+      var name = STRATEGY_LABEL[r.strategy] || r.strategy;
+      return '<tr title="' + esc(r.note || (
+          'realised ' + fmtMoney(r.realised) + ', unrealised ' +
+          fmtMoney(r.unrealised) +
+          (r.slippage != null ? ', paid ' + fmtMoney(r.slippage) +
+           ' to cross' : ''))) + '">' +
+        '<td>' + esc(name) + '</td>' +
+        '<td class="num ' + tone + '">' + fmtMoney(r.total) + '</td>' +
+        '<td class="num">' + closed + '</td>' +
+        '<td class="num">' + won + '</td>' +
+        '<td class="num">' + (open || '—') + '</td></tr>';
+    }).join(''));
+  }
+
   function renderFills(s) {
     var body = $('fill-body');
     if (!s.fills.length) {
@@ -1493,6 +1539,7 @@
     renderWatchlist(s);
     renderReasoning(s);
     renderPositions(s);
+    renderStrategies(s);
     renderFills(s);
     renderLog(s);
     renderHealth(s);

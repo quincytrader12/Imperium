@@ -58,6 +58,7 @@ from imperium.strategy import sentiment as sentiment_mod
 from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
+from imperium.execution import attribution as attribution_mod
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
@@ -401,6 +402,13 @@ class TradingSession:
         #: orders are not doing what it thinks.
         self.reconciliations: int = 0
         self._reconciled_at: float = 0.0
+        #: Which strategy earned what. Read from the broker's own fill ring
+        #: every tick -- see imperium.execution.attribution for why it is
+        #: not fed by each of the six places that place orders.
+        self.attribution = attribution_mod.Attribution()
+        #: Loaded from disk yet. Nothing is saved until it has been, or an
+        #: empty book written on the first tick would erase the real one.
+        self._attribution_loaded = False
         #: The last reconcile failure's text, so a venue that is down
         #: is reported once rather than once a tick.
         self._reconcile_failure: str = ""
@@ -462,22 +470,7 @@ class TradingSession:
         would lose the book across a restart.
         """
         try:
-            config.ensure_home()
-            path = config.state_path()
-            payload: dict[str, Any] = {}
-            try:
-                loaded = json.loads(path.read_text(encoding=config.TEXT_ENCODING))
-                if isinstance(loaded, dict):
-                    payload = loaded
-            except (OSError, ValueError):
-                payload = {}
-            payload["attached"] = name
-            path.write_text(json.dumps(payload, indent=2),
-                            encoding=config.TEXT_ENCODING)
-            try:
-                path.chmod(0o600)
-            except (OSError, NotImplementedError):
-                pass
+            config.update_state(attached=name)
         except OSError:
             # Best effort, like every other write to this file. Failing to
             # remember a name must never stop a key being attached.
@@ -1028,27 +1021,23 @@ class TradingSession:
         empty map and reports the positions it cannot account for rather than
         guessing at them.
         """
+        # Merged, not written whole. This was a fresh file every time, which
+        # deleted every other section in it -- the Sector Trend sleeve's
+        # positions and stops included -- on each of the several saves a day
+        # this makes. See config.update_state.
         try:
-            config.ensure_home()
-            path = config.state_path()
-            path.write_text(json.dumps(
-                {"overnight_holdings": self.overnight_holdings,
-                 "trend_holdings": self.trend_holdings,
-                 # The *name* of the attached key, never the key itself.
-                 # Restoring this is what stops an operator re-pasting
-                 # credentials on every restart of a program designed to
-                 # restart itself.
-                 "attached": self.credential.name if self.credential else "",
-                 # The day whose brief has gone out. On disk because the
-                 # restart loop would otherwise re-send it every crash.
-                 "brief_sent_day": self._brief_sent_day,
-                 "saved_at": time.time()}, indent=2), encoding="utf-8")
-            try:
-                path.chmod(0o600)
-            except (OSError, NotImplementedError):
-                # Windows ignores POSIX modes. The file holds no secrets --
-                # only symbols and weights -- so this is tidiness, not a gate.
-                pass
+            config.update_state(
+                overnight_holdings=self.overnight_holdings,
+                trend_holdings=self.trend_holdings,
+                # The *name* of the attached key, never the key itself.
+                # Restoring this is what stops an operator re-pasting
+                # credentials on every restart of a program designed to
+                # restart itself.
+                attached=self.credential.name if self.credential else "",
+                # The day whose brief has gone out. On disk because the
+                # restart loop would otherwise re-send it every crash.
+                brief_sent_day=self._brief_sent_day,
+                saved_at=time.time())
         except OSError as exc:
             self.telemetry.event(
                 Level.WARN, "overnight",
@@ -1587,6 +1576,12 @@ class TradingSession:
             # that attribute never existed, and reading it raised every
             # evening at five o'clock for as long as this brief has been in.
             mode=self.broker.mode.value,
+            strategies=tuple(
+                daily.StrategyLine(
+                    name=row["strategy"], total=float(row["total"]),
+                    round_trips=row.get("round_trips"),
+                    hit_rate=row.get("hit_rate"))
+                for row in self._strategies_block()["rows"]),
         )
 
     async def _maybe_send_daily_brief(self) -> None:
@@ -1622,6 +1617,10 @@ class TradingSession:
         # and the next, for the rest of the evening.
         self._brief_sent_day = today
         self._save_overnight_state()
+        # Before the brief is built, and on its own: a mark is the allocator's
+        # raw material, and a brief that cannot be built must not cost a day
+        # of it.
+        self._mark_strategies(today)
         try:
             text = daily.build(self._todays_brief())
         except Exception as exc:                            # noqa: BLE001
@@ -2116,7 +2115,12 @@ class TradingSession:
             fill = await self.broker.apply_target(
                 decision.symbol, decision.target_weight, price,
                 self.engine_equity(),
-                order=decision.entry_order)
+                order=decision.entry_order,
+                # The one place a strategy is named. Every exit path leaves it
+                # empty on purpose, and is booked to whoever opened the
+                # position -- a round trip's profit belongs to whoever took the
+                # risk, not to whatever closed it.
+                strategy=decision.strategy)
         except ModeSwitchRefused as exc:
             self.telemetry.event(Level.ERROR, "order", str(exc))
             return
@@ -2186,6 +2190,9 @@ class TradingSession:
         await self._maybe_send_daily_brief()
         await self._refresh_account_limits()
         await self._reconcile_book()
+        # After the reconcile, so the book it is checked against is the one
+        # the venue agrees with.
+        self._attribute()
         # Before the split is taken: arming changes the split, and the engine
         # must be told its new share on the same tick rather than one later.
         armed = self.sector.consider_arming(self.arming_equity(), trading_day())
@@ -2311,6 +2318,114 @@ class TradingSession:
         if released:
             self.telemetry.pulse("BOOK", "decision",
                                  "daily-loss halt released with the new day", 0.8)
+
+    # -- which strategy earned what ---------------------------------------
+
+    ATTRIBUTION_KEY = "strategy_book"
+
+    def _attribute(self) -> None:
+        """Book this tick's fills and hold the ledger to the broker's book.
+
+        Never raises. Attribution is a record of what happened; a fault in it
+        must not be able to stop the thing it records.
+        """
+        try:
+            booked = self.attribution.consume(self.broker)
+            book = self.attribution.book_for(self.broker.mode.value)
+            corrected = book.sync(attribution_mod.positions_of(self.broker))
+        except Exception:                                  # noqa: BLE001
+            log.exception("attribution failed")
+            return
+        if corrected:
+            self.telemetry.event(
+                Level.INFO, "strategies",
+                f"the per-strategy book was resized to match the venue for "
+                f"{', '.join(corrected)}",
+                detail="A quantity no fill explained -- a partial auction "
+                       "fill, a crypto fee taken in the coin, a trade made "
+                       "by hand. Resized, not booked as profit or loss, "
+                       "because its price is unknown.")
+        if booked or corrected:
+            self._save_attribution()
+
+    def _load_attribution(self) -> None:
+        payload = config.read_state().get(self.ATTRIBUTION_KEY)
+        if payload is not None:
+            self.attribution = attribution_mod.Attribution.from_dict(payload)
+        self._attribution_loaded = True
+
+    def _save_attribution(self) -> None:
+        if not self._attribution_loaded:
+            return
+        try:
+            config.update_state(
+                **{self.ATTRIBUTION_KEY: self.attribution.as_dict()})
+        except OSError as exc:
+            self.telemetry.event(
+                Level.WARN, "strategies",
+                "could not save the per-strategy record; a restart would lose "
+                "this session's attribution", detail=str(exc))
+
+    def _mark_strategies(self, day: str) -> None:
+        """One point a day per strategy: the raw material for the allocator."""
+        try:
+            book = self.attribution.book_for(self.broker.mode.value)
+            book.mark_day(day, self._marks())
+        except Exception:                                  # noqa: BLE001
+            log.exception("could not mark the strategies for %s", day)
+            return
+        self._save_attribution()
+
+    def _marks(self) -> dict[str, float]:
+        """Last prices for everything any strategy holds."""
+        symbols = set(self.broker.positions)
+        for book in self.attribution.books.values():
+            for rec in book.records.values():
+                symbols.update(rec.open_symbols())
+        out: dict[str, float] = {}
+        for symbol in symbols:
+            last = self.feed.quote(symbol).last
+            if last and last > 0:
+                out[symbol] = float(last)
+        return out
+
+    def _sector_row(self, prices: dict[str, float]) -> dict[str, Any] | None:
+        """The Sector Trend sleeve, from its own ledger.
+
+        Its orders never reach the broker's book -- it keeps its own, for
+        reasons set out in execution/sector_sleeve.py -- so it is read from
+        there rather than counted twice. Unrealised only: that ledger records
+        entries and stops, not a history of closed trades.
+        """
+        positions = self.sector.ledger.positions
+        held = {s: p for s, p in positions.items() if not p.is_flat}
+        if not held:
+            return None
+        unrealised = 0.0
+        for symbol, pos in held.items():
+            price = prices.get(symbol) or self.feed.quote(symbol).last or 0.0
+            if price and pos.entry_price:
+                unrealised += (float(price) - pos.entry_price) * pos.quantity
+        return {"strategy": "sector", "total": round(unrealised, 4),
+                "realised": None, "unrealised": round(unrealised, 4),
+                "fills": None, "round_trips": None, "wins": None,
+                "losses": None, "hit_rate": None, "profit_factor": None,
+                "slippage": None, "traded": None, "open": sorted(held),
+                "max_drawdown": None, "days": None,
+                "note": "its own ledger; unrealised only"}
+
+    def _strategies_block(self) -> dict[str, Any]:
+        mode = self.broker.mode.value
+        book = self.attribution.books.get(mode)
+        prices = self._marks()
+        rows = book.summary(prices) if book else []
+        sector = self._sector_row(prices)
+        if sector is not None:
+            rows.append(sector)
+            rows.sort(key=lambda r: r["total"], reverse=True)
+        return {"mode": mode, "rows": rows,
+                "corrections": book.corrections if book else 0,
+                "missed": self.attribution.missed}
 
     async def _reconcile_book(self) -> None:
         """Check the live book against the venue, and report any difference.
@@ -2528,6 +2643,7 @@ class TradingSession:
         self.telemetry.event(Level.GOOD, "session",
                              f"session started in {self.broker.mode.value}")
         self._load_overnight_state()
+        self._load_attribution()
         await self.refresh_clock()
         await self.scan_universe()
         await self.seed_history()
@@ -2802,6 +2918,7 @@ class TradingSession:
             "venue_budget": self._venue_budget(),
             "counters": self.telemetry.kind_counts,
             "execution": self._execution_quality(),
+            "strategies": self._strategies_block(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),

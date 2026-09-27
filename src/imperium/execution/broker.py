@@ -128,6 +128,11 @@ class Fill:
     #: measurable after the fact, and "did execution cost what the cost gate
     #: assumed" is the question that decides whether the gate is calibrated.
     reference_price: Decimal = Decimal("0")
+    #: The strategy that decided this order, or empty for an exit that
+    #: belongs to whoever opened the position. Without it no one could say
+    #: which strategy made the money -- see imperium.execution.attribution,
+    #: which fills this in for exits once it has booked them.
+    strategy: str = ""
 
     @property
     def slippage_bps(self) -> float:
@@ -149,7 +154,8 @@ class Fill:
                 "mode": self.mode.value, "simulated": self.simulated,
                 "client_order_id": self.client_order_id, "note": self.note,
                 "slippage_bps": round(self.slippage_bps, 2),
-                "notional": float(self.notional)}
+                "notional": float(self.notional),
+                "strategy": self.strategy}
 
 
 class Broker(Protocol):
@@ -158,7 +164,8 @@ class Broker(Protocol):
     async def sync(self) -> None: ...
     async def apply_target(self, symbol: str, target_weight: float,
                            price: float, equity: float, *,
-                           order: str = MARKET) -> Fill | None: ...
+                           order: str = MARKET,
+                           strategy: str = "") -> Fill | None: ...
     async def flatten_all(self, prices: dict[str, float]) -> list[Fill]: ...
 
 
@@ -238,7 +245,8 @@ class _BaseBroker:
     _QUANTUM = Decimal("0.00000001")
 
     def _record(self, symbol: str, qty: Decimal, price: Decimal, coid: str,
-                note: str = "", reference_price: Decimal | None = None) -> Fill:
+                note: str = "", reference_price: Decimal | None = None,
+                strategy: str = "") -> Fill:
         qty = qty.quantize(self._QUANTUM)
         price = price.quantize(self._QUANTUM)
         pos = self.position(symbol)
@@ -259,7 +267,8 @@ class _BaseBroker:
         fill = Fill(symbol, side, abs(qty), price, time.time(), self.mode, coid,
                     self.simulated, note,
                     reference_price=(reference_price if reference_price is not None
-                                     else price))
+                                     else price),
+                    strategy=strategy)
         self.fills.append(fill)
         self.fills_total += 1
         self.notional_total += fill.notional
@@ -298,7 +307,8 @@ class DryRunBroker(_BaseBroker):
     simulated = True
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float, *, order: str = MARKET) -> Fill | None:
+                           equity: float, *, order: str = MARKET,
+                           strategy: str = "") -> Fill | None:
         return None
 
 
@@ -318,7 +328,8 @@ class PaperBroker(_BaseBroker):
         self.cash = starting_cash
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float, *, order: str = MARKET) -> Fill | None:
+                           equity: float, *, order: str = MARKET,
+                           strategy: str = "") -> Fill | None:
         delta = self._delta_quantity(symbol, target_weight, price, equity)
         if delta == 0:
             return None
@@ -340,7 +351,8 @@ class PaperBroker(_BaseBroker):
             note += (f"; {order} simulated at the last trade, which is not the "
                      f"auction price")
         return self._record(symbol, delta, fill_price, coid, note=note,
-                            reference_price=to_decimal(price))
+                            reference_price=to_decimal(price),
+                            strategy=strategy)
 
 
 class LiveBroker(_BaseBroker):
@@ -513,7 +525,8 @@ class LiveBroker(_BaseBroker):
         return total
 
     async def apply_target(self, symbol: str, target_weight: float, price: float,
-                           equity: float, *, order: str = MARKET) -> Fill | None:
+                           equity: float, *, order: str = MARKET,
+                           strategy: str = "") -> Fill | None:
         if not self._armed:
             raise ModeSwitchRefused(
                 "the live broker is not armed; no order will be sent")
@@ -612,7 +625,8 @@ class LiveBroker(_BaseBroker):
                             note=f"venue order {result.get('id')} "
                                  f"[{asset_class.value}"
                                  + (f", {order}]" if order else "]"),
-                            reference_price=to_decimal(price))
+                            reference_price=to_decimal(price),
+                            strategy=strategy)
 
     async def reconcile(self) -> list[tuple[str, Decimal, Decimal]]:
         """Correct the local book from the positions the venue actually holds.

@@ -258,6 +258,20 @@
       <div id="cost-warn"></div>
     </section>
 
+    <!-- Which strategy earned it. The question every other panel could not
+         answer: the book trades several strategies at once, and a green day
+         made by one while another bled is a different day from one they all
+         contributed to. -->
+    <section class="panel" style="flex:0 0 auto">
+      <h2>Strategies <span class="note" id="strat-note">—</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Strategy</th><th class="num">P&amp;L</th><th class="num">Closed</th><th class="num">Won</th><th class="num">Open</th></tr></thead>
+          <tbody id="strat-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel" style="flex:1 1 auto; min-height:120px">
       <h2>Positions <span class="note" id="pos-note">—</span></h2>
       <div class="scroll">

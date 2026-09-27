@@ -51,6 +51,57 @@ def ensure_home() -> Path:
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     return d
 
+
+def read_state() -> dict:
+    """Everything in the shared state file, or an empty dict.
+
+    Never raises. A missing, unreadable or corrupt file reads as empty, which
+    every caller already treats as "start with nothing and say so".
+    """
+    import json
+
+    try:
+        loaded = json.loads(state_path().read_text(encoding=TEXT_ENCODING))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def update_state(**sections) -> None:
+    """Replace the named top-level sections of the state file, keeping the rest.
+
+    The only way anything in this program writes that file, and it exists
+    because three writers each did their own read-modify-write and one of them
+    did not. The overnight save wrote its five keys as a fresh file, so every
+    overnight save deleted the Sector Trend sleeve's section: its positions,
+    its trailing stops and the record of it arming. Its own docstring warned
+    that "a forgotten stop is an unbounded position", and it was forgetting
+    them several times a day.
+
+    Atomic as well as merging. Written to a temporary file beside the real one
+    and moved over it, so a crash or a full disk mid-write leaves the previous
+    file intact rather than a truncated one -- which every reader would treat
+    as empty, losing the whole book at once.
+
+    Raises OSError on failure. Callers decide how loud a lost write is; for
+    the sleeve it is loud, because stops are in it.
+    """
+    import json
+
+    ensure_home()
+    path = state_path()
+    payload = read_state()
+    payload.update(sections)
+    scratch = path.with_name(path.name + ".tmp")
+    scratch.write_text(json.dumps(payload, indent=2), encoding=TEXT_ENCODING)
+    try:
+        scratch.chmod(0o600)
+    except (OSError, NotImplementedError):
+        # Windows ignores POSIX modes. Nothing secret is in this file -- names,
+        # symbols and weights -- so this is tidiness, not a gate.
+        pass
+    os.replace(scratch, path)
+
 def settings_path() -> Path:
     return home_dir() / "settings.txt"
 
