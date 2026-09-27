@@ -459,7 +459,7 @@
     if (block.missed) bits.push(block.missed + ' unread');
     note.textContent = bits.filter(Boolean).join(' · ') || '—';
     if (!rows.length) {
-      setHTML(body, '<tr><td colspan="5" class="dimmer">no strategy has ' +
+      setHTML(body, '<tr><td colspan="6" class="dimmer">no strategy has ' +
         'traded in this mode yet</td></tr>');
       return;
     }
@@ -480,8 +480,19 @@
         '<td class="num ' + tone + '">' + fmtMoney(r.total) + '</td>' +
         '<td class="num">' + closed + '</td>' +
         '<td class="num">' + won + '</td>' +
-        '<td class="num">' + (open || '—') + '</td></tr>';
+        '<td class="num">' + (open || '—') + '</td>' +
+        sizeCell(r) + '</tr>';
     }).join(''));
+  }
+
+  /* The allocator's verdict on one strategy. Coloured only when it has moved
+   * off x1.00, so a panel full of strategies still gathering evidence stays
+   * quiet -- the eye should go to the one the evidence has spoken about. */
+  function sizeCell(r) {
+    var m = r.multiplier == null ? 1 : r.multiplier;
+    var tone = m > 1.0001 ? 'up' : m < 0.9999 ? 'down' : 'dimmer';
+    return '<td class="num ' + tone + '" title="' +
+      esc(r.capital_reason || '') + '">x' + m.toFixed(2) + '</td>';
   }
 
   function renderFills(s) {

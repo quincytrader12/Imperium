@@ -241,3 +241,104 @@ async def test_starting_the_session_reads_the_book_back(home, monkeypatch):
 
     assert second._attribution_loaded
     assert "trend" in second.attribution.book_for("paper").records
+
+
+# -- the evidence allocator, wired in --------------------------------------------
+
+
+def _seed_record(session, name, returns, *, round_trips=20):
+    """Give a strategy a long record directly, so the revision has one to read."""
+    book = session.attribution.book_for(session.broker.mode.value)
+    rec = book.record(name)
+    rec.round_trips = round_trips
+    value = 0.0
+    rec.daily = [("d0000", 0.0)]
+    book.equity_marks["d0000"] = 1000.0
+    for i, r in enumerate(returns, start=1):
+        value += r * 1000.0
+        rec.daily.append((f"d{i:04d}", value))
+        book.equity_marks[f"d{i:04d}"] = 1000.0
+    # The record has to agree with its own history: the live mark reads the
+    # strategy's actual P&L, and a history ending well above it would read as
+    # the whole record lost in a day.
+    rec.realised = value
+    return rec
+
+
+def _strong(n=60):
+    import random
+    rng = random.Random(1)
+    return [rng.gauss(0.004, 0.005) for _ in range(n)]
+
+
+def test_the_daily_mark_moves_capital_and_says_so_once(home):
+    session = _paper_session()
+    _seed_record(session, "trend", _strong())
+
+    session._mark_strategies("2026-09-24")
+    first = session._pending_notice
+    assert "CAPITAL MOVED" in first and "Multi-day trend" in first, first
+    assert session.capital_weights.multiplier("trend") > 1.0
+
+    session._pending_notice = ""
+    session._mark_strategies("2026-09-24")          # the same day again
+    assert session._pending_notice == "", (
+        "capital was announced twice for one day's revision")
+
+
+def test_the_announcement_does_not_overwrite_another_notice(home):
+    """One notice slot is shared. A halt and a capital move on the same tick
+    must both reach the phone."""
+    session = _paper_session()
+    _seed_record(session, "trend", _strong())
+    session._pending_notice = "🛑 BOOK HALTED"
+    session._mark_strategies("2026-09-24")
+    assert "BOOK HALTED" in session._pending_notice
+    assert "CAPITAL MOVED" in session._pending_notice
+
+
+def test_the_weights_survive_a_restart_and_reach_every_engine(home):
+    """Engines hold a reference to the weights. Loading new ones and leaving
+    the engines on the old object would size every trade by an empty table."""
+    first = _paper_session()
+    _seed_record(first, "trend", _strong())
+    first._mark_strategies("2026-09-24")
+    moved = first.capital_weights.multiplier("trend")
+    assert moved > 1.0
+
+    second = _paper_session()
+    engine = second.engine("AAPL")               # built before the load
+    second._load_attribution()
+    assert second.capital_weights.multiplier("trend") == moved
+    assert engine.capital is second.capital_weights
+
+
+def test_the_panel_says_why_each_strategy_is_sized_as_it_is(home):
+    session = _paper_session()
+    rec = _seed_record(session, "trend", _strong())
+    rec.lots.clear()
+    session._mark_strategies("2026-09-24")
+    row = _row(session, "trend")
+    assert row["multiplier"] > 1.0
+    assert "evidence it earns" in row["capital_reason"], row["capital_reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_still_gathering_evidence_is_sized_at_one(home):
+    session = _paper_session()
+    await _enter(session, "AAPL", 0.10, 100.0, "trend")
+    session._mark_strategies("2026-09-24")
+    row = _row(session, "trend")
+    assert row["multiplier"] == 1.0
+    assert row["capital_reason"].startswith("gathering evidence"), row
+
+
+def test_an_engine_admitted_later_is_sized_by_the_same_weights(home):
+    """The cohort admits new symbols all day. An engine built after the weights
+    were loaded, and not given them, would trade every new name unscaled."""
+    session = _paper_session()
+    _seed_record(session, "trend", _strong())
+    session._mark_strategies("2026-09-24")
+    engine = session.engine("NEWCO")
+    assert engine.capital is session.capital_weights
+    assert engine.capital.multiplier("trend") > 1.0

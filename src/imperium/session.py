@@ -59,6 +59,7 @@ from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
 from imperium.execution import attribution as attribution_mod
+from imperium.execution import evidence as evidence_mod
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
@@ -406,6 +407,10 @@ class TradingSession:
         #: every tick -- see imperium.execution.attribution for why it is
         #: not fed by each of the six places that place orders.
         self.attribution = attribution_mod.Attribution()
+        #: How much each strategy is scaled by its own record. Shared by every
+        #: engine, revised once a day at the mark -- see
+        #: imperium.execution.evidence.
+        self.capital_weights = evidence_mod.CapitalWeights()
         #: Loaded from disk yet. Nothing is saved until it has been, or an
         #: empty book written on the first tick would erase the real one.
         self._attribution_loaded = False
@@ -453,6 +458,7 @@ class TradingSession:
             e.pooled_drift = self.pooled_drift
             e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
+            e.capital = self.capital_weights
             self.engines[symbol] = e
             self.allocator.observe(symbol)
         # Refreshed on every fetch rather than pushed at refresh time. Engines
@@ -1580,7 +1586,8 @@ class TradingSession:
                 daily.StrategyLine(
                     name=row["strategy"], total=float(row["total"]),
                     round_trips=row.get("round_trips"),
-                    hit_rate=row.get("hit_rate"))
+                    hit_rate=row.get("hit_rate"),
+                    multiplier=float(row.get("multiplier") or 1.0))
                 for row in self._strategies_block()["rows"]),
         )
 
@@ -2322,6 +2329,7 @@ class TradingSession:
     # -- which strategy earned what ---------------------------------------
 
     ATTRIBUTION_KEY = "strategy_book"
+    CAPITAL_KEY = "capital_weights"
 
     def _attribute(self) -> None:
         """Book this tick's fills and hold the ledger to the broker's book.
@@ -2349,9 +2357,17 @@ class TradingSession:
             self._save_attribution()
 
     def _load_attribution(self) -> None:
-        payload = config.read_state().get(self.ATTRIBUTION_KEY)
+        state = config.read_state()
+        payload = state.get(self.ATTRIBUTION_KEY)
         if payload is not None:
             self.attribution = attribution_mod.Attribution.from_dict(payload)
+        weights = state.get(self.CAPITAL_KEY)
+        if weights is not None:
+            self.capital_weights = evidence_mod.CapitalWeights.from_dict(weights)
+        # Every engine holds the same object; replacing it means re-pointing
+        # them, or they would keep sizing by the empty one built at start.
+        for engine in self.engines.values():
+            engine.capital = self.capital_weights
         self._attribution_loaded = True
 
     def _save_attribution(self) -> None:
@@ -2359,7 +2375,8 @@ class TradingSession:
             return
         try:
             config.update_state(
-                **{self.ATTRIBUTION_KEY: self.attribution.as_dict()})
+                **{self.ATTRIBUTION_KEY: self.attribution.as_dict(),
+                   self.CAPITAL_KEY: self.capital_weights.as_dict()})
         except OSError as exc:
             self.telemetry.event(
                 Level.WARN, "strategies",
@@ -2367,14 +2384,42 @@ class TradingSession:
                 "this session's attribution", detail=str(exc))
 
     def _mark_strategies(self, day: str) -> None:
-        """One point a day per strategy: the raw material for the allocator."""
+        """One point a day per strategy, and the allocator's daily revision.
+
+        The fund's equity is marked with it: it is the denominator that turns
+        a strategy's change in profit into its contribution to the fund.
+        """
         try:
             book = self.attribution.book_for(self.broker.mode.value)
-            book.mark_day(day, self._marks())
+            book.mark_day(day, self._marks(), equity=self.engine_equity())
+            moved = self.capital_weights.revise(
+                day, book.records.values(), book.equity_marks)
         except Exception:                                  # noqa: BLE001
             log.exception("could not mark the strategies for %s", day)
             return
         self._save_attribution()
+        if moved:
+            self._announce_capital(moved)
+
+    def _announce_capital(self, moved: list[tuple[str, float, float, str]]) -> None:
+        """Say so when capital moves. Once, on the day it happens.
+
+        Edge-triggered by construction: the weights are revised once a day and
+        only report what changed, so a strategy sitting at its target says
+        nothing until it moves again.
+        """
+        lines = []
+        for name, old, new, reason in moved:
+            label = daily.STRATEGY_LABEL.get(name, name)
+            direction = "more" if new > old else "less"
+            self.telemetry.event(
+                Level.WARN, "capital",
+                f"{label} now sized at x{new:.2f} (was x{old:.2f}): {reason}")
+            lines.append(f"{'⬆️' if new > old else '⬇️'} {label}: x{old:.2f} → "
+                         f"x{new:.2f}, {direction} capital\n   {reason}")
+        text = "⚖️ CAPITAL MOVED\n" + "\n".join(lines)
+        self._pending_notice = (f"{self._pending_notice}\n\n{text}"
+                                if self._pending_notice else text)
 
     def _marks(self) -> dict[str, float]:
         """Last prices for everything any strategy holds."""
@@ -2423,6 +2468,15 @@ class TradingSession:
         if sector is not None:
             rows.append(sector)
             rows.sort(key=lambda r: r["total"], reverse=True)
+        for row in rows:
+            name = row["strategy"]
+            standing = self.capital_weights.standings.get(name)
+            row["multiplier"] = self.capital_weights.multiplier(name)
+            row["capital_reason"] = (
+                standing.reason if standing else
+                ("sized by its own ledger" if name == "sector" else
+                 "not a strategy -- never sized" if name == "unattributed" else
+                 "no record yet"))
         return {"mode": mode, "rows": rows,
                 "corrections": book.corrections if book else 0,
                 "missed": self.attribution.missed}

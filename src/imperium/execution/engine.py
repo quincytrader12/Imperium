@@ -20,7 +20,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -32,6 +32,9 @@ from imperium.execution.sizing import SizingResult, average_true_range, size_pos
 from imperium.strategy import crosssection as xs_mod
 from imperium.strategy import regime as regime_mod
 from imperium.strategy.sentiment import Sentiment
+
+if TYPE_CHECKING:  # pragma: no cover
+    from imperium.execution.evidence import CapitalWeights
 from imperium.strategy.regime import Regime, RegimeVerdict
 from imperium.strategy import overnight as overnight_mod
 from imperium.strategy.overnight import (
@@ -91,6 +94,10 @@ class Decision:
     #: different holding period, a different risk profile and different order
     #: types from the intraday blend, so they are never merged into one number.
     strategy: str = "intraday"
+    #: What the evidence allocator scaled this strategy's size by, and why.
+    #: 1.0 until the strategy has a record long enough to judge.
+    capital_multiplier: float = 1.0
+    capital_note: str = ""
     session_phase: str = ""
     overnight_bps: float = 0.0
     overnight_nights: int = 0
@@ -175,6 +182,8 @@ class Decision:
             "price": self.price,
             "asset_class": self.asset_class,
             "strategy": self.strategy,
+            "capital_multiplier": round(self.capital_multiplier, 4),
+            "capital_note": self.capital_note,
             "session_phase": self.session_phase,
             "overnight_bps": round(self.overnight_bps, 2),
             "overnight_nights": self.overnight_nights,
@@ -247,6 +256,9 @@ class SymbolEngine:
         #: here rather than measured per symbol for the same reason as the
         #: overnight drift: one symbol's history cannot resolve it.
         self.pooled_trend: PooledTrend | None = None
+        #: The evidence allocator's weights, shared by every engine. Assigned by
+        #: the session rather than looked up; None means "scale nothing".
+        self.capital: "CapitalWeights | None" = None
         #: The crypto cross-section. Where this coin ranks against the other
         #: coins the venue lists, what a unit of that rank has been worth, and
         #: whether the market is in the state momentum crashes in.
@@ -486,7 +498,7 @@ class SymbolEngine:
             self.telemetry.pulse(self.symbol, "refused", sized.reason, intensity=0.2)
             return d
 
-        self._tilt_for_news(d)
+        self._before_clamp(d)
 
         # The clamp. Not optional, not guarded by hasattr.
         clamped = self.allocator.clamp(self.symbol, d.raw_weight)
@@ -535,6 +547,53 @@ class SymbolEngine:
         account can trade crypto continuously and equities only across sessions.
         """
         return self.asset.asset_class is not AssetClass.CRYPTO
+
+    def _before_clamp(self, d: Decision) -> None:
+        """Everything that may resize an admitted, sized trade, in order.
+
+        One method so the four strategy paths cannot drift apart: each calls
+        this and then the clamp, and a new adjustment added here reaches all
+        of them at once. The order matters -- news first, then evidence -- only
+        in that both are bounded the same way, so neither can undo the other's
+        guards.
+        """
+        self._tilt_for_news(d)
+        self._size_for_evidence(d)
+
+    def _size_for_evidence(self, d: Decision) -> None:
+        """Scale the trade by how strongly the strategy's own record earns.
+
+        Same position in the sequence as the news tilt and for the same
+        reason: after the cost gate, so it cannot become what decides whether
+        a trade happens, and before the clamp, so every hard limit still binds
+        on top of it. See imperium.execution.evidence for the rule itself.
+
+        Bounded the same two ways the tilt is. It may not shrink a position
+        under the notional below which fees eat it -- a strategy cut to a size
+        it cannot trade at stops producing the evidence that could restore
+        it -- and it may not carry one over the per-symbol cap.
+        """
+        weights = self.capital
+        d.capital_multiplier = 1.0
+        d.capital_note = ""
+        if weights is None:
+            return
+        multiplier = weights.multiplier(d.strategy)
+        d.capital_multiplier = multiplier
+        d.capital_note = weights.note(d.strategy)
+        before = d.raw_weight
+        if before == 0.0 or multiplier == 1.0:
+            return
+        after = before * multiplier
+        equity = self.allocator.equity
+        if equity > 0:
+            floor = self.position_floor / equity
+            if abs(before) >= floor > abs(after):
+                after = math.copysign(floor, before)
+        cap = self.limits.max_position_weight
+        if abs(after) > cap:
+            after = math.copysign(cap, after)
+        d.raw_weight = after
 
     def _tilt_for_news(self, d: Decision) -> None:
         """Let the headlines adjust the size, and nothing else.
@@ -738,7 +797,7 @@ class SymbolEngine:
             self.decision = d
             return d
 
-        self._tilt_for_news(d)
+        self._before_clamp(d)
 
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight
@@ -890,7 +949,7 @@ class SymbolEngine:
             self.decision = d
             return d
 
-        self._tilt_for_news(d)
+        self._before_clamp(d)
 
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight
@@ -1050,7 +1109,7 @@ class SymbolEngine:
         # Entered on this close and exited on the next open, which is not a day
         # trade. The PDT ceiling therefore does not apply to it -- see
         # PortfolioAllocator.clamp.
-        self._tilt_for_news(d)
+        self._before_clamp(d)
 
         clamped = self.allocator.clamp(self.symbol, d.raw_weight, overnight=True)
         d.target_weight = clamped.weight

@@ -138,6 +138,10 @@ class StrategyBook:
         #: a crypto fee taken in the asset, a trade made by hand -- and is
         #: counted rather than absorbed so it cannot quietly accumulate.
         self.corrections: int = 0
+        #: The fund's equity at each day's mark. The denominator that turns a
+        #: strategy's daily change in profit into its contribution to the
+        #: fund's return, which is what the allocator measures.
+        self.equity_marks: dict[str, float] = {}
 
     # -- recording -------------------------------------------------------
 
@@ -317,13 +321,20 @@ class StrategyBook:
 
     # -- marks -----------------------------------------------------------
 
-    def mark_day(self, day: str, prices: dict[str, float]) -> None:
+    def mark_day(self, day: str, prices: dict[str, float],
+                 equity: float | None = None) -> None:
         """Record each strategy's total P&L at this day's mark.
 
         Idempotent per day: marking twice replaces the first, so a restart
         that marks again does not put two points on one day -- which would
         read as a day with no change and flatter every volatility figure.
         """
+        if equity is not None and equity > 0 and math.isfinite(equity):
+            self.equity_marks[day] = float(equity)
+            if len(self.equity_marks) > MAX_DAILY_POINTS:
+                for old in sorted(self.equity_marks)[:len(self.equity_marks)
+                                                     - MAX_DAILY_POINTS]:
+                    del self.equity_marks[old]
         for rec in self.records.values():
             value = rec.realised + rec.unrealised(prices)
             if rec.daily and rec.daily[-1][0] == day:
@@ -368,6 +379,7 @@ class StrategyBook:
         return {
             "owners": dict(self.owners),
             "corrections": self.corrections,
+            "equity_marks": dict(self.equity_marks),
             "records": {
                 name: {
                     "realised": rec.realised, "slippage": rec.slippage,
@@ -401,6 +413,15 @@ class StrategyBook:
             book.corrections = int(payload.get("corrections") or 0)
         except (TypeError, ValueError):
             book.corrections = 0
+        marks = payload.get("equity_marks")
+        if isinstance(marks, dict):
+            for day, value in marks.items():
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0 and math.isfinite(value):
+                    book.equity_marks[str(day)] = value
         records = payload.get("records")
         if not isinstance(records, dict):
             return book

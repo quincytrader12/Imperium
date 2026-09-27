@@ -114,6 +114,9 @@ class StrategyLine:
     total: float
     round_trips: int | None = None
     hit_rate: float | None = None
+    #: What the evidence allocator scales it by. Shown only when it is not 1,
+    #: so the brief says when capital has moved and is silent when it has not.
+    multiplier: float = 1.0
 
 
 #: What each strategy is called in the brief. The code's names are for the
@@ -234,6 +237,8 @@ def build(brief: Brief) -> str:
                 tail = f"  · {line.round_trips} closed"
                 if line.hit_rate is not None:
                     tail += f", {line.hit_rate:.0%} won"
+            if abs(line.multiplier - 1.0) > 1e-6:
+                tail += f"  · sized x{line.multiplier:.2f}"
             lines.append(f"{dot(line.total)} {label:<16} "
                          f"{money(line.total, brief.currency)}{tail}")
 
