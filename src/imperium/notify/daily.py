@@ -147,6 +147,8 @@ class Brief:
     #: The book measured as a whole, in one sentence, or empty when it holds
     #: nothing measurable.
     book_risk: str = ""
+    #: What the market is doing, in a phrase, or empty before it can be read.
+    market: str = ""
 
     @property
     def day_pnl(self) -> float:
@@ -205,6 +207,8 @@ def build(brief: Brief) -> str:
     lines.append(where)
     if brief.book_risk:
         lines.append(f"Book: {brief.book_risk}")
+    if brief.market:
+        lines.append(f"Market: {brief.market}")
     if brief.mode:
         lines.append(f"Mode: {brief.mode}")
 

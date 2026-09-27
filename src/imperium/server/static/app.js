@@ -457,7 +457,17 @@
      * a little less, and the operator should know which. */
     if (block.corrections) bits.push(block.corrections + ' corrected');
     if (block.missed) bits.push(block.missed + ' unread');
+    /* The market state capital is tilted by, named where the sizes are. */
+    var mkt = s.market_regime;
+    /* Short, because the header has one line: the arrow is the direction,
+     * the word the volatility; the tooltip has the sentence. */
+    if (mkt) {
+      bits.push((mkt.trend >= 0 ? '\u25B2 ' : '\u25BC ') +
+        (/volatile/.test(mkt.state) ? 'volatile' : 'calm') + ' mkt');
+    }
     note.textContent = bits.filter(Boolean).join(' · ') || '—';
+    note.title = mkt ? 'Market ' + mkt.label + ' as of ' + mkt.day + ': ' +
+      mkt.reason : '';
     if (!rows.length) {
       setHTML(body, '<tr><td colspan="6" class="dimmer">no strategy has ' +
         'traded in this mode yet</td></tr>');
@@ -491,8 +501,15 @@
   function sizeCell(r) {
     var m = r.multiplier == null ? 1 : r.multiplier;
     var tone = m > 1.0001 ? 'up' : m < 0.9999 ? 'down' : 'dimmer';
-    return '<td class="num ' + tone + '" title="' +
-      esc(r.capital_reason || '') + '">x' + m.toFixed(2) + '</td>';
+    /* The regime's verdict joins the reason when it moved nothing -- "12 of
+     * 20 days measured" is worth knowing; when it did move the size, the
+     * reason already says so. */
+    var why = r.capital_reason || '';
+    if (r.regime_reason && (r.regime_factor == null || r.regime_factor === 1)) {
+      why += (why ? '\n' : '') + 'Regime: ' + r.regime_reason;
+    }
+    return '<td class="num ' + tone + '" title="' + esc(why) + '">x' +
+      m.toFixed(2) + '</td>';
   }
 
   function renderFills(s) {

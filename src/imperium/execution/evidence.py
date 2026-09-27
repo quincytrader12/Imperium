@@ -209,6 +209,14 @@ def daily_returns(marks: list[tuple[str, float]],
 # -- the allocator ----------------------------------------------------------
 
 
+def _bounded(value: Any) -> float:
+    try:
+        value = float(value if value is not None else 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(CAP, max(FLOOR, value)) if math.isfinite(value) else 1.0
+
+
 @dataclass
 class Standing:
     """Where one strategy stands, and why."""
@@ -221,10 +229,15 @@ class Standing:
     days: int = 0
     round_trips: int = 0
     reason: str = "no record yet"
+    #: The market-regime factor applied to the evidence target, and why.
+    regime_factor: float = 1.0
+    regime_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {"strategy": self.strategy, "multiplier": round(self.multiplier, 4),
                 "target": round(self.target, 4),
+                "regime_factor": round(self.regime_factor, 4),
+                "regime_reason": self.regime_reason,
                 "probability": (None if self.probability is None
                                 else round(self.probability, 4)),
                 "recent_probability": (None if self.recent_probability is None
@@ -267,16 +280,24 @@ class CapitalWeights:
         return found.reason if found else "no record yet"
 
     def revise(self, day: str, records: Iterable[Any],
-               equity: dict[str, float]) -> list[tuple[str, float, float, str]]:
+               equity: dict[str, float],
+               states: dict[str, Any] | None = None,
+               ) -> list[tuple[str, float, float, str]]:
         """Recompute every standing and step the multipliers toward target.
 
         ``records`` are the attribution book's StrategyRecord objects;
-        ``equity`` is the fund's equity at each marked day. Returns
+        ``equity`` is the fund's equity at each marked day; ``states`` is the
+        market's state by day, from market_regime.states_by_day, and without
+        it no strategy is tilted by regime. Returns
         (strategy, old multiplier, new multiplier, reason) for every one that
         moved, so the caller can say so -- once, when it happens.
         """
         if day and day == self.revised_on:
             return []
+        # Imported here: market_regime is built on this module's statistics.
+        from imperium.execution import market_regime
+
+        now = market_regime.state_on(states, day) if states else None
         eligible: list[tuple[Any, list[float], Moments]] = []
         for rec in records:
             if rec.name in EXCLUDED:
@@ -291,6 +312,7 @@ class CapitalWeights:
             if (standing.days < MIN_DAYS or standing.round_trips < MIN_ROUND_TRIPS
                     or m is None):
                 standing.target = 1.0
+                standing.regime_factor, standing.regime_reason = 1.0, ""
                 standing.probability = standing.recent_probability = None
                 standing.reason = (
                     f"gathering evidence: {min(standing.days, MIN_DAYS)} of "
@@ -324,16 +346,29 @@ class CapitalWeights:
                       f"{'the best of ' + str(trials) + ' by chance' if trials > 1 else 'zero'}"
                       f" over {m.count} days")
             standing.recent_probability = None
+            decaying = False
             if len(returns) >= DECAY_NEEDS:
                 recent = moments(returns[-RECENT_DAYS:])
                 if recent is not None:
                     rp = probabilistic_sharpe(recent, 0.0)
                     standing.recent_probability = rp
                     if rp <= DECAY_BAR and target > FLOOR:
+                        decaying = True
                         target = FLOOR
                         reason = (f"decaying: its last {RECENT_DAYS} days are "
                                   f"{1 - rp:.0%} likely to be losing, whatever "
                                   f"the longer record says")
+            # The regime tilts the evidence target; it does not replace it,
+            # and it never lifts a strategy the decay rule has cut.
+            standing.regime_factor, standing.regime_reason = 1.0, ""
+            if states and not decaying:
+                tilt = market_regime.tilt(
+                    market_regime.filed_returns(rec.daily, equity, states), now)
+                standing.regime_reason = tilt.reason
+                if tilt.factor != 1.0:
+                    standing.regime_factor = tilt.factor
+                    target = min(CAP, max(FLOOR, target * tilt.factor))
+                    reason = f"{reason}; {tilt.reason}"
             standing.target = target
             standing.reason = reason
 
@@ -383,5 +418,7 @@ class CapitalWeights:
                 recent_probability=raw.get("recent_probability"),
                 days=int(raw.get("days") or 0),
                 round_trips=int(raw.get("round_trips") or 0),
-                reason=str(raw.get("reason") or ""))
+                reason=str(raw.get("reason") or ""),
+                regime_factor=_bounded(raw.get("regime_factor")),
+                regime_reason=str(raw.get("regime_reason") or ""))
         return out

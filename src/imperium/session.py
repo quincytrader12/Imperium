@@ -62,6 +62,7 @@ from imperium.execution import attribution as attribution_mod
 from imperium.execution import book_risk as book_risk_mod
 from imperium.execution import cost_learning as cost_learning_mod
 from imperium.execution import evidence as evidence_mod
+from imperium.execution import market_regime as market_regime_mod
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
@@ -100,6 +101,11 @@ STALE_AFTER_SECONDS = 20.0
 #: dies on observation count -- see PooledDrift for the measurement that showed
 #: a single symbol's history cannot resolve it at all.
 OVERNIGHT_HISTORY_DAYS = 400
+
+#: Calendar days of benchmark history. Longer than the universe's: the market
+#: state needs a 200-day average and a year of volatility behind it before
+#: its first reading, and the record it files returns under starts after that.
+BENCHMARK_HISTORY_DAYS = 800
 
 #: How often the daily history is re-pulled. Daily bars change once a day, so
 #: anything faster spends request budget to learn nothing.
@@ -426,6 +432,8 @@ class TradingSession:
         #: Held apart from the universe so the benchmark is never mistaken for
         #: something to trade.
         self._benchmark_bars: list[Bar] = []
+        self._market_states: dict[str, Any] = {}
+        self._market_key: tuple[int, int] = (-1, -1)
         self._benchmark_loaded_at: float = 0.0
         #: Loaded from disk yet. Nothing is saved until it has been, or an
         #: empty book written on the first tick would erase the real one.
@@ -878,11 +886,11 @@ class TradingSession:
                 < OVERNIGHT_REFRESH_SECONDS):
             return
         start = (dt.datetime.now(tz=dt.timezone.utc)
-                 - dt.timedelta(days=OVERNIGHT_HISTORY_DAYS))
+                 - dt.timedelta(days=BENCHMARK_HISTORY_DAYS))
         try:
             batches = await self.client.bars(
                 [book_risk_mod.BENCHMARK], timeframe="1Day",
-                limit=OVERNIGHT_HISTORY_DAYS, start=start)
+                limit=BENCHMARK_HISTORY_DAYS, start=start)
         except VenueError as exc:
             log.warning("benchmark history unavailable: %s", exc.message)
             return
@@ -1647,6 +1655,7 @@ class TradingSession:
                 for row in self._strategies_block()["rows"]),
             book_risk=(self.book_risk.assessment.note
                        if self.book_risk.assessment.measured else ""),
+            market=self._market_line(),
         )
 
     async def _maybe_send_daily_brief(self) -> None:
@@ -2515,13 +2524,39 @@ class TradingSession:
             book = self.attribution.book_for(self.broker.mode.value)
             book.mark_day(day, self._marks(), equity=self.engine_equity())
             moved = self.capital_weights.revise(
-                day, book.records.values(), book.equity_marks)
+                day, book.records.values(), book.equity_marks,
+                states=self.market_states())
         except Exception:                                  # noqa: BLE001
             log.exception("could not mark the strategies for %s", day)
             return
         self._save_attribution()
         if moved:
             self._announce_capital(moved)
+
+    def market_states(self) -> dict[str, Any]:
+        """The market's state by day, from the benchmark's daily closes.
+
+        Recomputed only when the benchmark series changes: it is read on every
+        snapshot, and replaying two years of closes each second is waste.
+        """
+        bars = self._benchmark_bars
+        key = (len(bars), int(bars[-1].open_time) if bars else 0)
+        if key != self._market_key:
+            try:
+                self._market_states = market_regime_mod.states_by_day(bars)
+            except Exception:                              # noqa: BLE001
+                log.exception("could not read the market's state")
+                self._market_states = {}
+            self._market_key = key
+        return self._market_states
+
+    def _market_now(self) -> dict[str, Any] | None:
+        found = market_regime_mod.current(self.market_states())
+        return found.as_dict() if found else None
+
+    def _market_line(self) -> str:
+        found = market_regime_mod.current(self.market_states())
+        return f"{found.label} — {found.reason}" if found else ""
 
     def _announce_capital(self, moved: list[tuple[str, float, float, str]]) -> None:
         """Say so when capital moves. Once, on the day it happens.
@@ -2594,6 +2629,8 @@ class TradingSession:
             name = row["strategy"]
             standing = self.capital_weights.standings.get(name)
             row["multiplier"] = self.capital_weights.multiplier(name)
+            row["regime_factor"] = standing.regime_factor if standing else 1.0
+            row["regime_reason"] = standing.regime_reason if standing else ""
             row["capital_reason"] = (
                 standing.reason if standing else
                 ("sized by its own ledger" if name == "sector" else
@@ -3100,6 +3137,7 @@ class TradingSession:
             "strategies": self._strategies_block(),
             "crossing": self.cost_calibration.rows(),
             "book_risk": self.book_risk.assessment.as_dict(),
+            "market_regime": self._market_now(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),
