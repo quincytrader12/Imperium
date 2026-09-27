@@ -63,6 +63,7 @@ from imperium.execution import book_risk as book_risk_mod
 from imperium.execution import cost_learning as cost_learning_mod
 from imperium.execution import evidence as evidence_mod
 from imperium.execution import market_regime as market_regime_mod
+from imperium.execution import research as research_mod
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
 from imperium.venues.assets import AssetClass, classify_symbol, spec_for
@@ -329,6 +330,9 @@ class TradingSession:
         self.cross_note: str = "no cross-sectional premium measured yet"
         self._overnight_samples: dict[str, Any] = {}
         self._trend_samples: dict[str, Any] = {}
+        self._trend_days: dict[str, Any] = {}
+        self._cross_samples: dict[str, Any] = {}
+        self._cross_days: Any = np.zeros(0, dtype=np.int64)
         self.scan_note: str = "not yet scanned"
         self.status_message = "idle"
         self.venue_error: str = ""
@@ -433,6 +437,7 @@ class TradingSession:
         #: something to trade.
         self._benchmark_bars: list[Bar] = []
         self._market_states: dict[str, Any] = {}
+        self.research = research_mod.ResearchDesk()
         self._market_key: tuple[int, int] = (-1, -1)
         self._benchmark_loaded_at: float = 0.0
         #: Loaded from disk yet. Nothing is saved until it has been, or an
@@ -1453,6 +1458,12 @@ class TradingSession:
         # function and its own test -- see crosssection.observations.
         scored_cross = xs_mod.observations(closes)
         self.pooled_cross = xs_mod.pool(scored_cross) if scored_cross else None
+        # For the research desk: observations() pairs the score at common[end]
+        # with the return into common[end + 1], from end = longest, so a coin
+        # with no gaps has exactly one sample per day from common[longest + 1].
+        # A coin with a gap has fewer, and research.dated leaves it out.
+        self._cross_samples = scored_cross
+        self._cross_days = np.asarray(common[longest + 1:], dtype=np.int64)
 
         # Today's ranking, which is what the engines actually trade on.
         today = {s: xs_mod.blended_return(closes[s]) for s in coins}
@@ -1479,6 +1490,8 @@ class TradingSession:
         premium and an unplaceable trade.
         """
         closes = trend_mod.daily_closes(bars)
+        # The same filter daily_closes applies, so closes[i] is dated[i].
+        dated = [b for b in bars if b.close > 0]
         # Classified from the symbol: a Bar carries no identity of its own, and
         # defaulting to the equity lookbacks would have measured crypto -- a
         # market whose momentum lives at one to four weeks -- on a
@@ -1490,6 +1503,7 @@ class TradingSession:
 
         scores: list[float] = []
         forward: list[float] = []
+        days: list[int] = []
         for i in range(longest + 2, closes.size - 1):
             score, _ = trend_mod.blended_score(closes[: i + 1], spec)
             if not math.isfinite(score):
@@ -1498,8 +1512,12 @@ class TradingSession:
             # it is being asked to predict.
             scores.append(score)
             forward.append(math.log(closes[i + 1] / closes[i]))
+            days.append(int(dated[i + 1].open_time) // research_mod.DAY_MS)
         if len(scores) < 10:
             return None
+        # Kept beside the pair rather than in it: the research desk measures
+        # the premium day by day and needs to know which day each one was.
+        self._trend_days[symbol] = np.asarray(days, dtype=np.int64)
         return np.asarray(scores), np.asarray(forward)
 
     def _forget_oldest_samples(self) -> None:
@@ -1513,6 +1531,9 @@ class TradingSession:
         for store in (self._overnight_samples, self._trend_samples):
             while len(store) > POOLED_SAMPLE_SYMBOLS:
                 store.pop(next(iter(store)))
+        for symbol in [s for s in self._trend_days
+                       if s not in self._trend_samples]:
+            del self._trend_days[symbol]
 
     def _update_session_phase(self) -> SessionPhase:
         """Where the clock is, relative to the two auction windows.
@@ -1656,6 +1677,11 @@ class TradingSession:
             book_risk=(self.book_risk.assessment.note
                        if self.book_risk.assessment.measured else ""),
             market=self._market_line(),
+            research=tuple(
+                (daily.STRATEGY_LABEL.get(f.strategy, f.strategy), f.verdict,
+                 f.reason)
+                for f in self.research.findings.values()
+                if f.verdict != research_mod.UNMEASURED),
         )
 
     async def _maybe_send_daily_brief(self) -> None:
@@ -1694,6 +1720,7 @@ class TradingSession:
         # Before the brief is built, and on its own: a mark is the allocator's
         # raw material, and a brief that cannot be built must not cost a day
         # of it.
+        self._run_research(today)
         self._mark_strategies(today)
         try:
             text = daily.build(self._todays_brief())
@@ -2399,6 +2426,7 @@ class TradingSession:
     ATTRIBUTION_KEY = "strategy_book"
     CAPITAL_KEY = "capital_weights"
     CROSSING_KEY = "cost_calibration"
+    RESEARCH_KEY = "research"
 
     def _attribute(self) -> None:
         """Book this tick's fills and hold the ledger to the broker's book.
@@ -2488,6 +2516,9 @@ class TradingSession:
         weights = state.get(self.CAPITAL_KEY)
         if weights is not None:
             self.capital_weights = evidence_mod.CapitalWeights.from_dict(weights)
+        found = state.get(self.RESEARCH_KEY)
+        if found is not None:
+            self.research = research_mod.ResearchDesk.from_dict(found)
         crossing = state.get(self.CROSSING_KEY)
         if crossing is not None:
             self.cost_calibration = cost_learning_mod.CostCalibration.from_dict(
@@ -2507,7 +2538,8 @@ class TradingSession:
             config.update_state(
                 **{self.ATTRIBUTION_KEY: self.attribution.as_dict(),
                    self.CAPITAL_KEY: self.capital_weights.as_dict(),
-                   self.CROSSING_KEY: self.cost_calibration.as_dict()})
+                   self.CROSSING_KEY: self.cost_calibration.as_dict(),
+                   self.RESEARCH_KEY: self.research.as_dict()})
         except OSError as exc:
             self.telemetry.event(
                 Level.WARN, "strategies",
@@ -2525,13 +2557,64 @@ class TradingSession:
             book.mark_day(day, self._marks(), equity=self.engine_equity())
             moved = self.capital_weights.revise(
                 day, book.records.values(), book.equity_marks,
-                states=self.market_states())
+                states=self.market_states(), caps=self.research.caps())
         except Exception:                                  # noqa: BLE001
             log.exception("could not mark the strategies for %s", day)
             return
         self._save_attribution()
         if moved:
             self._announce_capital(moved)
+
+    def research_premia(self) -> dict[str, tuple[list[tuple[int, float]], str]]:
+        """Each strategy's premium, one number a day, from the samples its
+        own pooled estimate was fitted on."""
+        overnight = {s: (split.overnight,) for s, split
+                     in self._overnight_samples.items()}
+        night_days = {s: split.days for s, split
+                      in self._overnight_samples.items()}
+        cross_days = {s: self._cross_days for s in self._cross_samples}
+        return {
+            "trend": (research_mod.slopes_by_day(research_mod.dated(
+                self._trend_samples, self._trend_days)),
+                "bp/day per unit of score"),
+            "cross_section": (research_mod.slopes_by_day(research_mod.dated(
+                self._cross_samples, cross_days)),
+                "bp/day per unit of rank"),
+            "overnight": (research_mod.means_by_day(research_mod.dated(
+                overnight, night_days)), "bp/night"),
+        }
+
+    def _run_research(self, day: str) -> None:
+        """The nightly desk: is each strategy's edge still there?
+
+        Before the allocator's revision, so tonight's findings bind tonight.
+        Never raises: research informs sizing, and a fault in it must not
+        cost the day's mark.
+        """
+        try:
+            started = time.perf_counter()
+            changed = self.research.run(day, self.research_premia())
+            took = time.perf_counter() - started
+        except Exception:                                  # noqa: BLE001
+            log.exception("the research desk failed for %s", day)
+            return
+        log.info("research for %s took %.2fs", day, took)
+        self._save_attribution()
+        if not changed:
+            return
+        lines = []
+        for name, before, found in changed:
+            label = daily.STRATEGY_LABEL.get(name, name)
+            level = Level.INFO if found.verdict == research_mod.HOLDING else Level.WARN
+            self.telemetry.event(level, "research",
+                                 f"{label}: {found.reason}",
+                                 detail=f"was {before}")
+            icon = {"holding": "✅", "fading": "⚠️", "reversed": "🛑"}.get(
+                found.verdict, "🔬")
+            lines.append(f"{icon} {label}: {found.reason}")
+        text = "🔬 RESEARCH\n" + "\n".join(lines)
+        self._pending_notice = (f"{self._pending_notice}\n\n{text}"
+                                if self._pending_notice else text)
 
     def market_states(self) -> dict[str, Any]:
         """The market's state by day, from the benchmark's daily closes.
@@ -2631,6 +2714,9 @@ class TradingSession:
             row["multiplier"] = self.capital_weights.multiplier(name)
             row["regime_factor"] = standing.regime_factor if standing else 1.0
             row["regime_reason"] = standing.regime_reason if standing else ""
+            found = self.research.findings.get(name)
+            row["research"] = found.verdict if found else None
+            row["research_reason"] = found.reason if found else ""
             row["capital_reason"] = (
                 standing.reason if standing else
                 ("sized by its own ledger" if name == "sector" else
@@ -3138,6 +3224,7 @@ class TradingSession:
             "crossing": self.cost_calibration.rows(),
             "book_risk": self.book_risk.assessment.as_dict(),
             "market_regime": self._market_now(),
+            "research": self.research.rows(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),

@@ -93,6 +93,9 @@ class SessionSplit:
     overnight: np.ndarray
     intraday: np.ndarray
     nights: int
+    #: The day (days since the epoch) each overnight return ended on. Empty
+    #: where the split was not built from dated bars.
+    days: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
 
     @property
     def enough(self) -> bool:
@@ -117,8 +120,9 @@ def split_daily(bars: list[Bar]) -> SessionSplit:
     intraday = [math.log(b.close / b.open) for b in usable]
     overnight = [math.log(current.open / previous.close)
                  for previous, current in zip(usable, usable[1:])]
+    days = [int(b.open_time) // 86_400_000 for b in usable[1:]]
     return SessionSplit(np.asarray(overnight), np.asarray(intraday),
-                        len(overnight))
+                        len(overnight), np.asarray(days, dtype=np.int64))
 
 
 def split_sessions(series: BarSeries) -> SessionSplit:

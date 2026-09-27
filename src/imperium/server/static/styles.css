@@ -211,6 +211,9 @@ tbody tr:hover { background: #15171b; }
 
 .up { color: var(--good); }
 .down { color: var(--bad); }
+/* A research flag beside a strategy's name. */
+.edge-flag { cursor: help; text-decoration: underline dotted; text-underline-offset: 3px; }
+.edge-flag.warn { color: var(--warn); }
 .muted { color: var(--dim); }
 .dimmer { color: var(--dimmer); }
 

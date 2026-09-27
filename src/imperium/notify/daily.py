@@ -149,6 +149,9 @@ class Brief:
     book_risk: str = ""
     #: What the market is doing, in a phrase, or empty before it can be read.
     market: str = ""
+    #: (label, verdict, reason) for every strategy the research desk could
+    #: measure last night.
+    research: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def day_pnl(self) -> float:
@@ -250,6 +253,19 @@ def build(brief: Brief) -> str:
                 tail += f"  · sized x{line.multiplier:.2f}"
             lines.append(f"{dot(line.total)} {label:<16} "
                          f"{money(line.total, brief.currency)}{tail}")
+
+    if brief.research:
+        # Last night's research desk. A holding edge is one word; one that is
+        # fading or has reversed gets its numbers, because that is the line
+        # the operator will want to check.
+        lines.append("")
+        lines.append("Research (is each edge still there?)")
+        for label, verdict, reason in brief.research:
+            if verdict == "holding":
+                lines.append(f"✅ {label}: holding")
+            else:
+                icon = "🛑" if verdict == "reversed" else "⚠️"
+                lines.append(f"{icon} {label}: {reason}")
 
     lines.append("")
     lines.append("Activity")

@@ -679,6 +679,73 @@ than present and broken.
 
 ---
 
+## The fund layer: capital moves on evidence
+
+Every strategy above decides *whether* to trade. These decide *how much*, for
+the book as a whole, and each one can only shrink or grow a position inside
+the room the hard limits leave: the per-symbol cap, the gross ceiling, buying
+power and a halt all still bind on top. Each one is off, at x1.00, until it
+has enough data to judge.
+
+**Which strategy earned it** (`execution/attribution.py`). Every fill carries
+the strategy that placed it. Exits inherit the owner, a round trip is judged
+as a whole, and one book is kept per mode. It is shown in the Strategies panel
+and in the daily brief. Everything below is built on it.
+
+**Capital follows evidence** (`execution/evidence.py`). Each strategy's daily
+contribution to the fund is scored with the probabilistic Sharpe ratio, and
+the bar it has to beat is deflated for how many strategies are being compared
+at once (Bailey and López de Prado). Nothing moves before 20 days and 8 closed
+trades. The bands are asymmetric: more capital takes 95%, and on a worthless
+strategy that happens 4.8% of the time. A strategy whose last 20 days are
+strongly negative is cut whatever its history says. Capital moves at most 0.25
+a day, and never below x0.25, so a cut strategy can still earn its way back.
+
+**Measured costs feed back into the gate** (`execution/cost_learning.py`).
+Every real fill says what crossing actually cost. The gate is corrected by the
+median excess over the model, shrunk by n/(n+20). The excess is measured
+against the *uncorrected* model: measured against the corrected one, a true
+6bp excess stalls at 2.9bp. Simulated fills and auction fills are never
+learned from.
+
+**The book is sized as one portfolio** (`execution/book_risk.py`). The book
+risk engine shrinks the covariance of held names toward a scaled identity
+(Ledoit-Wolf; it matches sklearn to 1e-16). From it the panel shows book
+volatility against the target, the number of independent bets, the most
+correlated pair and beta to SPY. An increase is capped where book volatility
+would reach the target (the closed-form root of a quadratic in the new
+weight). Two trend longs that move together are sized as the one bet they are.
+
+**Capital by market regime** (`execution/market_regime.py`). The market has
+four states: SPY above or below its 200-day average, and volatility above or
+below its own median for the year. A strategy's returns are filed under the
+state as of the day each one began. A strategy gets x1.25 in a state only
+when it does better there (99%) *and* earns there (95%). It gets x0.5 only
+when it does worse there *and* loses there. On a strategy with no edge, 1.8%
+of checks tilt. The tilt never lifts a strategy the decay rule has cut.
+
+**The nightly research desk** (`execution/research.py`). After the close,
+each strategy's premium is measured one number a day (Fama-MacBeth) from the
+same samples its pooled estimate is fitted on, and the last 60 days are
+compared with everything before. Day by day, because symbols move together:
+on pure noise with a shared market move, the pooled t-statistic "finds" an
+edge in 60% of histories and the daily one in 5%. The desk returns one of
+three verdicts:
+
+* **Fading** means the long-run edge was real, the recent one is
+  significantly lower, and it is no longer significant alone. Capital is held
+  at x1.00, with no boosts. An unchanged edge reads as fading on 4.8% of
+  nights.
+* **Reversed** means the recent premium is significantly negative. Capital is
+  capped at x0.5. An unchanged edge never read as reversed in 3,000 histories.
+* **Holding** means neither.
+
+A change of verdict is announced once, on screen and on Telegram. The brief
+lists every verdict, and a fading or reversed strategy's name turns amber or
+red in the Strategies panel.
+
+---
+
 ## Sector Trend (a sleeve, off by default)
 
 Donchian/Keltner breakouts on nineteen liquid SPDR industry ETFs, after
@@ -863,6 +930,12 @@ src/imperium/
   execution/
     costs.py                the one cost gate
     sizing.py  risk.py  portfolio.py  engine.py  broker.py  bars.py
+    attribution.py          which strategy earned what
+    evidence.py             capital by probabilistic Sharpe
+    cost_learning.py        crossing costs learned from fills
+    book_risk.py            covariance, independent bets, beta
+    market_regime.py        capital by market state
+    research.py             the nightly decay check
   telemetry/streams.py      the two rings
   server/app.py + static/   the terminal
 ```

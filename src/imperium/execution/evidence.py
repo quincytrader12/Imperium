@@ -282,13 +282,16 @@ class CapitalWeights:
     def revise(self, day: str, records: Iterable[Any],
                equity: dict[str, float],
                states: dict[str, Any] | None = None,
+               caps: dict[str, tuple[float, str]] | None = None,
                ) -> list[tuple[str, float, float, str]]:
         """Recompute every standing and step the multipliers toward target.
 
         ``records`` are the attribution book's StrategyRecord objects;
         ``equity`` is the fund's equity at each marked day; ``states`` is the
         market's state by day, from market_regime.states_by_day, and without
-        it no strategy is tilted by regime. Returns
+        it no strategy is tilted by regime; ``caps`` is the research desk's
+        ceiling per strategy, with its reason, which can hold a target down
+        and never raise it. Returns
         (strategy, old multiplier, new multiplier, reason) for every one that
         moved, so the caller can say so -- once, when it happens.
         """
@@ -371,6 +374,17 @@ class CapitalWeights:
                     reason = f"{reason}; {tilt.reason}"
             standing.target = target
             standing.reason = reason
+
+        # Last, so nothing above can lift a strategy past what the research
+        # says its edge still supports -- whether or not its own record is
+        # long enough to have been judged yet.
+        for name, (cap, why) in (caps or {}).items():
+            standing = self.standings.get(name)
+            if standing is None or name in EXCLUDED:
+                continue
+            if standing.target > cap:
+                standing.target = cap
+                standing.reason = f"{standing.reason}; {why}"
 
         moved: list[tuple[str, float, float, str]] = []
         for standing in self.standings.values():

@@ -481,12 +481,22 @@
       var won = r.hit_rate == null ? '—' : Math.round(r.hit_rate * 100) + '%';
       var open = (r.open || []).length;
       var name = STRATEGY_LABEL[r.strategy] || r.strategy;
+      /* The research desk's verdict, on the name itself: quiet while the edge
+       * holds, amber when it is fading, red when it has reversed, the numbers
+       * on hover. The name rather than a mark beside it -- the table has no
+       * width to spare, and a mark pushed the Size column out of the panel. */
+      var nameCell = esc(name);
+      if (r.research === 'fading' || r.research === 'reversed') {
+        nameCell = '<span class="edge-flag ' +
+          (r.research === 'reversed' ? 'down' : 'warn') + '" title="' +
+          esc(r.research_reason || '') + '">' + esc(name) + '</span>';
+      }
       return '<tr title="' + esc(r.note || (
           'realised ' + fmtMoney(r.realised) + ', unrealised ' +
           fmtMoney(r.unrealised) +
           (r.slippage != null ? ', paid ' + fmtMoney(r.slippage) +
            ' to cross' : ''))) + '">' +
-        '<td>' + esc(name) + '</td>' +
+        '<td>' + nameCell + '</td>' +
         '<td class="num ' + tone + '">' + fmtMoney(r.total) + '</td>' +
         '<td class="num">' + closed + '</td>' +
         '<td class="num">' + won + '</td>' +
