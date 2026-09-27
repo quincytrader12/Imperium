@@ -59,6 +59,7 @@ from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
 from imperium.execution import attribution as attribution_mod
+from imperium.execution import cost_learning as cost_learning_mod
 from imperium.execution import evidence as evidence_mod
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
@@ -411,6 +412,10 @@ class TradingSession:
         #: engine, revised once a day at the mark -- see
         #: imperium.execution.evidence.
         self.capital_weights = evidence_mod.CapitalWeights()
+        #: What real fills say crossing costs, per asset class -- the
+        #: correction the cost gate carries. See
+        #: imperium.execution.cost_learning.
+        self.cost_calibration = cost_learning_mod.CostCalibration()
         #: Loaded from disk yet. Nothing is saved until it has been, or an
         #: empty book written on the first tick would erase the real one.
         self._attribution_loaded = False
@@ -459,6 +464,7 @@ class TradingSession:
             e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
             e.capital = self.capital_weights
+            e.cost_calibration = self.cost_calibration
             self.engines[symbol] = e
             self.allocator.observe(symbol)
         # Refreshed on every fetch rather than pushed at refresh time. Engines
@@ -2330,6 +2336,7 @@ class TradingSession:
 
     ATTRIBUTION_KEY = "strategy_book"
     CAPITAL_KEY = "capital_weights"
+    CROSSING_KEY = "cost_calibration"
 
     def _attribute(self) -> None:
         """Book this tick's fills and hold the ledger to the broker's book.
@@ -2338,9 +2345,12 @@ class TradingSession:
         must not be able to stop the thing it records.
         """
         try:
-            booked = self.attribution.consume(self.broker)
+            fresh = self.attribution.consume_fills(self.broker)
+            booked = len(fresh)
             book = self.attribution.book_for(self.broker.mode.value)
             corrected = book.sync(attribution_mod.positions_of(self.broker))
+            for fill in fresh:
+                self._learn_crossing(fill)
         except Exception:                                  # noqa: BLE001
             log.exception("attribution failed")
             return
@@ -2356,6 +2366,30 @@ class TradingSession:
         if booked or corrected:
             self._save_attribution()
 
+    def _learn_crossing(self, fill: Any) -> bool:
+        """Teach the cost gate what one real fill's crossing cost.
+
+        Skipped, deliberately: simulated fills, which the local paper book
+        charges the modelled cost by construction and would only grade the
+        model against itself; auction fills, whose distance from the last
+        trade is the overnight move rather than a spread; and any fill whose
+        symbol has no decision to say what the model priced it at.
+        """
+        if getattr(fill, "simulated", True):
+            return False
+        if getattr(fill, "order", "") in (MARKET_ON_CLOSE, MARKET_ON_OPEN):
+            return False
+        if not getattr(fill, "reference_price", 0) or fill.reference_price <= 0:
+            return False
+        engine = self.engines.get(fill.symbol)
+        if engine is None:
+            return False
+        model = engine.decision.model_one_way_bps
+        if not model or model <= 0:
+            return False
+        return self.cost_calibration.observe(
+            classify_symbol(fill.symbol).value, fill.slippage_bps, model)
+
     def _load_attribution(self) -> None:
         state = config.read_state()
         payload = state.get(self.ATTRIBUTION_KEY)
@@ -2364,10 +2398,16 @@ class TradingSession:
         weights = state.get(self.CAPITAL_KEY)
         if weights is not None:
             self.capital_weights = evidence_mod.CapitalWeights.from_dict(weights)
-        # Every engine holds the same object; replacing it means re-pointing
-        # them, or they would keep sizing by the empty one built at start.
+        crossing = state.get(self.CROSSING_KEY)
+        if crossing is not None:
+            self.cost_calibration = cost_learning_mod.CostCalibration.from_dict(
+                crossing)
+        # Every engine holds the same objects; replacing them means
+        # re-pointing, or they would keep sizing by the empty ones built at
+        # start and pricing crossings by the uncorrected model.
         for engine in self.engines.values():
             engine.capital = self.capital_weights
+            engine.cost_calibration = self.cost_calibration
         self._attribution_loaded = True
 
     def _save_attribution(self) -> None:
@@ -2376,7 +2416,8 @@ class TradingSession:
         try:
             config.update_state(
                 **{self.ATTRIBUTION_KEY: self.attribution.as_dict(),
-                   self.CAPITAL_KEY: self.capital_weights.as_dict()})
+                   self.CAPITAL_KEY: self.capital_weights.as_dict(),
+                   self.CROSSING_KEY: self.cost_calibration.as_dict()})
         except OSError as exc:
             self.telemetry.event(
                 Level.WARN, "strategies",
@@ -2973,6 +3014,7 @@ class TradingSession:
             "counters": self.telemetry.kind_counts,
             "execution": self._execution_quality(),
             "strategies": self._strategies_block(),
+            "crossing": self.cost_calibration.rows(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),

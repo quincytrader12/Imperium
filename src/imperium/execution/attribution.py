@@ -483,7 +483,15 @@ class Attribution:
         return found
 
     def consume(self, broker: Any) -> int:
-        """Book every fill the broker has made since the last call.
+        """Book every fill the broker has made since the last call."""
+        return len(self.consume_fills(broker))
+
+    def consume_fills(self, broker: Any) -> list[Any]:
+        """Book every new fill and return them, oldest first.
+
+        Returned so that whatever else learns from fills -- the crossing-cost
+        calibration -- reads the same ones, exactly once, from the same
+        cursor, instead of keeping a second one that could disagree.
 
         A replaced broker -- a mode switch builds a new one -- starts its own
         count at zero, so the cursor restarts with it rather than skipping the
@@ -495,14 +503,15 @@ class Attribution:
         total = int(getattr(broker, "fills_total", 0) or 0)
         fresh = total - self._seen
         if fresh <= 0:
-            return 0
+            return []
         ring = list(getattr(broker, "fills", []) or [])
         if fresh > len(ring):
             self.missed += fresh - len(ring)
             fresh = len(ring)
         mode = getattr(getattr(broker, "mode", None), "value", "unknown")
         book = self.book_for(str(mode))
-        for fill in ring[len(ring) - fresh:]:
+        batch = ring[len(ring) - fresh:]
+        for fill in batch:
             owner = book.book(
                 symbol=fill.symbol, side=fill.side,
                 quantity=float(fill.quantity), price=float(fill.price),
@@ -514,7 +523,7 @@ class Attribution:
             except AttributeError:
                 pass
         self._seen = total
-        return fresh
+        return batch
 
     def as_dict(self) -> dict[str, Any]:
         return {"books": {m: b.as_dict() for m, b in self.books.items()},

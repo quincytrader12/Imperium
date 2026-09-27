@@ -133,6 +133,11 @@ class Fill:
     #: which strategy made the money -- see imperium.execution.attribution,
     #: which fills this in for exits once it has booked them.
     strategy: str = ""
+    #: How it reached the market: empty for an ordinary market order, or an
+    #: auction. Recorded because an auction fill's distance from the last trade
+    #: is the overnight move, not a crossing, and learning crossing costs from
+    #: it would charge the intraday gate for the overnight strategy's drift.
+    order: str = ""
 
     @property
     def slippage_bps(self) -> float:
@@ -246,7 +251,7 @@ class _BaseBroker:
 
     def _record(self, symbol: str, qty: Decimal, price: Decimal, coid: str,
                 note: str = "", reference_price: Decimal | None = None,
-                strategy: str = "") -> Fill:
+                strategy: str = "", order: str = "") -> Fill:
         qty = qty.quantize(self._QUANTUM)
         price = price.quantize(self._QUANTUM)
         pos = self.position(symbol)
@@ -268,7 +273,7 @@ class _BaseBroker:
                     self.simulated, note,
                     reference_price=(reference_price if reference_price is not None
                                      else price),
-                    strategy=strategy)
+                    strategy=strategy, order=order)
         self.fills.append(fill)
         self.fills_total += 1
         self.notional_total += fill.notional
@@ -352,7 +357,7 @@ class PaperBroker(_BaseBroker):
                      f"auction price")
         return self._record(symbol, delta, fill_price, coid, note=note,
                             reference_price=to_decimal(price),
-                            strategy=strategy)
+                            strategy=strategy, order=order)
 
 
 class LiveBroker(_BaseBroker):
@@ -626,7 +631,7 @@ class LiveBroker(_BaseBroker):
                                  f"[{asset_class.value}"
                                  + (f", {order}]" if order else "]"),
                             reference_price=to_decimal(price),
-                            strategy=strategy)
+                            strategy=strategy, order=order)
 
     async def reconcile(self) -> list[tuple[str, Decimal, Decimal]]:
         """Correct the local book from the positions the venue actually holds.

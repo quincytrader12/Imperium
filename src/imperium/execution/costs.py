@@ -60,6 +60,16 @@ class CostEstimate:
     spread_is_assumed: bool
     fees_are_assumed: bool
     warnings: tuple[str, ...] = ()
+    #: The one-way correction real fills applied to each crossing. Zero until
+    #: there are enough of them -- see imperium.execution.cost_learning.
+    crossing_correction_bps: Decimal = Decimal("0")
+    #: What the model itself says one crossing costs, *before* any correction.
+    #: The figure fills are measured against. Measured against the corrected
+    #: one instead, the correction feeds on itself: each fill then shows only
+    #: the excess the correction has not yet absorbed, so the more it corrects
+    #: the less it learns. Simulated against a true excess of 6bp, that version
+    #: stalls at about 2.9bp and never gets closer.
+    model_one_way_bps: Decimal = Decimal("0")
 
     def explain(self) -> str:
         """The line logged when a symbol is priced, per the brief.
@@ -85,10 +95,17 @@ def round_trip_cost_bps(
     style: Style = "taker",
     spread_is_assumed: bool = False,
     asset_class: AssetClass | str = AssetClass.US_EQUITY,
+    crossing_correction_bps: float | Decimal = 0,
 ) -> CostEstimate:
     """Cost of a full round trip in basis points.
 
     This is the only implementation of this calculation in the program.
+
+    ``crossing_correction_bps`` is what real fills say the model gets wrong
+    about crossing, one way -- see imperium.execution.cost_learning. It is
+    added to each taker crossing and applies only there: the fills that
+    measure it are market orders, so they say nothing about a passive fill's
+    adverse selection, and nothing about fees, which are not in a fill's price.
     """
     spread = Decimal(str(spread_bps))
     if spread < 0:
@@ -109,9 +126,13 @@ def round_trip_cost_bps(
         )
 
     fee_bps = fees.commission_bps
+    correction = Decimal(str(crossing_correction_bps or 0))
     if style == "taker":
-        # Two crossings, each paying half the spread == one full spread.
-        crossing = half_spread * 2
+        # Two crossings, each paying half the spread == one full spread -- plus
+        # whatever the fills have measured the model to be getting wrong, once
+        # per crossing. Never below free: a correction can make the model's
+        # spread cheaper, not make crossing pay.
+        crossing = max(Decimal("0"), half_spread + correction) * 2
     else:
         # A passive fill pays no spread, but is selected against.
         crossing = half_spread * ADVERSE_SELECTION_FRACTION * 2
@@ -136,6 +157,9 @@ def round_trip_cost_bps(
         spread_is_assumed=spread_is_assumed,
         fees_are_assumed=fees.assumed,
         warnings=tuple(warnings),
+        crossing_correction_bps=correction if style == "taker" else Decimal("0"),
+        model_one_way_bps=(half_spread if style == "taker"
+                           else half_spread * ADVERSE_SELECTION_FRACTION),
     )
 
 
@@ -229,6 +253,7 @@ def estimate_for_symbol(
     ask: float | None = None,
     style: Style = "taker",
     cost_model: CostModel | None = None,
+    crossing_correction_bps: float = 0.0,
 ) -> CostEstimate:
     """Price one symbol using its own asset class's cost model.
 
@@ -247,8 +272,10 @@ def estimate_for_symbol(
         return round_trip_cost_bps(
             symbol=symbol, fees=model, spread_bps=model.default_spread_bps,
             style=style, spread_is_assumed=True, asset_class=resolved,
+            crossing_correction_bps=crossing_correction_bps,
         )
     return round_trip_cost_bps(
         symbol=symbol, fees=model, spread_bps=measured, style=style,
         spread_is_assumed=False, asset_class=resolved,
+        crossing_correction_bps=crossing_correction_bps,
     )

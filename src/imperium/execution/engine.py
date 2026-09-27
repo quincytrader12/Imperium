@@ -34,6 +34,7 @@ from imperium.strategy import regime as regime_mod
 from imperium.strategy.sentiment import Sentiment
 
 if TYPE_CHECKING:  # pragma: no cover
+    from imperium.execution.cost_learning import CostCalibration
     from imperium.execution.evidence import CapitalWeights
 from imperium.strategy.regime import Regime, RegimeVerdict
 from imperium.strategy import overnight as overnight_mod
@@ -98,6 +99,11 @@ class Decision:
     #: 1.0 until the strategy has a record long enough to judge.
     capital_multiplier: float = 1.0
     capital_note: str = ""
+    #: The model's own one-way crossing for this trade, before any correction
+    #: from measured fills. What a fill of this trade is measured against.
+    model_one_way_bps: float = 0.0
+    #: The correction measured fills applied to each crossing, one way.
+    crossing_correction_bps: float = 0.0
     session_phase: str = ""
     overnight_bps: float = 0.0
     overnight_nights: int = 0
@@ -184,6 +190,7 @@ class Decision:
             "strategy": self.strategy,
             "capital_multiplier": round(self.capital_multiplier, 4),
             "capital_note": self.capital_note,
+            "crossing_correction_bps": round(self.crossing_correction_bps, 3),
             "session_phase": self.session_phase,
             "overnight_bps": round(self.overnight_bps, 2),
             "overnight_nights": self.overnight_nights,
@@ -259,6 +266,9 @@ class SymbolEngine:
         #: The evidence allocator's weights, shared by every engine. Assigned by
         #: the session rather than looked up; None means "scale nothing".
         self.capital: "CapitalWeights | None" = None
+        #: What real fills have measured crossing to cost, per asset class,
+        #: shared by every engine. None means "the model, uncorrected".
+        self.cost_calibration: "CostCalibration | None" = None
         #: The crypto cross-section. Where this coin ranks against the other
         #: coins the venue lists, what a unit of that rank has been worth, and
         #: whether the market is in the state momentum crashes in.
@@ -437,10 +447,7 @@ class SymbolEngine:
         signal: BlendedSignal = blend(mom, rev, verdict)
         d.conviction = signal.value
 
-        estimate = costs.estimate_for_symbol(
-            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
-            style="taker",
-        )
+        estimate = self._taker_cost(d)
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
         d.spread_bps = float(estimate.spread_bps)
         d.spread_assumed = estimate.spread_is_assumed
@@ -547,6 +554,23 @@ class SymbolEngine:
         account can trade crypto continuously and equities only across sessions.
         """
         return self.asset.asset_class is not AssetClass.CRYPTO
+
+    def _taker_cost(self, d: Decision) -> "costs.CostEstimate":
+        """This symbol's round trip, corrected by what real fills have measured.
+
+        One method for all four strategy paths, which had four identical calls
+        -- the same drift risk as the pre-clamp hook, in the one number that
+        decides whether anything trades.
+        """
+        calibration = self.cost_calibration
+        correction = (calibration.excess_bps(self.asset.asset_class.value)
+                      if calibration is not None else 0.0)
+        estimate = costs.estimate_for_symbol(
+            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
+            style="taker", crossing_correction_bps=correction)
+        d.model_one_way_bps = float(estimate.model_one_way_bps)
+        d.crossing_correction_bps = float(estimate.crossing_correction_bps)
+        return estimate
 
     def _before_clamp(self, d: Decision) -> None:
         """Everything that may resize an admitted, sized trade, in order.
@@ -660,9 +684,7 @@ class SymbolEngine:
         d.strategy = "trend"
         d.regime = "trend"
 
-        estimate = costs.estimate_for_symbol(
-            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
-            style="taker")
+        estimate = self._taker_cost(d)
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
         d.spread_bps = float(estimate.spread_bps)
         d.spread_assumed = estimate.spread_is_assumed
@@ -831,9 +853,7 @@ class SymbolEngine:
         d.strategy = "cross_section"
         d.regime = "cross_section"
 
-        estimate = costs.estimate_for_symbol(
-            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
-            style="taker")
+        estimate = self._taker_cost(d)
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
         d.spread_bps = float(estimate.spread_bps)
         d.spread_assumed = estimate.spread_is_assumed
@@ -1019,9 +1039,7 @@ class SymbolEngine:
         d.regime_reason = signal.reason
         d.conviction = signal.value
 
-        estimate = costs.estimate_for_symbol(
-            self.symbol, self.asset.asset_class, bid=self.bid, ask=self.ask,
-            style="taker")
+        estimate = self._taker_cost(d)
         d.round_trip_cost_bps = float(estimate.round_trip_bps)
         d.spread_bps = float(estimate.spread_bps)
         d.spread_assumed = estimate.spread_is_assumed

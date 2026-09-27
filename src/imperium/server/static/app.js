@@ -1325,6 +1325,32 @@
 
   /* ---------- execution and costs ---------- */
 
+  /* What real fills say crossing costs, against what the gate assumed. One
+   * cell per asset class that has any real fills. "modelled" until there are
+   * enough to correct anything, then the correction the gate now carries --
+   * coloured, because it is the model being told it was wrong. */
+  function crossingCells(rows) {
+    return rows.map(function (r) {
+      var label = (r.asset_class === 'crypto' ? 'crypto' : 'equity') +
+        ' crossing';
+      var corr = r.correction_bps || 0;
+      var value, tone, sub;
+      if (!corr) {
+        value = 'modelled';
+        tone = '';
+        sub = r.fills + ' real fill' + (r.fills === 1 ? '' : 's');
+      } else {
+        value = (corr > 0 ? '+' : '') + corr.toFixed(1) + 'bp';
+        tone = corr > 0 ? 'warn' : 'good';
+        sub = 'measured, ' + r.fills + ' fills';
+      }
+      /* The same markup cell() builds, with the reason on hover. */
+      return '<div title="' + esc(r.note || '') + '"><span class="k">' +
+        esc(label) + '</span><span class="v ' + tone + '">' + esc(value) +
+        ' <small>' + esc(sub) + '</small></span></div>';
+    }).join('');
+  }
+
   function renderCosts(s) {
     var c = s.costs;
     var feeTone = c.fees_assumed ? 'warn' : 'good';
@@ -1349,7 +1375,8 @@
       cell('adv. selection', c.adverse_selection_fraction.toFixed(2),
            'warn', 'assumed') +
       cell('spreads live', c.spreads_measured + '/' + c.spreads_total,
-           c.spreads_measured < c.spreads_total ? 'warn' : 'good'));
+           c.spreads_measured < c.spreads_total ? 'warn' : 'good') +
+      crossingCells(s.crossing || []));
 
     var parts = [];
     if (c.cheapest) parts.push('cheapest ' + c.cheapest.symbol + ' ' +
