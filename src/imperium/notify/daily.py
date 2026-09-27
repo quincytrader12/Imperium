@@ -144,6 +144,9 @@ class Brief:
     #: Best first. Empty until any strategy has traded, and then the section is
     #: left out rather than printed with nothing in it.
     strategies: tuple[StrategyLine, ...] = ()
+    #: The book measured as a whole, in one sentence, or empty when it holds
+    #: nothing measurable.
+    book_risk: str = ""
 
     @property
     def day_pnl(self) -> float:
@@ -200,6 +203,8 @@ def build(brief: Brief) -> str:
     if held > 0 and brief.equity > 0:
         where += f" · {held / brief.equity:.0%} invested"
     lines.append(where)
+    if brief.book_risk:
+        lines.append(f"Book: {brief.book_risk}")
     if brief.mode:
         lines.append(f"Mode: {brief.mode}")
 

@@ -787,6 +787,43 @@
       '</div>';
   }
 
+  /* The book measured as a whole. Every other gauge here is about one limit
+   * on one number; this is the one that says whether five positions are five
+   * bets or one bet five times over. */
+  function bookGauge(b) {
+    if (!b || !b.measured) return '';
+    var used = b.target > 0 ? b.volatility / b.target : 0;
+    var tone = used >= 0.95 ? 'bad' : used >= 0.8 ? 'warn' : '';
+    return gauge('book volatility', b.volatility, b.target,
+                 (b.volatility * 100).toFixed(0) + '% of ' +
+                 (b.target * 100).toFixed(0) + '%', tone);
+  }
+
+  function bookCells(b) {
+    if (!b || !b.positions) return '';
+    if (!b.measured) {
+      return '<div title="' + esc(b.note || '') + '"><span class="k">book risk' +
+        '</span><span class="v dimmer">not yet measured <small>needs shared ' +
+        'history</small></span></div>';
+    }
+    var bets = b.effective_bets || 0;
+    /* Warn when the positions are mostly one bet: fewer than half as many
+     * independent bets as there are positions. */
+    var betTone = b.measured >= 2 && bets < b.measured / 2 ? 'warn' : '';
+    /* The most correlated pair goes in the tooltip: in the cell it overran
+     * into its neighbour. */
+    var pair = (b.clusters || [])[0];
+    var tip = (b.note || '') +
+      (pair ? ' Most alike: ' + pair[0] + ' and ' + pair[1] + '.' : '');
+    var out = '<div title="' + esc(tip) + '"><span class="k">indep. bets' +
+      '</span><span class="v ' + betTone + '">' + bets.toFixed(1) +
+      ' <small>of ' + b.measured + ' held</small></span></div>';
+    if (b.beta != null) {
+      out += cell('market beta', b.beta.toFixed(2), '', 'vs SPY');
+    }
+    return out;
+  }
+
   function cell(k, v, tone, sub) {
     return '<div><span class="k">' + esc(k) + '</span><span class="v ' +
       (tone || '') + '">' + esc(v) +
@@ -809,7 +846,8 @@
             L.slots_used + ' of ' + L.slots_max, slotTone) +
       gauge('daily loss budget', dd.used, 1,
             (dd.pct * 100).toFixed(2) + '% of ' + (dd.limit * 100).toFixed(0) + '%',
-            ddTone);
+            ddTone) +
+      bookGauge(s.book_risk);
 
     setHTML($('limit-grid'), cell('budget / sym', (s.per_symbol_budget * 100).toFixed(1) + '%') +
       cell('position cap', (L.max_position_weight * 100).toFixed(0) + '%') +
@@ -820,7 +858,8 @@
       cell('ATR stop', L.atr_stop_multiple + 'x') +
       cell('day trades', L.day_trade_count + ' / ' + L.pdt_max_day_trades,
            L.pdt_blocked ? 'bad' : '',
-           s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit'));
+           s.equity < L.pdt_floor ? 'under $25k' : 'no PDT limit') +
+      bookCells(s.book_risk));
 
     /* On a small account "why is it not trading" is almost always the size of
      * the account, and the answer is arithmetic rather than a fault. Shown

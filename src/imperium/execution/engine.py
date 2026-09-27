@@ -34,6 +34,7 @@ from imperium.strategy import regime as regime_mod
 from imperium.strategy.sentiment import Sentiment
 
 if TYPE_CHECKING:  # pragma: no cover
+    from imperium.execution.book_risk import BookRisk
     from imperium.execution.cost_learning import CostCalibration
     from imperium.execution.evidence import CapitalWeights
 from imperium.strategy.regime import Regime, RegimeVerdict
@@ -104,6 +105,8 @@ class Decision:
     model_one_way_bps: float = 0.0
     #: The correction measured fills applied to each crossing, one way.
     crossing_correction_bps: float = 0.0
+    #: Set when the book-level volatility limit resized this trade, and why.
+    book_risk_note: str = ""
     session_phase: str = ""
     overnight_bps: float = 0.0
     overnight_nights: int = 0
@@ -191,6 +194,7 @@ class Decision:
             "capital_multiplier": round(self.capital_multiplier, 4),
             "capital_note": self.capital_note,
             "crossing_correction_bps": round(self.crossing_correction_bps, 3),
+            "book_risk_note": self.book_risk_note,
             "session_phase": self.session_phase,
             "overnight_bps": round(self.overnight_bps, 2),
             "overnight_nights": self.overnight_nights,
@@ -269,6 +273,9 @@ class SymbolEngine:
         #: What real fills have measured crossing to cost, per asset class,
         #: shared by every engine. None means "the model, uncorrected".
         self.cost_calibration: "CostCalibration | None" = None
+        #: The book measured as a whole, shared by every engine. None means
+        #: "judge this symbol on its own", which is all it used to get.
+        self.book_risk: "BookRisk | None" = None
         #: The crypto cross-section. Where this coin ranks against the other
         #: coins the venue lists, what a unit of that rank has been worth, and
         #: whether the market is in the state momentum crashes in.
@@ -583,6 +590,10 @@ class SymbolEngine:
         """
         self._tilt_for_news(d)
         self._size_for_evidence(d)
+        # Last, because it is the only one of the three that is a hard limit
+        # rather than a preference: whatever the others did to the size, the
+        # book's volatility target is checked against the result.
+        self._size_for_book_risk(d)
 
     def _size_for_evidence(self, d: Decision) -> None:
         """Scale the trade by how strongly the strategy's own record earns.
@@ -618,6 +629,35 @@ class SymbolEngine:
         if abs(after) > cap:
             after = math.copysign(cap, after)
         d.raw_weight = after
+
+    def _size_for_book_risk(self, d: Decision) -> None:
+        """Keep a new or larger position from taking the book over its target.
+
+        The first rule here that looks at the book rather than the symbol --
+        see imperium.execution.book_risk. It only ever reduces an increase.
+
+        Unlike the tilt and the evidence multiplier it does not lift a trade
+        back up to the fee floor, because it is a limit and they are
+        preferences: if the room the book has left is too small to be worth
+        the fees, the new position is not opened, and the decision says why.
+        """
+        d.book_risk_note = ""
+        risk = self.book_risk
+        if risk is None or d.raw_weight <= 0:
+            return
+        risk.ensure_series(self.symbol, self.daily_bars)
+        current = self.allocator.observe(self.symbol).current_weight
+        allowed, why = risk.max_weight(self.symbol, d.raw_weight, current)
+        if allowed >= d.raw_weight:
+            return
+        equity = self.allocator.equity
+        floor = self.position_floor / equity if equity > 0 else 0.0
+        if current <= 0 and 0 < allowed < floor:
+            allowed = 0.0
+            why += (". What is left is under the fee floor, so the position "
+                    "is not opened")
+        d.raw_weight = allowed
+        d.book_risk_note = why
 
     def _tilt_for_news(self, d: Decision) -> None:
         """Let the headlines adjust the size, and nothing else.

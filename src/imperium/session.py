@@ -59,6 +59,7 @@ from imperium.strategy.overnight import PooledDrift, SessionPhase
 from imperium.strategy.trend import PooledTrend
 from imperium.strategy.regime import CalibrationMissing, Regime, load_calibration
 from imperium.execution import attribution as attribution_mod
+from imperium.execution import book_risk as book_risk_mod
 from imperium.execution import cost_learning as cost_learning_mod
 from imperium.execution import evidence as evidence_mod
 from imperium.execution import protect
@@ -416,6 +417,16 @@ class TradingSession:
         #: correction the cost gate carries. See
         #: imperium.execution.cost_learning.
         self.cost_calibration = cost_learning_mod.CostCalibration()
+        #: The book measured as a whole: its volatility, its beta, how many
+        #: independent bets it really holds -- and the gate that keeps a new
+        #: position from taking it over its volatility target. Shared by every
+        #: engine; brought up to date every tick.
+        self.book_risk = book_risk_mod.BookRisk(self.limits.target_volatility)
+        #: Daily bars for the market benchmark, which beta is measured against.
+        #: Held apart from the universe so the benchmark is never mistaken for
+        #: something to trade.
+        self._benchmark_bars: list[Bar] = []
+        self._benchmark_loaded_at: float = 0.0
         #: Loaded from disk yet. Nothing is saved until it has been, or an
         #: empty book written on the first tick would erase the real one.
         self._attribution_loaded = False
@@ -465,6 +476,7 @@ class TradingSession:
             e.session_phase = self.session_phase
             e.capital = self.capital_weights
             e.cost_calibration = self.cost_calibration
+            e.book_risk = self.book_risk
             self.engines[symbol] = e
             self.allocator.observe(symbol)
         # Refreshed on every fetch rather than pushed at refresh time. Engines
@@ -849,6 +861,44 @@ class TradingSession:
                 except (KeyError, TypeError, ValueError):
                     continue
                 engine.series.add(bar)
+
+    async def refresh_benchmark(self, *, force: bool = False) -> None:
+        """Daily bars for the market benchmark, which book beta is measured against.
+
+        Its own request rather than a passenger on the universe pull: the
+        benchmark is never traded, and riding in that batch would create an
+        engine for it like any other symbol. Six-hourly, like the universe's
+        full re-read, and a failure keeps the last good series rather than
+        leaving beta unmeasured.
+        """
+        if self.client is None:
+            return
+        if (not force and self._benchmark_bars
+                and time.time() - self._benchmark_loaded_at
+                < OVERNIGHT_REFRESH_SECONDS):
+            return
+        start = (dt.datetime.now(tz=dt.timezone.utc)
+                 - dt.timedelta(days=OVERNIGHT_HISTORY_DAYS))
+        try:
+            batches = await self.client.bars(
+                [book_risk_mod.BENCHMARK], timeframe="1Day",
+                limit=OVERNIGHT_HISTORY_DAYS, start=start)
+        except VenueError as exc:
+            log.warning("benchmark history unavailable: %s", exc.message)
+            return
+        bars: list[Bar] = []
+        for row in batches.get(book_risk_mod.BENCHMARK) or []:
+            try:
+                bars.append(Bar(
+                    open_time=_bar_ms(row.get("t")),
+                    open=float(row["o"]), high=float(row["h"]),
+                    low=float(row["l"]), close=float(row["c"]),
+                    volume=float(row.get("v", 0.0)), closed=True))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if bars:
+            self._benchmark_bars = bars
+            self._benchmark_loaded_at = time.time()
 
     async def refresh_daily_history(self, *, force: bool = False) -> None:
         """Pull daily bars and re-estimate the market-wide overnight drift.
@@ -1595,6 +1645,8 @@ class TradingSession:
                     hit_rate=row.get("hit_rate"),
                     multiplier=float(row.get("multiplier") or 1.0))
                 for row in self._strategies_block()["rows"]),
+            book_risk=(self.book_risk.assessment.note
+                       if self.book_risk.assessment.measured else ""),
         )
 
     async def _maybe_send_daily_brief(self) -> None:
@@ -2206,6 +2258,7 @@ class TradingSession:
         # After the reconcile, so the book it is checked against is the one
         # the venue agrees with.
         self._attribute()
+        self._measure_book()
         # Before the split is taken: arming changes the split, and the engine
         # must be told its new share on the same tick rather than one later.
         armed = self.sector.consider_arming(self.arming_equity(), trading_day())
@@ -2365,6 +2418,34 @@ class TradingSession:
                        "because its price is unknown.")
         if booked or corrected:
             self._save_attribution()
+
+    def _measure_book(self) -> None:
+        """Bring the book-risk view up to date with what is held right now.
+
+        Never raises: this reads the book and measures it, and a fault in the
+        measurement must not stop the book it measures.
+        """
+        try:
+            risk = self.book_risk
+            risk.target = self.limits.target_volatility
+            holdings: dict[str, float] = {}
+            for symbol, pos in self.broker.positions.items():
+                if pos is None or pos.is_flat:
+                    continue
+                weight = self.allocator.observe(symbol).current_weight
+                if weight:
+                    holdings[symbol] = weight
+                engine = self.engines.get(symbol)
+                if engine is not None:
+                    risk.ensure_series(symbol, engine.daily_bars)
+            if self._benchmark_bars:
+                risk.ensure_series(book_risk_mod.BENCHMARK, self._benchmark_bars)
+                risk.market = risk.series[book_risk_mod.BENCHMARK]
+            book = self.attribution.books.get(self.broker.mode.value)
+            owners = dict(book.owners) if book else {}
+            risk.update(holdings, owners)
+        except Exception:                                  # noqa: BLE001
+            log.exception("could not measure the book")
 
     def _learn_crossing(self, fill: Any) -> bool:
         """Teach the cost gate what one real fill's crossing cost.
@@ -2690,6 +2771,8 @@ class TradingSession:
                     # Cheap: it returns immediately unless a day has passed.
                     self._loop_where = "pulling daily history"
                     await self.refresh_daily_history()
+                    self._loop_where = "pulling the market benchmark"
+                    await self.refresh_benchmark()
                     # Started, not awaited. See kick_news: a third party's
                     # latency must never sit on this loop.
                     self.kick_news()
@@ -2743,6 +2826,7 @@ class TradingSession:
         await self.scan_universe()
         await self.seed_history()
         await self.refresh_daily_history(force=True)
+        await self.refresh_benchmark(force=True)
         await self.refresh_universe()
         await self.feed.start(self._stream_priority())
         self._loop_task = asyncio.create_task(self._run(), name="trading-loop")
@@ -3015,6 +3099,7 @@ class TradingSession:
             "execution": self._execution_quality(),
             "strategies": self._strategies_block(),
             "crossing": self.cost_calibration.rows(),
+            "book_risk": self.book_risk.assessment.as_dict(),
             "drawdown": self._drawdown(),
             "mode": self.broker.mode.value,
             "simulated": getattr(self.broker, "simulated", True),
