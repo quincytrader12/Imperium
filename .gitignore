@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+build/
+dist/
+# PyInstaller writes a generated <name>.spec into the working directory. Ignore
+# those, but ONLY at the repo root -- a bare "*.spec" also excluded the
+# hand-written packaging/imperium.spec, so the build worked locally and CI failed
+# with "Spec file not found" for a file that had never been committed.
+/*.spec
+.imperium/
+*.log
+uv.lock
+
+# Agent skills installed with `npx skills add`. Local tooling rather than
+# product code, and .claude/skills is a tree of symlinks -- which git can
+# store but Windows checkouts handle badly, and this repo builds a Windows
+# executable. Remove these three lines if you want the skills versioned.
+.agents/
+.claude/skills/
+skills-lock.json
