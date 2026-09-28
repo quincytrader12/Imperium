@@ -26,6 +26,7 @@ import numpy as np
 
 from imperium.execution import costs
 from imperium.execution.bars import Bar, BarSeries
+from imperium.execution.diversification import combined_multiplier
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution.risk import RiskLimits
 from imperium.execution.sizing import SizingResult, average_true_range, size_position
@@ -268,6 +269,9 @@ class SymbolEngine:
         #: The account-level scale on every size, set by the session: realised
         #: volatility against its target, times the drawdown de-gross.
         self.risk_dial: float = 1.0
+        #: What each strategy adds to the rest of the book, set by the
+        #: session. See imperium.execution.diversification.
+        self.diversification: Any = None
         self.session_phase: SessionPhase = SessionPhase.CLOSED
         #: The market-wide trend premium, estimated across the universe. Held
         #: here rather than measured per symbol for the same reason as the
@@ -622,15 +626,15 @@ class SymbolEngine:
         # behaving, bounded by the same floor and cap. See
         # imperium.execution.risk_dial.
         dial = self.risk_dial if 0.0 < self.risk_dial <= 1.0 else 1.0
-        if weights is None and dial == 1.0:
+        spread = self.diversification
+        if weights is None and spread is None and dial == 1.0:
             return
-        multiplier = (weights.multiplier(d.strategy) if weights is not None
-                      else 1.0) * dial
+        multiplier = combined_multiplier(weights, spread, d.strategy) * dial
         d.capital_multiplier = multiplier
-        d.capital_note = weights.note(d.strategy) if weights is not None else ""
-        if dial < 1.0:
-            d.capital_note = "; ".join(
-                p for p in (d.capital_note, f"account risk dial ×{dial:.2f}") if p)
+        notes = [weights.note(d.strategy) if weights is not None else "",
+                 spread.note(d.strategy) if spread is not None else "",
+                 f"account risk dial ×{dial:.2f}" if dial < 1.0 else ""]
+        d.capital_note = "; ".join(p for p in notes if p)
         before = d.raw_weight
         if before == 0.0 or multiplier == 1.0:
             return

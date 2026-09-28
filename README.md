@@ -839,6 +839,26 @@ panel, and a move of a tenth or more is sent to Telegram. A withdrawal reads
 as a drawdown, so set `IMPERIUM_HIGH_WATER_SINCE` to the day after it and the
 older highs stop counting. `IMPERIUM_RISK_DIAL=false` turns it off.
 
+### Capital by what a strategy adds, not only what it earns
+
+The evidence allocator asks whether a strategy's own record says it earns.
+`execution/diversification.py` asks the question a fund asks next: does it
+earn on the same days as everything else? Each strategy's daily contribution
+is correlated with the rest of the book's combined contribution on the same
+days, including the sleeves. The correlation is then shrunk toward zero by
+n / (n + 30), because a month of correlation is mostly noise.
+
+The tilt is 1 − 0.5 × the shrunk correlation, bounded to 0.75–1.25:
+
+* a strategy that moves with the book trades smaller;
+* one that moves against it trades larger;
+* one unrelated to it is unchanged.
+
+It needs 30 shared days before it moves anything, and then moves at most 0.10
+a day. It multiplies the evidence multiplier, and the product stays inside the
+evidence allocator's own 0.25–1.5 bounds. The Strategies panel's multiplier
+is the applied product, and its tooltip gives the correlation behind it.
+
 ### Entries rest at the mid, and cross only if they have to
 
 An entry is first placed as a limit order at the midpoint between bid and ask

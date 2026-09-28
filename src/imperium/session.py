@@ -36,6 +36,7 @@ from imperium.execution.engine import Decision, SymbolEngine
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution import risk as risk_mod
 from imperium.execution import risk_dial as risk_dial_mod
+from imperium.execution import diversification as diversification_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
@@ -461,6 +462,9 @@ class TradingSession:
         #: engine, revised once a day at the mark -- see
         #: imperium.execution.evidence.
         self.capital_weights = evidence_mod.CapitalWeights()
+        #: What each strategy adds to the rest of the book; tilts capital
+        #: toward the ones that do not move with it.
+        self.diversification = diversification_mod.Diversification()
         #: What real fills say crossing costs, per asset class -- the
         #: correction the cost gate carries. See
         #: imperium.execution.cost_learning.
@@ -528,6 +532,7 @@ class TradingSession:
             e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
             e.capital = self.capital_weights
+            e.diversification = self.diversification
             e.cost_calibration = self.cost_calibration
             e.book_risk = self.book_risk
             self.engines[symbol] = e
@@ -1424,8 +1429,9 @@ class TradingSession:
             orders = sleeve.plan(
                 closes, day, prices=prices, held=self._sleeve_held(sleeve),
                 account_equity=self.equity(),
-                multiplier=(self.capital_weights.multiplier(sleeve.name)
-                            * self.risk_dial.value))
+                multiplier=(diversification_mod.combined_multiplier(
+                    self.capital_weights, self.diversification, sleeve.name)
+                    * self.risk_dial.value))
         except Exception as exc:                            # noqa: BLE001
             sleeve.last_error = f"{type(exc).__name__}: {exc}"
             self.telemetry.event(Level.WARN, "sleeve",
@@ -2837,6 +2843,7 @@ class TradingSession:
 
     ATTRIBUTION_KEY = "strategy_book"
     CAPITAL_KEY = "capital_weights"
+    DIVERSIFICATION_KEY = "diversification"
     CROSSING_KEY = "cost_calibration"
     RESEARCH_KEY = "research"
 
@@ -2930,6 +2937,9 @@ class TradingSession:
         weights = state.get(self.CAPITAL_KEY)
         if weights is not None:
             self.capital_weights = evidence_mod.CapitalWeights.from_dict(weights)
+        spread = state.get(self.DIVERSIFICATION_KEY)
+        if spread is not None:
+            self.diversification = diversification_mod.Diversification.from_dict(spread)
         found = state.get(self.RESEARCH_KEY)
         if found is not None:
             self.research = research_mod.ResearchDesk.from_dict(found)
@@ -2942,6 +2952,7 @@ class TradingSession:
         # start and pricing crossings by the uncorrected model.
         for engine in self.engines.values():
             engine.capital = self.capital_weights
+            engine.diversification = self.diversification
             engine.cost_calibration = self.cost_calibration
         self._attribution_loaded = True
 
@@ -2952,6 +2963,7 @@ class TradingSession:
             config.update_state(
                 **{self.ATTRIBUTION_KEY: self.attribution.as_dict(),
                    self.CAPITAL_KEY: self.capital_weights.as_dict(),
+                   self.DIVERSIFICATION_KEY: self.diversification.as_dict(),
                    self.CROSSING_KEY: self.cost_calibration.as_dict(),
                    self.RESEARCH_KEY: self.research.as_dict()})
         except OSError as exc:
@@ -2972,12 +2984,18 @@ class TradingSession:
             moved = self.capital_weights.revise(
                 day, book.records.values(), book.equity_marks,
                 states=self.market_states(), caps=self.research.caps())
+            spread = self.diversification.revise(
+                day, book.records.values(), book.equity_marks)
         except Exception:                                  # noqa: BLE001
             log.exception("could not mark the strategies for %s", day)
             return
         self._save_attribution()
         if moved:
             self._announce_capital(moved)
+        for name, before, after, reason in spread:
+            self.telemetry.event(Level.INFO, "capital",
+                                 f"{name}: diversification ×{before:.2f} → "
+                                 f"×{after:.2f}", detail=reason)
 
     def research_premia(self) -> dict[str, tuple[list[tuple[int, float]], str]]:
         """Each strategy's premium, one number a day, from the samples its
@@ -3125,7 +3143,11 @@ class TradingSession:
         for row in rows:
             name = row["strategy"]
             standing = self.capital_weights.standings.get(name)
-            row["multiplier"] = self.capital_weights.multiplier(name)
+            # The multiplier actually applied: the evidence's times what the
+            # strategy adds to the rest of the book, inside the same bounds.
+            row["multiplier"] = diversification_mod.combined_multiplier(
+                self.capital_weights, self.diversification, name)
+            row["diversification"] = self.diversification.multiplier(name)
             row["regime_factor"] = standing.regime_factor if standing else 1.0
             row["regime_reason"] = standing.regime_reason if standing else ""
             found = self.research.findings.get(name)
@@ -3136,6 +3158,9 @@ class TradingSession:
                 ("sized by its own ledger" if name == "sector" else
                  "not a strategy -- never sized" if name == "unattributed" else
                  "no record yet"))
+            spread = self.diversification.note(name)
+            if spread and name not in diversification_mod.EXCLUDED:
+                row["capital_reason"] += "\nDiversification: " + spread
         return {"mode": mode, "rows": rows,
                 "corrections": book.corrections if book else 0,
                 "missed": self.attribution.missed}
