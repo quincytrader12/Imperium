@@ -265,6 +265,9 @@ class SymbolEngine:
         #: Every symbol's own overnight record ranked against its peers, set
         #: by the session; None carries without the ranking.
         self.overnight_ranking: overnight_mod.Ranking | None = None
+        #: The account-level scale on every size, set by the session: realised
+        #: volatility against its target, times the drawdown de-gross.
+        self.risk_dial: float = 1.0
         self.session_phase: SessionPhase = SessionPhase.CLOSED
         #: The market-wide trend premium, estimated across the universe. Held
         #: here rather than measured per symbol for the same reason as the
@@ -614,11 +617,20 @@ class SymbolEngine:
         weights = self.capital
         d.capital_multiplier = 1.0
         d.capital_note = ""
-        if weights is None:
+        # The account's risk dial rides on the same multiplier: one scale for
+        # what this strategy's record earns, one for how the whole account is
+        # behaving, bounded by the same floor and cap. See
+        # imperium.execution.risk_dial.
+        dial = self.risk_dial if 0.0 < self.risk_dial <= 1.0 else 1.0
+        if weights is None and dial == 1.0:
             return
-        multiplier = weights.multiplier(d.strategy)
+        multiplier = (weights.multiplier(d.strategy) if weights is not None
+                      else 1.0) * dial
         d.capital_multiplier = multiplier
-        d.capital_note = weights.note(d.strategy)
+        d.capital_note = weights.note(d.strategy) if weights is not None else ""
+        if dial < 1.0:
+            d.capital_note = "; ".join(
+                p for p in (d.capital_note, f"account risk dial ×{dial:.2f}") if p)
         before = d.raw_weight
         if before == 0.0 or multiplier == 1.0:
             return

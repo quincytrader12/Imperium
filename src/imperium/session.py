@@ -35,6 +35,7 @@ from imperium.execution.broker import (
 from imperium.execution.engine import Decision, SymbolEngine
 from imperium.execution.portfolio import PortfolioAllocator, Verdict
 from imperium.execution import risk as risk_mod
+from imperium.execution import risk_dial as risk_dial_mod
 from imperium.execution.risk import RiskLimits
 from imperium.security.credentials import Credential, CredentialStore
 from imperium.execution.costs import ADVERSE_SELECTION_FRACTION
@@ -379,6 +380,8 @@ class TradingSession:
         #: measurement of one market, and every engine reads the same one.
         self.pooled_drift: PooledDrift | None = None
         self.overnight_ranking: overnight_mod.Ranking | None = None
+        self.risk_dial: risk_dial_mod.Dial = risk_dial_mod.Dial()
+        self._risk_dial_at = 0.0
         #: The market-wide trend premium, and the positions carried on it.
         self.pooled_trend: PooledTrend | None = None
         self.trend_note: str = "not yet measured"
@@ -521,6 +524,7 @@ class TradingSession:
             # reason that describes the wiring rather than the market.
             e.pooled_drift = self.pooled_drift
             e.overnight_ranking = self.overnight_ranking
+            e.risk_dial = self.risk_dial.value
             e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
             e.capital = self.capital_weights
@@ -1420,7 +1424,8 @@ class TradingSession:
             orders = sleeve.plan(
                 closes, day, prices=prices, held=self._sleeve_held(sleeve),
                 account_equity=self.equity(),
-                multiplier=self.capital_weights.multiplier(sleeve.name))
+                multiplier=(self.capital_weights.multiplier(sleeve.name)
+                            * self.risk_dial.value))
         except Exception as exc:                            # noqa: BLE001
             sleeve.last_error = f"{type(exc).__name__}: {exc}"
             self.telemetry.event(Level.WARN, "sleeve",
@@ -2711,6 +2716,40 @@ class TradingSession:
         history = self.equity_history()
         history.record(time.time(), self.equity(), trading_day())
         history.maybe_save()
+        self._revise_risk_dial(history)
+
+    def _revise_risk_dial(self, history: "journal_mod.EquityHistory", *,
+                          force: bool = False) -> None:
+        """Re-read the account's own volatility and drawdown into the one
+        scale every strategy's size passes through. At most once a minute:
+        both inputs move on daily marks and the live equity, not on ticks."""
+        now = time.time()
+        if not force and now - self._risk_dial_at < 60.0:
+            return
+        self._risk_dial_at = now
+        cfg = risk_dial_mod.settings()
+        if cfg["enabled"]:
+            dial = risk_dial_mod.compute(
+                history.daily, self.equity(), target_vol=cfg["target_vol"],
+                since=cfg["since"], start=cfg["start"], full=cfg["full"])
+        else:
+            dial = risk_dial_mod.Dial(reason="the risk dial is off: full size")
+        before = self.risk_dial.value
+        self.risk_dial = dial
+        for engine in self.engines.values():
+            engine.risk_dial = dial.value
+        if abs(dial.value - before) < 0.05:
+            return
+        lower = dial.value < before
+        self.telemetry.event(Level.WARN if lower else Level.GOOD, "risk",
+                             f"risk dial {before:.0%} → {dial.value:.0%}: "
+                             f"{dial.reason}")
+        # A step of a tenth is worth a buzz; smaller drift is on screen only.
+        if abs(dial.value - before) >= 0.1:
+            notice = (f"{'🔻' if lower else '🔺'} Risk dial "
+                      f"{before:.0%} → {dial.value:.0%}\n{dial.reason}")
+            self._pending_notice = "\n\n".join(
+                n for n in (self._pending_notice, notice) if n)
 
     def apply_account_scale(self, equity: float) -> bool:
         """Re-derive the limits for what this balance can actually trade.
@@ -3689,6 +3728,7 @@ class TradingSession:
             # The Sector Trend sleeve, which keeps its own book.
             "sector": self.sector.panel(self.arming_equity()),
             "sleeves": self._sleeves_block(),
+            "risk_dial": self.risk_dial.as_dict(),
             # How the one account is divided between them.
             "capital": self.capital.as_dict(),
             # A second currency for the balance. Never used for

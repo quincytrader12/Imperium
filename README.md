@@ -817,6 +817,28 @@ an early close (the day after Thanksgiving, Christmas Eve) every sleeve decides
 
 With all three sleeves on, the engine trades the remaining 35%.
 
+### The risk dial: one scale on everything, from the account itself
+
+Every other sizing rule looks at one strategy or one symbol. The risk dial
+(`execution/risk_dial.py`) looks at the account as it has actually behaved,
+and every size passes through it: the engine's four strategies and all three
+sleeves. It combines two rules by multiplying them:
+
+* **Volatility target.** When the account's realised volatility over the last
+  20 days runs above 15% a year, every size is scaled by target ÷ realised.
+  Volatility clusters, and scaling by it has raised Sharpe ratios across asset
+  classes (Moreira and Muir 2017). It only ever scales down: a quiet month
+  never levers the account up.
+* **Drawdown de-grossing.** Nothing changes until the account is 5% below its
+  high-water mark. From there to 20% below, size is cut in a straight line
+  down to a quarter, and it stays there until the account recovers.
+
+The dial never goes below 25%, because a strategy cut to nothing produces no
+evidence that it has started working again. It is the meter in the Capital
+panel, and a move of a tenth or more is sent to Telegram. A withdrawal reads
+as a drawdown, so set `IMPERIUM_HIGH_WATER_SINCE` to the day after it and the
+older highs stop counting. `IMPERIUM_RISK_DIAL=false` turns it off.
+
 ### Entries rest at the mid, and cross only if they have to
 
 An entry is first placed as a limit order at the midpoint between bid and ask

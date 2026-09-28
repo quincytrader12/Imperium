@@ -196,6 +196,20 @@ SETTINGS_TEMPLATE = """\
 
 # IMPERIUM_OVERNIGHT_MIN_RANK=0.5
 
+# ----------------------------------------------------------------- risk dial
+# One scale on every strategy's size, from how the whole account behaves:
+# when its realised volatility (last 20 days) runs over the target, sizes
+# shrink in proportion; from DRAWDOWN_START below the high-water mark to
+# DRAWDOWN_FULL they are cut in a straight line to a quarter. Never to zero,
+# never above full size. A withdrawal reads as a drawdown: set
+# IMPERIUM_HIGH_WATER_SINCE to the day after it so older highs stop counting.
+
+# IMPERIUM_RISK_DIAL=true
+# IMPERIUM_ACCOUNT_TARGET_VOL=0.15
+# IMPERIUM_DRAWDOWN_START=0.05
+# IMPERIUM_DRAWDOWN_FULL=0.20
+# IMPERIUM_HIGH_WATER_SINCE=
+
 # ----------------------------------------------------------- passive entries
 # An entry first rests as a limit order at the midpoint between bid and ask.
 # If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
@@ -260,6 +274,11 @@ SETTABLE = frozenset({
     "TURN_OF_MONTH_ALLOCATION",
     "TURN_OF_MONTH_RUN_TIME_ET",
     "IMPERIUM_OVERNIGHT_MIN_RANK",
+    "IMPERIUM_RISK_DIAL",
+    "IMPERIUM_ACCOUNT_TARGET_VOL",
+    "IMPERIUM_DRAWDOWN_START",
+    "IMPERIUM_DRAWDOWN_FULL",
+    "IMPERIUM_HIGH_WATER_SINCE",
     "IMPERIUM_PASSIVE_ENTRIES",
     "IMPERIUM_PASSIVE_SECONDS",
 })

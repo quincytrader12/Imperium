@@ -1082,12 +1082,15 @@
       var small = Object.keys(x.too_small || {});
       var status = !x.enabled ? 'off' : x.last_run_day
         ? 'last decided ' + x.last_run_day : 'decides after ' + x.run_after_et + ' ET';
-      return '<div class="sl-block">' +
+      // Each sleeve's chips in its own line colour, the one the strategies
+      // chart draws it in, so a holding and its line read as the same thing.
+      var hue = ((window.ImperiumChart || {}).color || {})[x.name] || '';
+      return '<div class="sl-block"' + (hue ? ' style="--sl:' + hue + '"' : '') + '>' +
         '<div class="sl-head"><b>' + esc(x.label) + '</b><span class="dimmer">' +
           Math.round(x.allocation * 100) + '% · ' + fmtMoney(x.sleeve_equity) + '</span></div>' +
         '<div class="sl-sum dimmer">' + esc(x.summary || '') + '</div>' +
         '<div class="sl-chips">' + (held.concat(wanted).join('') ||
-          '<span class="dimmer">nothing held yet</span>') + '</div>' +
+          '<span class="sl-none dimmer">in cash</span>') + '</div>' +
         '<div class="sl-foot dimmer">' + esc(status) +
           (x.note ? ' · ' + esc(x.note) : '') +
           (small.length ? ' · ' + small.length + ' below the $1 minimum (every target clears it from ~' +
@@ -1095,6 +1098,29 @@
           (x.last_error ? ' · <span class="warn">' + esc(x.last_error) + '</span>' : '') +
         '</div></div>';
     }).join('') || '<div class="dimmer" style="padding:6px 9px">no sleeves</div>');
+  }
+
+  /* The risk dial as a meter: the fill is the size every strategy trades at,
+   * and the two figures under it are the two reasons it can be less than
+   * full -- the account's realised volatility against its target, and how far
+   * it sits below its high-water mark against the line where cutting starts. */
+  function renderDial(d) {
+    var host = $('cap-dial');
+    if (!host) return;
+    if (!d) { setHTML(host, ''); return; }
+    var v = Math.max(0, Math.min(1, d.value || 0));
+    var tone = v >= 0.999 ? 'good' : (v > 0.5 ? 'warn' : 'bad');
+    var vol = d.realised_vol == null ? 'measuring'
+      : Math.round(d.realised_vol * 100) + '% / ' + Math.round(d.target_vol * 100) + '%';
+    var dd = (d.drawdown * 100).toFixed(1) + '% / ' + Math.round(d.dd_start * 100) + '%';
+    setHTML(host,
+      '<div class="dial-head"><span>risk dial</span><b class="' + tone + '">' +
+        Math.round(v * 100) + '%</b></div>' +
+      '<div class="dial-track" title="' + esc(d.reason || '') + '"><i class="' + tone +
+        '" style="width:' + (v * 100).toFixed(1) + '%"></i>' +
+        '<s style="left:' + ((d.floor || 0.25) * 100) + '%"></s></div>' +
+      '<div class="dial-foot dimmer"><span>volatility ' + esc(vol) + '</span>' +
+        '<span>drawdown ' + esc(dd) + '</span></div>');
   }
 
   function renderCapital(s) {
@@ -1121,6 +1147,7 @@
                     '', '$' + fmtNum((c.allocated || {})[n] || 0, 2));
     });
     setHTML($('cap-grid'), cells);
+    renderDial(s.risk_dial);
 
     var why = $('cap-why');
     if (why) {

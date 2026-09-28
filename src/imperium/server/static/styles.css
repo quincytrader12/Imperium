@@ -1159,7 +1159,9 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
 .sl-chips { display: flex; flex-wrap: wrap; gap: 3px 4px; }
 .sl-chip { font-size: 9.5px; padding: 1px 6px; border: 1px solid #2a2e35;
            border-radius: 2px; color: var(--dim); }
-.sl-chip.on { border-color: rgba(144, 133, 233, .55); color: var(--text); }
+.sl-chip.on { border-color: var(--sl, rgba(144, 133, 233, .55)); color: var(--text);
+  background: color-mix(in srgb, var(--sl, #9085e9) 9%, transparent); }
+.sl-none { font-size: 9.5px; line-height: 17px; letter-spacing: .3px; }
 .sl-chip b { font-weight: 500; color: var(--dim); }
 .sl-foot { font-size: 9px; margin-top: 5px; line-height: 1.45; }
 
@@ -1175,3 +1177,25 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
 /* The watchlist keeps a fixed share of the rail and scrolls inside itself,
    so the rail's own scroll is for the panels, not for thirty ticker rows. */
 #left-panel > #wl-panel { flex: 0 0 auto; height: clamp(220px, 34vh, 400px); }
+
+/* The risk dial: a hairline meter under the capital split. The tick marks the
+   floor it never goes below. */
+.dial { padding: 2px 9px 8px; }
+.dial:empty { display: none; }
+.dial-head { display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim, #8d939b); }
+.dial-head b { font-size: 12px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.dial-head b.good { color: var(--good, #19c37d); }
+.dial-head b.warn { color: var(--warn, #e0a030); }
+.dial-head b.bad { color: var(--bad, #e5484d); }
+.dial-track { position: relative; height: 3px; margin: 5px 0 4px; border-radius: 2px;
+  background: rgba(141, 147, 155, .18); overflow: visible; }
+.dial-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px;
+  transition: width .6s ease; }
+.dial-track i.good { background: linear-gradient(90deg, rgba(25,195,125,.35), var(--good, #19c37d)); }
+.dial-track i.warn { background: linear-gradient(90deg, rgba(224,160,48,.35), var(--warn, #e0a030)); }
+.dial-track i.bad { background: linear-gradient(90deg, rgba(229,72,77,.35), var(--bad, #e5484d)); }
+.dial-track s { position: absolute; top: -2px; width: 1px; height: 7px;
+  background: rgba(141, 147, 155, .55); }
+.dial-foot { display: flex; justify-content: space-between; font-size: 10px;
+  font-variant-numeric: tabular-nums; }
