@@ -46,12 +46,15 @@
   var PULSE_MS = 1600;
   var RIGHT_AXIS = 62, BOTTOM_AXIS = 18, TOP_PAD = 26, LEFT_PAD = 12;
 
-  /* The right-hand gutter: the value axis at its top, the orb at its foot.
-   * As wide as the orb, so the orb never sits on a line it would hide. */
-  function gutter() {
+  /* The time axis runs a little past the present, the way a trading chart
+   * leaves room to its right: the grid, the axis and the last value carry
+   * on across it, so the plot reaches the panel's edge instead of stopping
+   * short, and the orb sits in the part of it no data can ever occupy. As
+   * wide as the orb needs beyond the price axis, and no wider. */
+  function future() {
     var orb = document.getElementById('cluster-wrap');
-    var w = orb && orb.offsetWidth ? orb.offsetWidth + 14 : 0;
-    return Math.max(RIGHT_AXIS, w);
+    var w = orb && orb.offsetWidth ? orb.offsetWidth : 0;
+    return Math.max(24, w + 18 - RIGHT_AXIS);
   }
 
   function $(id) { return document.getElementById(id); }
@@ -332,7 +335,7 @@
       var y = Math.round(Y(t)) + 0.5;
       ctx.strokeStyle = INK.grid;
       ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(opts.gridTo || x1, y); ctx.stroke();
       if (opts.avoid != null && Math.abs(y - opts.avoid) < 14) return;
       ctx.fillStyle = INK.dimmer;
       ctx.fillText(fmt(t, step), opts.left ? x0 - 8 : x1 + 8, y);
@@ -381,14 +384,16 @@
       if (d < worst) { worst = d; worstAt = i; }
     });
 
-    var x0 = LEFT_PAD, x1 = w - gutter();
+    // x1 is the plot's right edge, beside the price axis; xe is the present.
+    // Between them is the room ahead of the line.
+    var x0 = LEFT_PAD, x1 = w - RIGHT_AXIS, xe = x1 - future();
     var mainTop = TOP_PAD, mainBottom = Math.round((h - BOTTOM_AXIS) * 0.76);
     var ddTop = mainBottom + 14, ddBottom = h - BOTTOM_AXIS;
-    var X = xScale(t0, t1, x0, x1);
+    var X = xScale(t0, t1, x0, xe);
     var Y = yScale(lo, hi, mainTop, mainBottom);
     var ddLo = Math.min(worst * 1.15, -0.001);
     var YD = yScale(ddLo, 0, ddTop, ddBottom);
-    this.layout = {X: X, Y: Y, pts: pts, dd: dd, x0: x0, x1: x1};
+    this.layout = {X: X, Y: Y, pts: pts, dd: dd, x0: x0, x1: xe};
 
     this._valueAxis(ctx, lo, hi, Y, x0, x1, Math.max(3, Math.floor((mainBottom - mainTop) / 46)),
                     axisMoney, {avoid: Y(vals[vals.length - 1])});
@@ -414,6 +419,27 @@
     ctx.closePath();
     ctx.fillStyle = grad;
     ctx.fill();
+
+    // Past the present the wash carries on at the last level and fades out
+    // across the room ahead, so the fill never stops on a hard vertical edge.
+    var endY = Y(vals[vals.length - 1]);
+    var top_ = Math.min(endY, mainBottom), height = Math.abs(mainBottom - endY);
+    // One-pixel columns on whole pixels: overlapping strips doubled their
+    // alpha where they met and striped the fade.
+    var fx0 = Math.round(xe), span = Math.max(1, Math.round(x1) - fx0);
+    ctx.save();
+    ctx.fillStyle = grad;
+    for (var k = 0; k < span; k++) {
+      ctx.globalAlpha = Math.pow(1 - (k + 0.5) / span, 1.6);
+      ctx.fillRect(fx0 + k, top_, 1, height);
+    }
+    ctx.restore();
+
+    // The present, as a faint rule through both plots.
+    ctx.strokeStyle = 'rgba(223, 229, 236, 0.10)';
+    ctx.lineWidth = 1;
+    var nx = Math.round(xe) + 0.5;
+    ctx.beginPath(); ctx.moveTo(nx, mainTop); ctx.lineTo(nx, ddBottom); ctx.stroke();
 
     // The line. Neutral ink, so the markers on it can carry colour.
     ctx.beginPath();
@@ -456,8 +482,16 @@
       ctx.globalAlpha = 1;
     });
 
-    // The live end: a dot and its value on the axis.
+    // The live end: a dot, a dashed line carrying its level across the room
+    // ahead to the axis, and its value there.
     var lx = X(t1), ly = Y(vals[vals.length - 1]);
+    ctx.save();
+    ctx.setLineDash([2, 4]);
+    ctx.strokeStyle = 'rgba(223, 229, 236, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(lx + 6, Math.round(ly) + 0.5);
+    ctx.lineTo(x1, Math.round(ly) + 0.5); ctx.stroke();
+    ctx.restore();
     ctx.beginPath(); ctx.arc(lx, ly, 6, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(223, 229, 236, 0.16)'; ctx.fill();
     ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2);
@@ -478,6 +512,25 @@
     ctx.fillStyle = INK.dimmer;
     ctx.strokeStyle = INK.axis;
     ctx.beginPath(); ctx.moveTo(x0, Math.round(YD(0)) + 0.5); ctx.lineTo(x1, Math.round(YD(0)) + 0.5); ctx.stroke();
+    // Gridlines through the drawdown band, full width like the ones above.
+    ctx.strokeStyle = INK.grid;
+    [0.5, 1].forEach(function (f) {
+      var gy = Math.round(YD(ddLo * f)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(x0, gy); ctx.lineTo(x1, gy); ctx.stroke();
+    });
+    // Where the book stands now, carried across to the edge like the value.
+    var ddNow = dd[dd.length - 1];
+    if (ddNow < 0) {
+      ctx.save();
+      ctx.setLineDash([2, 4]);
+      ctx.strokeStyle = 'rgba(255, 92, 108, 0.45)';
+      var ny = Math.round(YD(ddNow)) + 0.5;
+      // Stopped short of the orb's corner rather than run through it.
+      var orbEl = document.getElementById('cluster-wrap');
+      var stop = orbEl && orbEl.offsetWidth ? w - 8 - orbEl.offsetWidth - 4 : x1;
+      ctx.beginPath(); ctx.moveTo(X(t1), ny); ctx.lineTo(Math.max(X(t1), stop), ny); ctx.stroke();
+      ctx.restore();
+    }
     ctx.beginPath();
     ctx.moveTo(X(t0), YD(0));
     pts.forEach(function (p, i) { ctx.lineTo(X(p[0]), YD(dd[i])); });
@@ -493,7 +546,7 @@
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    this._timeAxis(ctx, t0, t1, X, h - BOTTOM_AXIS, x0, x1);
+    this._timeAxis(ctx, t0, t1, X, h - BOTTOM_AXIS, x0, xe);
 
     // The period in numbers.
     var last = vals[vals.length - 1];
@@ -639,14 +692,14 @@
     lo -= pad; hi += pad;
     // The value axis on the left here: the right edge is where each line's
     // end is named, and the two sets of labels cannot share one column.
-    var x0 = 58, x1 = w - Math.max(gutter(), ends4(have) ? 170 : 24);
+    var x0 = 58, x1 = w - (ends4(have) ? 170 : 24);
     var top = TOP_PAD + 8, bottom = h - BOTTOM_AXIS;
     var X = xScale(t0, t1, x0, x1), Y = yScale(lo, hi, top, bottom);
     this._valueAxis(ctx, lo, hi, Y, x0, x1, Math.max(3, Math.floor((bottom - top) / 46)),
-                    axisMoney, {left: true});
+                    axisMoney, {left: true, gridTo: w - 8});
     var zy = Math.round(Y(0)) + 0.5;
     ctx.strokeStyle = '#3a3f48'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x0, zy); ctx.lineTo(x1, zy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x0, zy); ctx.lineTo(w - 8, zy); ctx.stroke();
 
     var ends = [];
     have.forEach(function (s) {
