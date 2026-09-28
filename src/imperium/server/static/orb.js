@@ -473,7 +473,7 @@ export class ProcessOrb {
     // Framed by the narrower side. The field of view is vertical, so in a
     // pane taller than it is wide the orb kept its height and lost its
     // sides; stepping back by the aspect keeps all of it in view.
-    const back = Math.max(1, 0.78 / this.camera.aspect);
+    const back = Math.max(0.9, 0.78 / this.camera.aspect);
     this.camera.position.set(0, 0.30 * back, 6.4 * back);
     this.camera.lookAt(0, 0, 0);
     this.camera.updateProjectionMatrix();

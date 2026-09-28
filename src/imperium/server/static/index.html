@@ -232,27 +232,31 @@
         <div class="chart-stats" id="chart-stats"></div>
         <div class="chart-wrap" id="chart-wrap">
           <canvas id="equity-chart"></canvas>
-          <div class="chart-tip" id="chart-tip" hidden></div>
           <div class="chart-legend" id="chart-legend"></div>
           <div class="chart-empty" id="chart-empty" hidden></div>
-        </div>
-      </div>
-      <div class="orb-pane cluster-wrap" id="cluster-wrap">
-        <canvas id="orb"></canvas>
-        <!-- What just fired, in words. The orb says which kind and roughly
-             where; this says which symbol. Unlike the orb, this part is still
-             readable with WebGL switched off. -->
-        <div id="orb-ticker" class="orb-ticker"></div>
-        <!-- The swatches are painted from the shared palette at startup, so
-             the legend cannot disagree with the field it explains. -->
-        <div class="cluster-legend" id="cluster-legend">
-          <span data-kind="scan"><i></i>scan</span>
-          <span data-kind="decision"><i></i>decision</span>
-          <span data-kind="refused"><i></i>refused</span>
-          <span data-kind="cap"><i></i>cap</span>
-          <span data-kind="order"><i></i>order</span>
-          <span data-kind="warmup"><i></i>warmup</span>
-          <span data-kind="halt"><i></i>halt</span>
+          <!-- The orb, in the chart's corner. Screen-blended, so the black it
+               renders on becomes transparent and only its light lands on the
+               chart; its edge is faded, so the glow never ends in a square.
+               It does not take the pointer: the chart under it stays live. -->
+          <div class="orb-pane cluster-wrap" id="cluster-wrap">
+            <canvas id="orb"></canvas>
+          </div>
+          <!-- What just fired, in words, under the orb. Readable with WebGL
+               switched off, which the orb is not. -->
+          <div class="orb-caption">
+            <div id="orb-ticker" class="orb-ticker"></div>
+            <!-- Swatches painted from the shared palette at startup. -->
+            <div class="cluster-legend" id="cluster-legend">
+              <span data-kind="scan"><i></i>scan</span>
+              <span data-kind="decision"><i></i>decision</span>
+              <span data-kind="refused"><i></i>refused</span>
+              <span data-kind="cap"><i></i>cap</span>
+              <span data-kind="order"><i></i>order</span>
+              <span data-kind="warmup"><i></i>warmup</span>
+              <span data-kind="halt"><i></i>halt</span>
+            </div>
+          </div>
+          <div class="chart-tip" id="chart-tip" hidden></div>
         </div>
       </div>
     </div>

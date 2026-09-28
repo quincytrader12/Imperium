@@ -1100,3 +1100,52 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
 /* The console does not fold, so it carries no fold mark and no fold cursor. */
 #cluster-panel > h2 { cursor: default; }
 #cluster-panel > h2::after { content: none; }
+
+/* ======================================================================
+   The orb in the chart's corner.
+
+   The chart takes the whole console. The orb sits over its bottom-right
+   corner, smaller, as an instrument lamp rather than a second panel.
+
+   Its WebGL canvas renders on black -- the bloom pass writes an opaque
+   frame whatever the renderer's alpha says -- so the pane is screen-blended:
+   black leaves the chart underneath exactly as it was, and only the orb's
+   light is added to it. The edge is faded with a radial mask, so the glow
+   thins out to nothing instead of stopping at the canvas's square.
+   ====================================================================== */
+
+.console { grid-template-columns: minmax(0, 1fr) !important; }
+
+.chart-wrap .orb-pane {
+  position: absolute;
+  right: 8px;
+  bottom: 46px;
+  width: clamp(128px, 14%, 172px);
+  aspect-ratio: 1 / 1;
+  flex: none;
+  overflow: visible;
+  pointer-events: none;
+  background: none;
+  mix-blend-mode: screen;
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 52%, transparent 71%);
+          mask-image: radial-gradient(circle at 50% 50%, #000 52%, transparent 71%);
+}
+.chart-wrap .orb-pane #orb { width: 100%; height: 100%; }
+
+/* Under the orb: what just fired, and the key to its colours. Small, right
+   aligned, and out of the pointer's way like the orb above it. */
+.orb-caption {
+  position: absolute; right: 8px; bottom: 20px;
+  width: clamp(128px, 14%, 172px);
+  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  pointer-events: none; z-index: 2;
+}
+.orb-caption .orb-ticker {
+  position: static; justify-content: flex-end; gap: 2px 8px;
+  font-size: 9px; max-height: 13px; overflow: hidden;
+}
+.orb-caption .cluster-legend {
+  position: static; justify-content: flex-end; flex-wrap: wrap;
+  gap: 1px 7px; font-size: 7.5px; letter-spacing: .6px; opacity: .8;
+}
+.orb-caption .cluster-legend i { width: 5px; height: 5px; }

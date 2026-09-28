@@ -46,6 +46,14 @@
   var PULSE_MS = 1600;
   var RIGHT_AXIS = 62, BOTTOM_AXIS = 18, TOP_PAD = 26, LEFT_PAD = 12;
 
+  /* The right-hand gutter: the value axis at its top, the orb at its foot.
+   * As wide as the orb, so the orb never sits on a line it would hide. */
+  function gutter() {
+    var orb = document.getElementById('cluster-wrap');
+    var w = orb && orb.offsetWidth ? orb.offsetWidth + 14 : 0;
+    return Math.max(RIGHT_AXIS, w);
+  }
+
   function $(id) { return document.getElementById(id); }
 
   function money(v, signed) {
@@ -373,7 +381,7 @@
       if (d < worst) { worst = d; worstAt = i; }
     });
 
-    var x0 = LEFT_PAD, x1 = w - RIGHT_AXIS;
+    var x0 = LEFT_PAD, x1 = w - gutter();
     var mainTop = TOP_PAD, mainBottom = Math.round((h - BOTTOM_AXIS) * 0.76);
     var ddTop = mainBottom + 14, ddBottom = h - BOTTOM_AXIS;
     var X = xScale(t0, t1, x0, x1);
@@ -461,7 +469,13 @@
     ctx.font = '9px ' + getComputedStyle(document.body).fontFamily;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+    // Its worst figure beside the title, on the left: the right-hand corner
+    // is where the orb sits.
     ctx.fillText('DRAWDOWN', x0, ddTop - 3);
+    var titleW = ctx.measureText('DRAWDOWN').width;
+    ctx.fillStyle = worst < 0 ? 'rgba(255, 92, 108, 0.9)' : INK.dimmer;
+    ctx.fillText(worst < 0 ? pct(worst) + ' at worst' : 'none', x0 + titleW + 10, ddTop - 3);
+    ctx.fillStyle = INK.dimmer;
     ctx.strokeStyle = INK.axis;
     ctx.beginPath(); ctx.moveTo(x0, Math.round(YD(0)) + 0.5); ctx.lineTo(x1, Math.round(YD(0)) + 0.5); ctx.stroke();
     ctx.beginPath();
@@ -478,9 +492,6 @@
     ctx.strokeStyle = 'rgba(255, 92, 108, 0.85)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    ctx.fillStyle = INK.dimmer;
-    ctx.textBaseline = 'middle';
-    ctx.fillText(pct(worst), x1 + 8, YD(worst));
 
     this._timeAxis(ctx, t0, t1, X, h - BOTTOM_AXIS, x0, x1);
 
@@ -628,7 +639,7 @@
     lo -= pad; hi += pad;
     // The value axis on the left here: the right edge is where each line's
     // end is named, and the two sets of labels cannot share one column.
-    var x0 = 58, x1 = w - (ends4(have) ? 170 : 24);
+    var x0 = 58, x1 = w - Math.max(gutter(), ends4(have) ? 170 : 24);
     var top = TOP_PAD + 8, bottom = h - BOTTOM_AXIS;
     var X = xScale(t0, t1, x0, x1), Y = yScale(lo, hi, top, bottom);
     this._valueAxis(ctx, lo, hi, Y, x0, x1, Math.max(3, Math.floor((bottom - top) / 46)),
