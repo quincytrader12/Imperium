@@ -792,7 +792,21 @@ It decides after 15:45 ET on the live price, since a 3:45 decision on
 yesterday's close would be a day late. It is in cash most of the time. Set
 `MEAN_REVERSION_ENABLED=false` to turn it off.
 
-With both sleeves on, the engine trades the remaining 50%.
+**Turn of the Month** (`strategy/turn_of_month.py`, 15% of the account, about
+$11 at $73) is a calendar strategy with no price signal. It holds the S&P 500
+(IVV, not SPY, which belongs to Mean Reversion) from the close of each month's
+second-to-last trading day to the close of the third trading day of the next
+month. McConnell and Xu (2008) found that window carried essentially all of
+the US market's excess return, out of sample and in 30 of 35 countries. It is
+in cash the rest of the month.
+
+The trading days come from the NYSE's holiday rules, computed in advance,
+because the strategy has to know on the day that it is the second-to-last. On
+an early close (the day after Thanksgiving, Christmas Eve) every sleeve decides
+15 minutes before the bell instead of at 15:45. Set
+`TURN_OF_MONTH_ENABLED=false` to turn it off.
+
+With all three sleeves on, the engine trades the remaining 35%.
 
 ### Entries rest at the mid, and cross only if they have to
 

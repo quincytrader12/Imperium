@@ -24,6 +24,7 @@ def isolated_home(tmp_path, monkeypatch):
     # turns one on -- the sleeves' own tests do.
     monkeypatch.setenv("GLOBAL_TREND_ENABLED", "false")
     monkeypatch.setenv("MEAN_REVERSION_ENABLED", "false")
+    monkeypatch.setenv("TURN_OF_MONTH_ENABLED", "false")
     yield
 
 

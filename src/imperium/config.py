@@ -178,6 +178,16 @@ SETTINGS_TEMPLATE = """\
 # MEAN_REVERSION_ALLOCATION=0.20
 # MEAN_REVERSION_RUN_TIME_ET=15:45
 
+# --------------------------------------------------------- turn of the month
+# A sleeve that holds the S&P 500 (IVV) from the close of the second-to-last
+# trading day of each month to the close of the third trading day of the
+# next -- the few days where, historically, most of the market's return has
+# arrived -- and is in cash the rest of the month.
+
+# TURN_OF_MONTH_ENABLED=true
+# TURN_OF_MONTH_ALLOCATION=0.15
+# TURN_OF_MONTH_RUN_TIME_ET=15:45
+
 # ----------------------------------------------------------- passive entries
 # An entry first rests as a limit order at the midpoint between bid and ask.
 # If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
@@ -238,6 +248,9 @@ SETTABLE = frozenset({
     "MEAN_REVERSION_ENABLED",
     "MEAN_REVERSION_ALLOCATION",
     "MEAN_REVERSION_RUN_TIME_ET",
+    "TURN_OF_MONTH_ENABLED",
+    "TURN_OF_MONTH_ALLOCATION",
+    "TURN_OF_MONTH_RUN_TIME_ET",
     "IMPERIUM_PASSIVE_ENTRIES",
     "IMPERIUM_PASSIVE_SECONDS",
 })

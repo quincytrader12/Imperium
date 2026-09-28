@@ -129,6 +129,7 @@ STRATEGY_LABEL = {
     "sector": "Sector trend",
     "global_trend": "Global trend",
     "mean_reversion": "Mean reversion",
+    "turn_of_month": "Turn of the month",
     "unattributed": "Unattributed",
 }
 

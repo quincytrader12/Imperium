@@ -58,6 +58,9 @@ REBALANCE_BAND = 0.25
 
 STATE_KEY = "sleeves"
 
+#: How long before an early close the day's decision is taken.
+EARLY_CLOSE_LEAD = dt.timedelta(minutes=15)
+
 
 @dataclass
 class Targets:
@@ -116,8 +119,15 @@ class Sleeve:
 
     # -- when --------------------------------------------------------------
 
-    def due(self, now_et: dt.datetime, market_open: bool) -> bool:
-        """Once a trading day, after its run time, while the market is open."""
+    def due(self, now_et: dt.datetime, market_open: bool,
+            closes_at_et: dt.datetime | None = None) -> bool:
+        """Once a trading day, after its run time, while the market is open.
+
+        On a day the market shuts early -- the day after Thanksgiving,
+        Christmas Eve -- a quarter to four is after the close, so the run
+        moves to :data:`EARLY_CLOSE_LEAD` before the close instead of the
+        day being skipped.
+        """
         if not self.enabled or not market_open:
             return False
         day = now_et.date().isoformat()
@@ -125,10 +135,13 @@ class Sleeve:
             return False
         hh, _, mm = self.run_after_et.partition(":")
         try:
-            after = dt.time(int(hh), int(mm or 0))
+            after = dt.datetime.combine(now_et.date(), dt.time(int(hh), int(mm or 0)))
         except ValueError:
-            after = dt.time(15, 45)
-        return now_et.time() >= after
+            after = dt.datetime.combine(now_et.date(), dt.time(15, 45))
+        if closes_at_et is not None and closes_at_et.date() == now_et.date():
+            early = closes_at_et.replace(tzinfo=None) - EARLY_CLOSE_LEAD
+            after = min(after, early)
+        return now_et.replace(tzinfo=None) >= after
 
     # -- what --------------------------------------------------------------
 
@@ -308,7 +321,7 @@ def trading_days_between(start: str, end: str) -> int:
 
 def build_all() -> list[Sleeve]:
     """Every sleeve this build knows, configured from the environment."""
-    from imperium.strategy import global_trend, mean_reversion
+    from imperium.strategy import global_trend, mean_reversion, turn_of_month
 
     def decide_global(closes, memory, day, held):
         t = global_trend.targets(closes)
@@ -326,6 +339,10 @@ def build_all() -> list[Sleeve]:
         t = mean_reversion.targets(closes, held, days)
         memory["entered"] = {s: str(entered.get(s) or day) if s in held else day
                              for s in t.weights}
+        return Targets(weights=t.weights, reasons=t.reasons, note=t.note)
+
+    def decide_calendar(closes, memory, day, held):
+        t = turn_of_month.targets(dt.date.fromisoformat(day))
         return Targets(weights=t.weights, reasons=t.reasons, note=t.note)
 
     return [
@@ -348,5 +365,19 @@ def build_all() -> list[Sleeve]:
             decide=decide_reversion,
             summary=("Index ETFs bought on a sharp two-day dip inside an uptrend, "
                      "sold on the bounce or after ten trading days."),
+        ),
+        Sleeve(
+            name="turn_of_month", label="Turn of the month",
+            universe=turn_of_month.UNIVERSE,
+            allocation=_share("TURN_OF_MONTH_ALLOCATION", 0.15),
+            enabled=_flag("TURN_OF_MONTH_ENABLED", True),
+            run_after_et=os.environ.get("TURN_OF_MONTH_RUN_TIME_ET", "15:45"),
+            decide=decide_calendar,
+            # The decision reads the calendar, not the history; the bars are
+            # only for a price to size against.
+            history_days=14,
+            summary=("The S&P 500 (IVV) from the last trading day of each month "
+                     "through the third of the next, where most of its return "
+                     "has arrived."),
         ),
     ]

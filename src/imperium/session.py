@@ -1371,8 +1371,10 @@ class TradingSession:
         if self.client is None:
             return
         now = to_eastern(dt.datetime.now(tz=dt.timezone.utc))
+        closes = self.market_clock.next_close
+        closes_et = to_eastern(closes) if closes is not None else None
         for sleeve in self.sleeves:
-            if not sleeve.due(now, self.market_clock.is_open):
+            if not sleeve.due(now, self.market_clock.is_open, closes_et):
                 continue
             task = self._sleeve_tasks.get(sleeve.name)
             if task is not None and not task.done():
