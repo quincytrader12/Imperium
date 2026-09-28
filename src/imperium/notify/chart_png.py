@@ -189,6 +189,18 @@ class Canvas:
                                 (self.h, self.w))
         self.blend(inside.astype(np.float32), color, alpha)
 
+    def between(self, xs: np.ndarray, y_top: np.ndarray, y_bottom: np.ndarray,
+                color, alpha: float) -> None:
+        """Fill between two lines that share their x positions."""
+        cols = np.arange(self.w) / SCALE
+        a = np.interp(cols, xs, y_top, left=np.nan, right=np.nan)
+        b = np.interp(cols, xs, y_bottom, left=np.nan, right=np.nan)
+        rows = (np.arange(self.h) / SCALE)[:, None]
+        inside = ((rows >= np.minimum(a, b)[None, :])
+                  & (rows <= np.maximum(a, b)[None, :])
+                  & (np.abs(b - a) > 0.25)[None, :])
+        self.blend(inside.astype(np.float32), color, alpha)
+
     def text(self, x: float, y: float, s: str, color, size: int = 2,
              align: str = "left") -> float:
         """Pixel-font text; ``size`` is output pixels per font pixel.
@@ -273,8 +285,7 @@ def render_equity(points: Sequence[tuple[float, float]], *, title: str,
 
     c = Canvas(width, height)
     left, right, top = 28, width - 128, 108
-    main_bottom = int(height * 0.74)
-    dd_top, dd_bottom = main_bottom + 30, height - 38
+    main_bottom = height - 52
 
     # Header: what, the value, the change.
     c.text(left, 26, "IMPERIUM", DIM, size=2)
@@ -301,21 +312,27 @@ def render_equity(points: Sequence[tuple[float, float]], *, title: str,
     c.hline(base_y, left, right, (58, 63, 72), dash=4)
 
     c.area(X, Y, main_bottom, tone, 0.20, 0.0)
-    c.polyline(X, Y, LINE, width=2.6)
-    c.polyline(X[-1:], Y[-1:], LINE, width=9)
 
-    # The drawdown underneath.
+    # The drawdown as the terminal draws it: a red veil between the
+    # high-water mark and the line, only while the book is below its high,
+    # and the high itself as a fine rule above.
     peak = np.maximum.accumulate(vs)
     dd = vs / peak - 1.0
     worst = float(dd.min())
-    floor = min(worst * 1.15, -0.001)
-    DY = dd_top + (dd / floor) * (dd_bottom - dd_top)
-    c.text(left, dd_top - 20, "DRAWDOWN", DIM, size=2)
-    c.hline(dd_top, left, right, GRID)
-    c.area(X, DY, dd_top, BAD, 0.30, 0.30)
-    c.polyline(X, DY, BAD, width=1.6, alpha=0.9)
-    c.text(right + 12, dd_top + (worst / floor) * (dd_bottom - dd_top) - 7,
-           f"{worst:.1%}", DIM, size=2)
+    HY = main_bottom - (peak - lo) / (hi - lo) * (main_bottom - top)
+    c.between(X, HY, Y, BAD, 0.22)
+    c.polyline(X, HY, DIM, width=1.0, alpha=0.6)
+    c.polyline(X, Y, LINE, width=2.6)
+    c.polyline(X[-1:], Y[-1:], LINE, width=9)
+    if worst < -1e-4:
+        at = int(np.argmin(dd))
+        c.polyline(np.array([X[at], X[at]]), np.array([HY[at], Y[at]]), BAD,
+                   width=1.4, alpha=0.9)
+        label = f"{worst:.1%}"
+        lx = X[at] + 10
+        if lx + 6 * 2 * len(label) > right:
+            lx = X[at] - 10 - 6 * 2 * len(label)
+        c.text(lx, (HY[at] + Y[at]) / 2 - 7, label, BAD, size=2)
 
     c.text(left, height - 26, _date(ts[0]), DIM, size=2)
     c.text(right, height - 26, _date(ts[-1]), DIM, size=2, align="right")

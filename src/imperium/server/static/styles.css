@@ -1118,9 +1118,9 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
 
 .chart-wrap .orb-pane {
   position: absolute;
-  right: 8px;
-  bottom: 46px;
-  width: clamp(128px, 14%, 172px);
+  right: 66px;
+  bottom: 44px;
+  width: clamp(112px, 10.5%, 146px);
   aspect-ratio: 1 / 1;
   flex: none;
   overflow: visible;
@@ -1135,8 +1135,8 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
 /* Under the orb: what just fired, and the key to its colours. Small, right
    aligned, and out of the pointer's way like the orb above it. */
 .orb-caption {
-  position: absolute; right: 8px; bottom: 20px;
-  width: clamp(128px, 14%, 172px);
+  position: absolute; right: 66px; bottom: 20px;
+  width: clamp(112px, 10.5%, 146px);
   display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
   pointer-events: none; z-index: 2;
 }

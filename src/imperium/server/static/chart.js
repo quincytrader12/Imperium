@@ -54,7 +54,9 @@
   function future() {
     var orb = document.getElementById('cluster-wrap');
     var w = orb && orb.offsetWidth ? orb.offsetWidth : 0;
-    return Math.max(24, w + 18 - RIGHT_AXIS);
+    // The orb sits left of the price axis, wholly inside this space, so it
+    // can never cover a price label or the live value's tag.
+    return Math.max(24, w + 20);
   }
 
   function $(id) { return document.getElementById(id); }
@@ -375,10 +377,12 @@
     var pad = Math.max((hi - lo) * 0.12, hi * 0.0015, 0.01);
     lo -= pad; hi += pad;
 
-    // Drawdown: the fall from the running high, as a fraction of it.
-    var peak = -Infinity, dd = [], worst = 0, worstAt = 0;
+    // Drawdown: the fall from the running high, as a fraction of it. The
+    // running high itself is kept, because it is drawn: the high-water mark.
+    var peak = -Infinity, dd = [], highs = [], worst = 0, worstAt = 0;
     pts.forEach(function (p, i) {
       peak = Math.max(peak, p[1]);
+      highs.push(peak);
       var d = peak > 0 ? p[1] / peak - 1 : 0;
       dd.push(d);
       if (d < worst) { worst = d; worstAt = i; }
@@ -387,12 +391,12 @@
     // x1 is the plot's right edge, beside the price axis; xe is the present.
     // Between them is the room ahead of the line.
     var x0 = LEFT_PAD, x1 = w - RIGHT_AXIS, xe = x1 - future();
-    var mainTop = TOP_PAD, mainBottom = Math.round((h - BOTTOM_AXIS) * 0.76);
-    var ddTop = mainBottom + 14, ddBottom = h - BOTTOM_AXIS;
+    // One plot, the full height: the drawdown is drawn inside it, as the
+    // distance between the line and its own high, not as a second chart.
+    var mainTop = TOP_PAD, mainBottom = h - BOTTOM_AXIS - 8;
+    var ddBottom = mainBottom;
     var X = xScale(t0, t1, x0, xe);
     var Y = yScale(lo, hi, mainTop, mainBottom);
-    var ddLo = Math.min(worst * 1.15, -0.001);
-    var YD = yScale(ddLo, 0, ddTop, ddBottom);
     this.layout = {X: X, Y: Y, pts: pts, dd: dd, x0: x0, x1: xe};
 
     this._valueAxis(ctx, lo, hi, Y, x0, x1, Math.max(3, Math.floor((mainBottom - mainTop) / 46)),
@@ -440,6 +444,37 @@
     ctx.lineWidth = 1;
     var nx = Math.round(xe) + 0.5;
     ctx.beginPath(); ctx.moveTo(nx, mainTop); ctx.lineTo(nx, ddBottom); ctx.stroke();
+
+    // The drawdown: a red veil between the high-water mark and the line,
+    // present only while the book is below its high. It reads as what it is
+    // -- the distance still to climb back -- and it is nothing at all while
+    // the book is making new highs, which is when there is nothing to show.
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
+      if (i === 0) ctx.moveTo(X(p[0]), Y(highs[i])); else ctx.lineTo(X(p[0]), Y(highs[i]));
+    });
+    for (var r = pts.length - 1; r >= 0; r--) ctx.lineTo(X(pts[r][0]), Y(pts[r][1]));
+    ctx.closePath();
+    var veil = ctx.createLinearGradient(0, mainTop, 0, mainBottom);
+    veil.addColorStop(0, 'rgba(255, 92, 108, 0.20)');
+    veil.addColorStop(1, 'rgba(255, 92, 108, 0.10)');
+    ctx.fillStyle = veil;
+    ctx.fill();
+
+    // The high-water mark: a fine dotted rule that only ever steps up, and
+    // carries on to the axis as the level the book has to beat.
+    ctx.save();
+    ctx.setLineDash([1, 3]);
+    ctx.strokeStyle = 'rgba(223, 229, 236, 0.38)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
+      var y = Math.round(Y(highs[i])) + 0.5;
+      if (i === 0) ctx.moveTo(X(p[0]), y); else ctx.lineTo(X(p[0]), y);
+    });
+    if (dd[dd.length - 1] < -1e-9) ctx.lineTo(x1, Math.round(Y(highs[highs.length - 1])) + 0.5);
+    ctx.stroke();
+    ctx.restore();
 
     // The line. Neutral ink, so the markers on it can carry colour.
     ctx.beginPath();
@@ -498,53 +533,34 @@
     ctx.fillStyle = INK.line; ctx.fill();
     pill(ctx, x1 + 4, ly, axisMoney(vals[vals.length - 1], 0.5), INK.line);
 
-    // The drawdown underneath, on its own axis.
-    ctx.fillStyle = INK.dimmer;
-    ctx.font = '9px ' + getComputedStyle(document.body).fontFamily;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
-    // Its worst figure beside the title, on the left: the right-hand corner
-    // is where the orb sits.
-    ctx.fillText('DRAWDOWN', x0, ddTop - 3);
-    var titleW = ctx.measureText('DRAWDOWN').width;
-    ctx.fillStyle = worst < 0 ? 'rgba(255, 92, 108, 0.9)' : INK.dimmer;
-    ctx.fillText(worst < 0 ? pct(worst) + ' at worst' : 'none', x0 + titleW + 10, ddTop - 3);
-    ctx.fillStyle = INK.dimmer;
-    ctx.strokeStyle = INK.axis;
-    ctx.beginPath(); ctx.moveTo(x0, Math.round(YD(0)) + 0.5); ctx.lineTo(x1, Math.round(YD(0)) + 0.5); ctx.stroke();
-    // Gridlines through the drawdown band, full width like the ones above.
-    ctx.strokeStyle = INK.grid;
-    [0.5, 1].forEach(function (f) {
-      var gy = Math.round(YD(ddLo * f)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(x0, gy); ctx.lineTo(x1, gy); ctx.stroke();
-    });
-    // Where the book stands now, carried across to the edge like the value.
-    var ddNow = dd[dd.length - 1];
-    if (ddNow < 0) {
-      ctx.save();
-      ctx.setLineDash([2, 4]);
-      ctx.strokeStyle = 'rgba(255, 92, 108, 0.45)';
-      var ny = Math.round(YD(ddNow)) + 0.5;
-      // Stopped short of the orb's corner rather than run through it.
-      var orbEl = document.getElementById('cluster-wrap');
-      var stop = orbEl && orbEl.offsetWidth ? w - 8 - orbEl.offsetWidth - 4 : x1;
-      ctx.beginPath(); ctx.moveTo(X(t1), ny); ctx.lineTo(Math.max(X(t1), stop), ny); ctx.stroke();
-      ctx.restore();
+    // The deepest fall, called out once: a fine bracket from the high to the
+    // trough, and its size beside it. The only place the chart names a
+    // drawdown in numbers; everywhere else the veil says it.
+    if (worst < -1e-4) {
+      var wx = Math.round(X(pts[worstAt][0])) + 0.5;
+      var wyTop = Y(highs[worstAt]), wyBot = Y(pts[worstAt][1]);
+      ctx.strokeStyle = 'rgba(255, 92, 108, 0.75)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(wx - 3, wyTop); ctx.lineTo(wx + 3, wyTop);
+      ctx.moveTo(wx, wyTop); ctx.lineTo(wx, wyBot);
+      ctx.moveTo(wx - 3, wyBot); ctx.lineTo(wx + 3, wyBot);
+      ctx.stroke();
+      var label = pct(worst);
+      ctx.font = '600 9.5px ' + getComputedStyle(document.body).fontFamily;
+      var lw = ctx.measureText(label).width + 10;
+      var onLeft = wx + 8 + lw > xe;
+      var lx0 = onLeft ? wx - 8 - lw : wx + 8;
+      var lyc = Math.max(mainTop + 9, Math.min(mainBottom - 9, (wyTop + wyBot) / 2));
+      ctx.fillStyle = 'rgba(9, 10, 13, 0.92)';
+      ctx.strokeStyle = 'rgba(255, 92, 108, 0.55)';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(lx0, lyc - 8, lw, 16, 3); else ctx.rect(lx0, lyc - 8, lw, 16);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#ff8a96';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, lx0 + 5, lyc + 0.5);
     }
-    ctx.beginPath();
-    ctx.moveTo(X(t0), YD(0));
-    pts.forEach(function (p, i) { ctx.lineTo(X(p[0]), YD(dd[i])); });
-    ctx.lineTo(X(t1), YD(0));
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(255, 92, 108, 0.20)';
-    ctx.fill();
-    ctx.beginPath();
-    pts.forEach(function (p, i) {
-      if (i === 0) ctx.moveTo(X(p[0]), YD(dd[i])); else ctx.lineTo(X(p[0]), YD(dd[i]));
-    });
-    ctx.strokeStyle = 'rgba(255, 92, 108, 0.85)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
 
     this._timeAxis(ctx, t0, t1, X, h - BOTTOM_AXIS, x0, xe);
 
@@ -558,7 +574,9 @@
        title: 'From ' + money(base) + ' at the start of the range to ' + money(last)},
       {k: 'High', v: money(Math.max.apply(null, vals)),
        title: 'The highest reading in this range'},
-      {k: 'Max drawdown', v: pct(worst), tone: worst < -0.02 ? 'down' : '',
+      {k: 'Max drawdown', v: pct(worst) + ' <small>now ' +
+         (dd[dd.length - 1] < -1e-6 ? pct(dd[dd.length - 1]) : 'at the high') + '</small>',
+       tone: worst < -0.02 ? 'down' : '',
        title: 'The largest fall from a high inside this range' +
               (worst < 0 ? ', reached ' + fullTime(pts[worstAt][0], this.span) : '')},
       {k: 'Trades', v: String(trades.length) + (trades.length ? ' <small>' + money(realised, true) + ' realised</small>' : ''),
