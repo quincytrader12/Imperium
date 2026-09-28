@@ -156,6 +156,17 @@ SETTINGS_TEMPLATE = """\
 # universe clears Alpaca's $1 minimum order at the default allocation.
 # SECTOR_TREND_ARM_AT_EQUITY=200
 
+# ---------------------------------------------------------------- Global Trend
+# A sleeve that holds bonds, gold, commodities, international stocks and real
+# estate (IEF TLT GLD DBC EFA EEM VNQ) while each is trending up, sized to 10%
+# volatility, decided once a day after the time below. It diversifies away
+# from US stocks, which every other strategy here trades. Real orders in
+# paper and live mode; buys under Alpaca's $1 minimum are skipped and named.
+
+# GLOBAL_TREND_ENABLED=true
+# GLOBAL_TREND_ALLOCATION=0.30
+# GLOBAL_TREND_RUN_TIME_ET=15:45
+
 # ----------------------------------------------------------- passive entries
 # An entry first rests as a limit order at the midpoint between bid and ask.
 # If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
@@ -210,6 +221,9 @@ SETTABLE = frozenset({
     "IMPERIUM_FX_RATE",
     "IMPERIUM_OPERATOR",
     "IMPERIUM_OPERATOR_SPOKEN",
+    "GLOBAL_TREND_ENABLED",
+    "GLOBAL_TREND_ALLOCATION",
+    "GLOBAL_TREND_RUN_TIME_ET",
     "IMPERIUM_PASSIVE_ENTRIES",
     "IMPERIUM_PASSIVE_SECONDS",
 })

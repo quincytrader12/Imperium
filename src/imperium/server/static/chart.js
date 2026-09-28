@@ -29,12 +29,14 @@
     overnight: '#199e70',
     intraday: '#c98500',
     sector: '#d55181',
-    unattributed: '#9085e9'
+    global_trend: '#9085e9',
+    // Not a strategy, so not a hue: neutral ink.
+    unattributed: '#8d939b'
   };
   var STRATEGY_LABEL = {
     intraday: 'Intraday', trend: 'Multi-day trend', overnight: 'Overnight drift',
     cross_section: 'Crypto ranking', sector: 'Sector trend',
-    unattributed: 'Unattributed'
+    global_trend: 'Global trend', unattributed: 'Unattributed'
   };
 
   var INK = {
@@ -680,7 +682,8 @@
     var ctx = fit.ctx, w = fit.w, h = fit.h;
     var d = this.data;
     var series = [];
-    var order = ['trend', 'cross_section', 'overnight', 'intraday', 'sector', 'unattributed'];
+    var order = ['trend', 'cross_section', 'overnight', 'intraday', 'sector',
+                 'global_trend', 'unattributed'];
     var names = Object.keys((d && d.strategies) || {}).sort(function (a, b) {
       var ia = order.indexOf(a), ib = order.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);

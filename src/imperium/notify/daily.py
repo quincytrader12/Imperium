@@ -127,6 +127,7 @@ STRATEGY_LABEL = {
     "overnight": "Overnight drift",
     "cross_section": "Crypto ranking",
     "sector": "Sector trend",
+    "global_trend": "Global trend",
     "unattributed": "Unattributed",
 }
 

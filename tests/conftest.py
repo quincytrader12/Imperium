@@ -18,6 +18,11 @@ def isolated_home(tmp_path, monkeypatch):
     depend on a test remembering to opt in.
     """
     monkeypatch.setenv("IMPERIUM_HOME", str(tmp_path / "home"))
+    # The diversifying sleeves claim part of the account when they are on.
+    # Most tests here are about the engine's own arithmetic, written for an
+    # engine that has the whole account, so the sleeves are off unless a test
+    # turns one on -- the sleeves' own tests do.
+    monkeypatch.setenv("GLOBAL_TREND_ENABLED", "false")
     yield
 
 

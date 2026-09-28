@@ -446,7 +446,7 @@
   var STRATEGY_LABEL = {
     intraday: 'Intraday', trend: 'Multi-day trend', overnight: 'Overnight drift',
     cross_section: 'Crypto ranking', sector: 'Sector trend',
-    unattributed: 'Unattributed'
+    global_trend: 'Global trend', unattributed: 'Unattributed'
   };
 
   function renderStrategies(s) {
@@ -1058,6 +1058,44 @@
   /* Where the money went. A strategy's position size is a fraction of its
    * share rather than of the account, and until this panel existed there was
    * nowhere on screen that said what any share was. */
+  /* The diversifying sleeves. One block each: what it is for, its slice of
+   * the account, what it holds against what it wants, and when it decides. */
+  function renderSleeves(s) {
+    var list = s.sleeves || [];
+    var note = $('sl-note');
+    if (!note) return;
+    var on = list.filter(function (x) { return x.enabled; });
+    note.textContent = on.length ? on.length + ' on · ' + fmtMoney(on.reduce(
+      function (a, x) { return a + (x.sleeve_equity || 0); }, 0)) : 'off';
+    setHTML($('sleeves'), list.map(function (x) {
+      var held = (x.holdings || []).map(function (h) {
+        return '<span class="sl-chip on" title="' + esc((x.reasons || {})[h.symbol] || '') +
+          '">' + esc(h.symbol) + ' <b>' + fmtMoney(h.value) + '</b></span>';
+      });
+      var wanted = Object.keys(x.targets || {}).filter(function (k) {
+        return !(x.holdings || []).some(function (h) { return h.symbol === k; });
+      }).map(function (k) {
+        return '<span class="sl-chip" title="' + esc((x.reasons || {})[k] || '') + '">' +
+          esc(k) + ' ' + Math.round(x.targets[k] * 100) + '%</span>';
+      });
+      var small = Object.keys(x.too_small || {});
+      var status = !x.enabled ? 'off' : x.last_run_day
+        ? 'last decided ' + x.last_run_day : 'decides after ' + x.run_after_et + ' ET';
+      return '<div class="sl-block">' +
+        '<div class="sl-head"><b>' + esc(x.label) + '</b><span class="dimmer">' +
+          Math.round(x.allocation * 100) + '% · ' + fmtMoney(x.sleeve_equity) + '</span></div>' +
+        '<div class="sl-sum dimmer">' + esc(x.summary || '') + '</div>' +
+        '<div class="sl-chips">' + (held.concat(wanted).join('') ||
+          '<span class="dimmer">nothing held yet</span>') + '</div>' +
+        '<div class="sl-foot dimmer">' + esc(status) +
+          (x.note ? ' · ' + esc(x.note) : '') +
+          (small.length ? ' · ' + small.length + ' below the $1 minimum (every target clears it from ~' +
+            fmtMoney(x.viable_from) + ')' : '') +
+          (x.last_error ? ' · <span class="warn">' + esc(x.last_error) + '</span>' : '') +
+        '</div></div>';
+    }).join('') || '<div class="dimmer" style="padding:6px 9px">no sleeves</div>');
+  }
+
   function renderCapital(s) {
     var c = s.capital || {};
     var note = $('cap-note');
@@ -1724,6 +1762,7 @@
     renderNews(s);
     renderCapital(s);
     renderSector(s);
+    renderSleeves(s);
     renderOvernight(s);
     renderCosts(s);
     renderStats(s);

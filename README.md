@@ -744,6 +744,38 @@ A change of verdict is announced once, on screen and on Telegram. The brief
 lists every verdict, and a fading or reversed strategy's name turns amber or
 red in the Strategies panel.
 
+### Diversifiers: sleeves that trade what the engine does not
+
+Every engine strategy trades US stocks or crypto, and most are some form of
+momentum in them: they win together and lose together. The sleeves
+(`execution/sleeves.py`) trade other asset classes and other horizons, each on
+its own slice of the account. Each sleeve:
+
+* decides once a day from daily history, with a pure function;
+* sends real orders through the same broker as everything else, named for the
+  sleeve, so the mode switch, GO LIVE, resting entries, the journal,
+  attribution and the evidence allocator all apply;
+* owns its symbols, so no other path trades them: the engine does not enter
+  them, the give-back ratchet does not exit them, and the close does not
+  flatten them;
+* skips any buy under Alpaca's $1 minimum and names it, along with the balance
+  at which every target clears.
+
+**Global Trend** (`strategy/global_trend.py`, 30% of the account, about $22 at
+$73) holds seven asset classes while each is trending up:
+
+* treasuries (IEF, TLT);
+* gold (GLD);
+* commodities (DBC);
+* international stocks (EFA, EEM);
+* real estate (VNQ).
+
+The trend is measured over 1, 3, 6 and 12 months. Positions are weighted by
+inverse volatility, and the whole sleeve is scaled to 10% volatility using the
+assets' measured covariance. There is no leverage, and no asset takes more
+than 40% of the sleeve. It decides after 15:45 ET. Set
+`GLOBAL_TREND_ENABLED=false` to turn it off.
+
 ### Entries rest at the mid, and cross only if they have to
 
 An entry is first placed as a limit order at the midpoint between bid and ask

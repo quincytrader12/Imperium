@@ -1149,3 +1149,29 @@ header .controls button, header .controls select { padding-left: 9px; padding-ri
   gap: 1px 7px; font-size: 7.5px; letter-spacing: .6px; opacity: .8;
 }
 .orb-caption .cluster-legend i { width: 5px; height: 5px; }
+
+/* ---------- diversifier sleeves ---------- */
+.sl-block { padding: 6px 9px 7px; border-bottom: 1px solid #14161a; }
+.sl-block:last-child { border-bottom: 0; }
+.sl-head { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.sl-head b { color: var(--text); font-weight: 600; letter-spacing: .3px; }
+.sl-sum { font-size: 9.5px; line-height: 1.45; margin: 2px 0 5px; }
+.sl-chips { display: flex; flex-wrap: wrap; gap: 3px 4px; }
+.sl-chip { font-size: 9.5px; padding: 1px 6px; border: 1px solid #2a2e35;
+           border-radius: 2px; color: var(--dim); }
+.sl-chip.on { border-color: rgba(144, 133, 233, .55); color: var(--text); }
+.sl-chip b { font-weight: 500; color: var(--dim); }
+.sl-foot { font-size: 9px; margin-top: 5px; line-height: 1.45; }
+
+/* The left rail scrolls. Its panels outgrew the screen -- News sentiment and
+   the diversifiers sat below the fold with no way to reach them -- and a
+   panel nobody can scroll to is a panel that does not exist. The watchlist
+   keeps its minimum height at the top. */
+#left-panel { overflow-y: auto; overflow-x: hidden; scrollbar-width: thin;
+              scrollbar-color: #24272d transparent; }
+#left-panel::-webkit-scrollbar { width: 6px; }
+#left-panel::-webkit-scrollbar-thumb { background: #24272d; border-radius: 3px; }
+#left-panel > .panel { flex-shrink: 0; }
+/* The watchlist keeps a fixed share of the rail and scrolls inside itself,
+   so the rail's own scroll is for the panels, not for thirty ticker rows. */
+#left-panel > #wl-panel { flex: 0 0 auto; height: clamp(220px, 34vh, 400px); }

@@ -67,6 +67,7 @@ from imperium.execution import market_regime as market_regime_mod
 from imperium.execution import research as research_mod
 from imperium.execution import journal as journal_mod
 from imperium.execution import passive as passive_mod
+from imperium.execution import sleeves as sleeves_mod
 from imperium.execution.passive import PASSIVE
 from imperium.execution import protect
 from imperium.venues import assets as assets_mod
@@ -271,6 +272,16 @@ class TradingSession:
         self.sector = SectorRunner(config=sector_cfg.from_environment(),
                                    ledger=SleeveLedger.load())
         self._sector_task: asyncio.Task[None] | None = None
+        #: The diversifying sleeves: other asset classes, other horizons.
+        #: Each trades its own universe through the broker under its own
+        #: name -- see imperium.execution.sleeves.
+        self.sleeves = sleeves_mod.build_all()
+        saved = config.read_state().get(sleeves_mod.STATE_KEY)
+        for sleeve in self.sleeves:
+            sleeve.restore((saved or {}).get(sleeve.name)
+                           if isinstance(saved, dict) else None)
+        self._sleeve_tasks: dict[str, asyncio.Task[None]] = {}
+        self._reserved_said: dict[str, float] = {}
         #: A second currency beside the dollar balance. Display
         #: only -- every decision here stays in dollars.
         self.fx = FxDesk(
@@ -1216,9 +1227,12 @@ class TradingSession:
         failed to flatten. Both are positions with nothing managing them, and
         both are the operator's call. Silence would be the one wrong answer.
         """
+        reserved = self.reserved_symbols()
         for symbol, position in self.broker.positions.items():
             if position.is_flat or symbol in self.overnight_holdings:
                 continue
+            if symbol in reserved:
+                continue                   # managed, by its sleeve
             if classify_symbol(symbol) is not AssetClass.US_EQUITY:
                 continue
             if symbol in self._unmanaged_reported:
@@ -1331,6 +1345,127 @@ class TradingSession:
         # would put a handful of permanent orbs in a field whose whole meaning
         # is turnover. The sleeve reports in the left rail; the cluster stays
         # the scanner's.
+
+    # -- sleeves ------------------------------------------------------------
+
+    def _sleeve_held(self, sleeve: "sleeves_mod.Sleeve") -> dict[str, float]:
+        out = {}
+        for symbol in sleeve.universe:
+            position = self.broker.positions.get(symbol)
+            if position is not None and not position.is_flat:
+                out[symbol] = float(position.quantity)
+        return out
+
+    def _sleeve_price(self, symbol: str, fallback: float = 0.0) -> float:
+        q = self.feed.quote(symbol)
+        if q.last and q.last > 0 and q.age < 120:
+            return float(q.last)
+        return float(fallback or q.last or 0.0)
+
+    def kick_sleeves(self) -> None:
+        """Start each due sleeve's daily decision in the background: it reads
+        a year and more of history, which has no business on the loop."""
+        if self.client is None:
+            return
+        now = to_eastern(dt.datetime.now(tz=dt.timezone.utc))
+        for sleeve in self.sleeves:
+            if not sleeve.due(now, self.market_clock.is_open):
+                continue
+            task = self._sleeve_tasks.get(sleeve.name)
+            if task is not None and not task.done():
+                continue
+            self._sleeve_tasks[sleeve.name] = asyncio.create_task(
+                self._plan_sleeve(sleeve, now.date().isoformat()))
+
+    async def _plan_sleeve(self, sleeve: "sleeves_mod.Sleeve", day: str) -> None:
+        """Fetch, decide, and leave the orders for the loop to send. Never
+        raises: a sleeve that cannot read its history does nothing today and
+        says so, and tries again on the next pass."""
+        start = (dt.datetime.now(tz=dt.timezone.utc)
+                 - dt.timedelta(days=sleeve.history_days))
+        try:
+            rows = await self.client.bars(list(sleeve.universe), timeframe="1Day",
+                                          limit=10_000, start=start,
+                                          adjustment="all")
+            closes = sleeves_mod.closes_from_bars(rows)
+            prices = {s: self._sleeve_price(s, float(v[-1]))
+                      for s, v in closes.items() if v.size}
+            orders = sleeve.plan(
+                closes, day, prices=prices, held=self._sleeve_held(sleeve),
+                account_equity=self.equity(),
+                multiplier=self.capital_weights.multiplier(sleeve.name))
+        except Exception as exc:                            # noqa: BLE001
+            sleeve.last_error = f"{type(exc).__name__}: {exc}"
+            self.telemetry.event(Level.WARN, "sleeve",
+                                 f"the {sleeve.label} sleeve could not decide "
+                                 f"today", detail=sleeve.last_error)
+            return
+        sleeve.last_error = ""
+        sleeve.pending, sleeve.pending_day = orders, day
+        sleeve.pending_prices = prices
+
+    async def _execute_sleeves(self) -> None:
+        """Send what the sleeves decided. Sells first, as planned."""
+        for sleeve in self.sleeves:
+            if sleeve.pending is None:
+                continue
+            orders, day = sleeve.pending, sleeve.pending_day
+            sleeve.pending = None
+            prices = sleeve.pending_prices
+            sent = []
+            for order in orders:
+                price = self._sleeve_price(order.symbol, prices.get(order.symbol, 0.0))
+                if price <= 0:
+                    continue
+                try:
+                    fill = await self.broker.apply_target(
+                        order.symbol, order.account_weight, price, self.equity(),
+                        strategy=sleeve.name)
+                except (VenueError, ModeSwitchRefused) as exc:
+                    message = getattr(exc, "message", str(exc))
+                    self.telemetry.event(Level.ERROR, "sleeve",
+                                         f"{sleeve.label}: {order.symbol} "
+                                         f"{order.side} not sent: {message}")
+                    continue
+                sleeve.orders_sent += 1
+                sent.append(f"{order.side.upper()} {order.symbol} "
+                            f"${order.notional:,.2f}")
+                if fill is not None:
+                    self.telemetry.pulse(order.symbol, "order",
+                                         f"{sleeve.label}: {order.side}", 1.0)
+            sleeve.last_run_day = day
+            sleeve.pending_day = ""
+            sleeve.runs += 1
+            self._save_sleeves()
+            summary = (f"{sleeve.label}: " + ("; ".join(sent) if sent
+                       else "no orders") + f" — {sleeve.last_note}")
+            if sleeve.last_too_small:
+                summary += (f" ({len(sleeve.last_too_small)} below the $1 "
+                            f"minimum)")
+            self.telemetry.event(Level.INFO, "sleeve", summary)
+            if sent:
+                await self.notify(f"🧭 {summary}")
+
+    def _save_sleeves(self) -> None:
+        try:
+            config.update_state(**{sleeves_mod.STATE_KEY: {
+                s.name: s.as_dict() for s in self.sleeves}})
+        except OSError as exc:
+            log.warning("could not save the sleeves' state: %s", exc)
+
+    def _sleeves_block(self) -> list[dict[str, Any]]:
+        equity = self.equity()
+        prices = {}
+        for sleeve in self.sleeves:
+            for symbol in sleeve.universe:
+                q = self.feed.quote(symbol).last
+                if q:
+                    prices[symbol] = float(q)
+                else:
+                    position = self.broker.positions.get(symbol)
+                    if position is not None:
+                        prices[symbol] = float(position.avg_price)
+        return [s.panel(equity, self._sleeve_held(s), prices) for s in self.sleeves]
 
     def kick_fx(self) -> None:
         """Refresh the display currency in the background, never on the loop."""
@@ -1588,9 +1723,12 @@ class TradingSession:
         are considered: a stale intraday verdict is not an answer to the
         question being asked, and skipping is the safe direction.
         """
+        reserved = self.reserved_symbols()
         for symbol, position in list(self.broker.positions.items()):
             if position.is_flat or symbol in self.overnight_holdings:
                 continue
+            if symbol in reserved:
+                continue                   # held for days by design
             if classify_symbol(symbol) is not AssetClass.US_EQUITY:
                 continue
             engine = self.engines.get(symbol)
@@ -1803,9 +1941,14 @@ class TradingSession:
         # Runs while the book is halted too. A halt is "no new exposure,
         # exits still pass", and closing a position that has given back its
         # gain is an exit.
+        reserved = self.reserved_symbols()
         for symbol, position in list(self.broker.positions.items()):
             if position is None or position.is_flat:
                 self._peaks.pop(symbol, None)
+                continue
+            if symbol in reserved:
+                # A sleeve's position is managed by the sleeve's own rule; a
+                # give-back exit here would be a second owner selling it.
                 continue
             entry = float(position.avg_price)
             price = self.feed.quote(symbol).last or 0.0
@@ -2001,7 +2144,15 @@ class TradingSession:
         admitted, retired = self.allocator.rebalance_admissions()
         for symbol in admitted:
             self.telemetry.event(Level.INFO, "universe", f"{symbol} admitted")
+        await self._retire(retired)
+
+    async def _retire(self, retired: list[str]) -> None:
+        """Flatten what the scanner has dropped -- except a sleeve's symbols,
+        which the scanner never owned."""
+        reserved = self.reserved_symbols()
         for symbol in retired:
+            if symbol in reserved:
+                continue
             # Retiring means flattening. A stopped engine still holding a
             # position is a position with nothing managing its stop.
             self.telemetry.event(Level.WARN, "universe",
@@ -2066,9 +2217,24 @@ class TradingSession:
         # self-armed sleeve trade its 20% while the engine went on sizing
         # against 100% -- the same hundred-and-twenty-percent double count the
         # capital divider was written to end, arriving through a new door.
-        return [Claim("sector_trend", self.sector.config.allocation,
-                      enabled=self.sector.enabled,
-                      note="Sector Trend sleeve")]
+        claims = [Claim("sector_trend", self.sector.config.allocation,
+                        enabled=self.sector.enabled,
+                        note="Sector Trend sleeve")]
+        for sleeve in self.sleeves:
+            claims.append(Claim(sleeve.name, sleeve.allocation,
+                                enabled=sleeve.enabled, note=sleeve.label))
+        return claims
+
+    def reserved_symbols(self) -> dict[str, str]:
+        """Symbols a sleeve owns, and the sleeve. No other path may trade them:
+        one owner per symbol is what lets a sleeve size against the broker's
+        position as its own."""
+        out: dict[str, str] = {}
+        for sleeve in self.sleeves:
+            if sleeve.enabled:
+                for symbol in sleeve.universe:
+                    out.setdefault(symbol, sleeve.label)
+        return out
 
     def _set_daily_loss_reference(self, equity: float) -> None:
         """Record the day's starting point *and* the share it is measured in.
@@ -2307,6 +2473,15 @@ class TradingSession:
     async def _act_on(self, decision: Decision) -> None:
         if decision.verdict is not Verdict.TRADING:
             return
+        owner = self.reserved_symbols().get(decision.symbol)
+        if owner is not None:
+            # Said now and then, not every evaluation: the engine will keep
+            # finding this symbol interesting, and that is not news.
+            if time.time() - self._reserved_said.get(decision.symbol, 0) > 3600:
+                self._reserved_said[decision.symbol] = time.time()
+                self.telemetry.pulse(decision.symbol, "refused",
+                                     f"traded by the {owner} sleeve", 0.3)
+            return
         if decision.hold:
             # Leave it exactly as it is. Re-targeting a carried position to the
             # weight it already holds looks like a no-op and is not: equity
@@ -2454,6 +2629,9 @@ class TradingSession:
         # window closes. Before attribution, so their fills are booked this
         # tick rather than the next.
         await self._service_resting()
+        # Sleeve decisions taken in the background land here as orders, sent
+        # on the loop like every other order.
+        await self._execute_sleeves()
         # After the reconcile, so the book it is checked against is the one
         # the venue agrees with.
         self._attribute()
@@ -3070,6 +3248,7 @@ class TradingSession:
                     # latency must never sit on this loop.
                     self.kick_news()
                     self.kick_sector_sleeve()
+                    self.kick_sleeves()
                     self.kick_fx()
                     last_universe = time.time()
                 # Walk the ranking: retire what has been answered, bring in
@@ -3482,6 +3661,7 @@ class TradingSession:
             "news": self.newsdesk.panel(),
             # The Sector Trend sleeve, which keeps its own book.
             "sector": self.sector.panel(self.arming_equity()),
+            "sleeves": self._sleeves_block(),
             # How the one account is divided between them.
             "capital": self.capital.as_dict(),
             # A second currency for the balance. Never used for
