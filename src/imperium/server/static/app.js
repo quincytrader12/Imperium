@@ -446,7 +446,8 @@
   var STRATEGY_LABEL = {
     intraday: 'Intraday', trend: 'Multi-day trend', overnight: 'Overnight drift',
     cross_section: 'Crypto ranking', sector: 'Sector trend',
-    global_trend: 'Global trend', unattributed: 'Unattributed'
+    global_trend: 'Global trend', mean_reversion: 'Mean reversion',
+    unattributed: 'Unattributed'
   };
 
   function renderStrategies(s) {

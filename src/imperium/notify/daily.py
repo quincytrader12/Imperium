@@ -128,6 +128,7 @@ STRATEGY_LABEL = {
     "cross_section": "Crypto ranking",
     "sector": "Sector trend",
     "global_trend": "Global trend",
+    "mean_reversion": "Mean reversion",
     "unattributed": "Unattributed",
 }
 

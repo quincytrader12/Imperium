@@ -1356,11 +1356,14 @@ class TradingSession:
                 out[symbol] = float(position.quantity)
         return out
 
-    def _sleeve_price(self, symbol: str, fallback: float = 0.0) -> float:
+    def _sleeve_price_is_fresh(self, symbol: str) -> bool:
         q = self.feed.quote(symbol)
-        if q.last and q.last > 0 and q.age < 120:
-            return float(q.last)
-        return float(fallback or q.last or 0.0)
+        return bool(q.last and q.last > 0 and q.age < 120)
+
+    def _sleeve_price(self, symbol: str, fallback: float = 0.0) -> float:
+        if self._sleeve_price_is_fresh(symbol):
+            return float(self.feed.quote(symbol).last)
+        return float(fallback or self.feed.quote(symbol).last or 0.0)
 
     def kick_sleeves(self) -> None:
         """Start each due sleeve's daily decision in the background: it reads
@@ -1387,7 +1390,9 @@ class TradingSession:
             rows = await self.client.bars(list(sleeve.universe), timeframe="1Day",
                                           limit=10_000, start=start,
                                           adjustment="all")
-            closes = sleeves_mod.closes_from_bars(rows)
+            live = {s: self._sleeve_price(s) for s in sleeve.universe
+                    if self._sleeve_price_is_fresh(s)}
+            closes = sleeves_mod.closes_from_bars(rows, day=day, live=live)
             prices = {s: self._sleeve_price(s, float(v[-1]))
                       for s, v in closes.items() if v.size}
             orders = sleeve.plan(

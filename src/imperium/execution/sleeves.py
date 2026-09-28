@@ -87,7 +87,9 @@ class Sleeve:
     label: str
     universe: tuple[str, ...]
     allocation: float
-    decide: Callable[[dict[str, np.ndarray], dict, str], Targets]
+    #: (closes, memory, day, held) -> Targets. ``held`` is the set of the
+    #: sleeve's symbols it holds now; ``memory`` is its own, persisted.
+    decide: Callable[[dict[str, np.ndarray], dict, str, set], Targets]
     enabled: bool = True
     #: Eastern time after which the day's decision is taken, on a trading
     #: day, while the market is open.
@@ -135,7 +137,8 @@ class Sleeve:
              account_equity: float, multiplier: float = 1.0
              ) -> list[SleeveOrder]:
         """Decide, and turn the decision into orders against what is held."""
-        targets = self.decide(closes, self.memory, day)
+        owned = {s for s, q in held.items() if float(q or 0.0) > 0}
+        targets = self.decide(closes, self.memory, day, owned)
         self.last_targets = dict(targets.weights)
         self.last_reasons = dict(targets.reasons)
         self.last_note = targets.note
@@ -260,27 +263,70 @@ def _share(name: str, default: float) -> float:
     return min(0.6, max(0.0, value)) if math.isfinite(value) else default
 
 
-def closes_from_bars(rows: dict[str, list[dict]] | None) -> dict[str, np.ndarray]:
-    """Daily closes per symbol from the venue's bar rows, oldest first."""
+def closes_from_bars(rows: dict[str, list[dict]] | None, *, day: str = "",
+                     live: dict[str, float] | None = None
+                     ) -> dict[str, np.ndarray]:
+    """Daily closes per symbol from the venue's bar rows, oldest first.
+
+    With ``day`` and ``live``, today's close is the live price: it replaces
+    today's bar while that bar is still forming, and is appended when the
+    venue has no bar for today yet. A decision taken at a quarter to four on
+    yesterday's close is a decision about yesterday -- for a two-day RSI,
+    half the signal would be a day stale.
+    """
     out: dict[str, np.ndarray] = {}
     for symbol, bars in (rows or {}).items():
-        values = [float(b["c"]) for b in bars or []
-                  if isinstance(b, dict) and isinstance(b.get("c"), (int, float))
-                  and b["c"] > 0]
+        values: list[float] = []
+        last_day = ""
+        for b in bars or []:
+            if (isinstance(b, dict) and isinstance(b.get("c"), (int, float))
+                    and b["c"] > 0):
+                values.append(float(b["c"]))
+                last_day = str(b.get("t") or "")[:10]
+        price = float((live or {}).get(symbol) or 0.0)
+        if values and day and last_day and price > 0 and math.isfinite(price):
+            if last_day == day:
+                values[-1] = price
+            elif last_day < day:
+                values.append(price)
         if values:
             out[symbol] = np.asarray(values, dtype=float)
     return out
 
 
+def trading_days_between(start: str, end: str) -> int:
+    """Weekdays after ``start`` up to and including ``end``; 0 on anything
+    unparseable. Holidays count -- one extra day on a time stop, a few times
+    a year, is the price of not needing an exchange calendar."""
+    try:
+        first = dt.date.fromisoformat(start) + dt.timedelta(days=1)
+        last = dt.date.fromisoformat(end) + dt.timedelta(days=1)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(np.busday_count(first, last)))
+
+
 def build_all() -> list[Sleeve]:
     """Every sleeve this build knows, configured from the environment."""
-    from imperium.strategy import global_trend
+    from imperium.strategy import global_trend, mean_reversion
 
-    def decide_global(closes, memory, day):
+    def decide_global(closes, memory, day, held):
         t = global_trend.targets(closes)
         return Targets(weights=t.weights, reasons=t.reasons, note=t.note or (
             f"holding {len(t.weights)} of {len(global_trend.UNIVERSE)} asset "
             f"classes at {t.volatility:.0%} volatility"))
+
+    def decide_reversion(closes, memory, day, held):
+        # Days held are counted from the entry date, not from runs, so a day
+        # the terminal was closed still counts toward the time stop.
+        entered = memory.get("entered")
+        entered = dict(entered) if isinstance(entered, dict) else {}
+        days = {s: trading_days_between(str(entered.get(s) or day), day)
+                for s in held}
+        t = mean_reversion.targets(closes, held, days)
+        memory["entered"] = {s: str(entered.get(s) or day) if s in held else day
+                             for s in t.weights}
+        return Targets(weights=t.weights, reasons=t.reasons, note=t.note)
 
     return [
         Sleeve(
@@ -292,5 +338,15 @@ def build_all() -> list[Sleeve]:
             decide=decide_global,
             summary=("Bonds, gold, commodities, international and real estate, "
                      "held while trending up, sized to 10% volatility."),
+        ),
+        Sleeve(
+            name="mean_reversion", label="Mean reversion",
+            universe=mean_reversion.UNIVERSE,
+            allocation=_share("MEAN_REVERSION_ALLOCATION", 0.20),
+            enabled=_flag("MEAN_REVERSION_ENABLED", True),
+            run_after_et=os.environ.get("MEAN_REVERSION_RUN_TIME_ET", "15:45"),
+            decide=decide_reversion,
+            summary=("Index ETFs bought on a sharp two-day dip inside an uptrend, "
+                     "sold on the bounce or after ten trading days."),
         ),
     ]

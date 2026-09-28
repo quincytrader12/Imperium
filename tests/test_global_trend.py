@@ -112,7 +112,7 @@ def test_nothing_rising_means_cash_and_says_so():
 def _sleeve(allocation=0.30, weights=None, reasons=None):
     weights = weights or {"IEF": 0.4, "GLD": 0.2, "EEM": 0.02}
 
-    def decide(closes, memory, day):
+    def decide(closes, memory, day, held):
         return sl.Targets(weights=dict(weights), reasons=reasons or {})
     return sl.Sleeve(name="global_trend", label="Global trend",
                      universe=("IEF", "GLD", "EEM", "TLT"), allocation=allocation,

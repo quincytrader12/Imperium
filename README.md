@@ -776,6 +776,24 @@ assets' measured covariance. There is no leverage, and no asset takes more
 than 40% of the sleeve. It decides after 15:45 ET. Set
 `GLOBAL_TREND_ENABLED=false` to turn it off.
 
+**Mean Reversion** (`strategy/mean_reversion.py`, 20% of the account, about
+$14.60 at $73, so $7.30 a position) is the opposite bet: it buys a sharp dip and
+sells the bounce, so it earns in the choppy markets where the trend strategies
+bleed. It trades SPY, QQQ, IWM and DIA:
+
+* **entry:** a two-day RSI under 10, only while the close is above its 200-day
+  average;
+* **exit:** the first close above the 5-day average, or after 10 trading days,
+  whichever comes first. The time stop counts from the entry date, so days the
+  terminal was closed still count;
+* **size:** at most two at once, half the sleeve each, most oversold first.
+
+It decides after 15:45 ET on the live price, since a 3:45 decision on
+yesterday's close would be a day late. It is in cash most of the time. Set
+`MEAN_REVERSION_ENABLED=false` to turn it off.
+
+With both sleeves on, the engine trades the remaining 50%.
+
 ### Entries rest at the mid, and cross only if they have to
 
 An entry is first placed as a limit order at the midpoint between bid and ask

@@ -23,6 +23,7 @@ def isolated_home(tmp_path, monkeypatch):
     # engine that has the whole account, so the sleeves are off unless a test
     # turns one on -- the sleeves' own tests do.
     monkeypatch.setenv("GLOBAL_TREND_ENABLED", "false")
+    monkeypatch.setenv("MEAN_REVERSION_ENABLED", "false")
     yield
 
 

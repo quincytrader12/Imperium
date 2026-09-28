@@ -167,6 +167,17 @@ SETTINGS_TEMPLATE = """\
 # GLOBAL_TREND_ALLOCATION=0.30
 # GLOBAL_TREND_RUN_TIME_ET=15:45
 
+# ------------------------------------------------------------ mean reversion
+# A sleeve that buys an index ETF (SPY QQQ IWM DIA) after two sharp down days
+# -- a two-day RSI under 10 -- but only while it is above its 200-day average,
+# and sells on the first close above its 5-day average or after ten trading
+# days. At most two at once. In cash most of the time; it earns in the choppy
+# markets where the trend strategies bleed.
+
+# MEAN_REVERSION_ENABLED=true
+# MEAN_REVERSION_ALLOCATION=0.20
+# MEAN_REVERSION_RUN_TIME_ET=15:45
+
 # ----------------------------------------------------------- passive entries
 # An entry first rests as a limit order at the midpoint between bid and ask.
 # If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
@@ -224,6 +235,9 @@ SETTABLE = frozenset({
     "GLOBAL_TREND_ENABLED",
     "GLOBAL_TREND_ALLOCATION",
     "GLOBAL_TREND_RUN_TIME_ET",
+    "MEAN_REVERSION_ENABLED",
+    "MEAN_REVERSION_ALLOCATION",
+    "MEAN_REVERSION_RUN_TIME_ET",
     "IMPERIUM_PASSIVE_ENTRIES",
     "IMPERIUM_PASSIVE_SECONDS",
 })
