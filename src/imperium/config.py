@@ -188,6 +188,14 @@ SETTINGS_TEMPLATE = """\
 # TURN_OF_MONTH_ALLOCATION=0.15
 # TURN_OF_MONTH_RUN_TIME_ET=15:45
 
+# ------------------------------------------------ overnight stock selection
+# The overnight strategy carries only stocks whose own last year of overnight
+# returns ranks at or above this percentile among the ones it measures (Lou,
+# Polk & Skouras: a stock's overnight tendency persists for years). 0.5 is
+# the top half; 0 turns the selection off.
+
+# IMPERIUM_OVERNIGHT_MIN_RANK=0.5
+
 # ----------------------------------------------------------- passive entries
 # An entry first rests as a limit order at the midpoint between bid and ask.
 # If it has not filled after IMPERIUM_PASSIVE_SECONDS, whatever is left is
@@ -251,6 +259,7 @@ SETTABLE = frozenset({
     "TURN_OF_MONTH_ENABLED",
     "TURN_OF_MONTH_ALLOCATION",
     "TURN_OF_MONTH_RUN_TIME_ET",
+    "IMPERIUM_OVERNIGHT_MIN_RANK",
     "IMPERIUM_PASSIVE_ENTRIES",
     "IMPERIUM_PASSIVE_SECONDS",
 })

@@ -108,6 +108,18 @@ STALE_AFTER_SECONDS = 20.0
 #: a single symbol's history cannot resolve it at all.
 OVERNIGHT_HISTORY_DAYS = 400
 
+
+def _overnight_min_rank() -> float:
+    """The percentile of its own overnight record a stock must reach to be
+    carried overnight (IMPERIUM_OVERNIGHT_MIN_RANK, 0.5 by default; 0 turns
+    the selection off)."""
+    try:
+        value = float(os.environ.get("IMPERIUM_OVERNIGHT_MIN_RANK",
+                                     overnight_mod.MIN_RANK))
+    except ValueError:
+        return overnight_mod.MIN_RANK
+    return min(0.9, max(0.0, value)) if math.isfinite(value) else overnight_mod.MIN_RANK
+
 #: Calendar days of benchmark history. Longer than the universe's: the market
 #: state needs a 200-day average and a year of volatility behind it before
 #: its first reading, and the record it files returns under starts after that.
@@ -366,6 +378,7 @@ class TradingSession:
         #: at once. Held on the session rather than per engine because it is one
         #: measurement of one market, and every engine reads the same one.
         self.pooled_drift: PooledDrift | None = None
+        self.overnight_ranking: overnight_mod.Ranking | None = None
         #: The market-wide trend premium, and the positions carried on it.
         self.pooled_trend: PooledTrend | None = None
         self.trend_note: str = "not yet measured"
@@ -507,6 +520,7 @@ class TradingSession:
             # time it is -- and would then refuse the overnight trade with a
             # reason that describes the wiring rather than the market.
             e.pooled_drift = self.pooled_drift
+            e.overnight_ranking = self.overnight_ranking
             e.pooled_trend = self.pooled_trend
             e.session_phase = self.session_phase
             e.capital = self.capital_weights
@@ -963,6 +977,7 @@ class TradingSession:
             self.overnight_note = ("nothing in the universe has a daily series "
                                    "to measure")
             self.pooled_drift = None
+            self.overnight_ranking = None
             self.pooled_trend = None
             return
 
@@ -1076,6 +1091,8 @@ class TradingSession:
 
         pooled = overnight_mod.pool(splits) if splits else None
         self.pooled_drift = pooled
+        self.overnight_ranking = (overnight_mod.rank(splits, min_rank=_overnight_min_rank())
+                                  if splits and _overnight_min_rank() > 0 else None)
         pooled_trend = trend_mod.pool(scored) if scored else None
         self.pooled_trend = pooled_trend
         self.trend_note = (pooled_trend.describe() if pooled_trend
@@ -1085,6 +1102,7 @@ class TradingSession:
         # run against no prior and refuse everything for the wrong reason.
         for engine in self.engines.values():
             engine.pooled_drift = pooled
+            engine.overnight_ranking = self.overnight_ranking
             engine.pooled_trend = pooled_trend
 
         # The crypto book is ranked against itself, which is a different
@@ -1102,6 +1120,8 @@ class TradingSession:
                        "bars for the equities in the universe.")
         else:
             self.overnight_note = pooled.describe()
+            if self.overnight_ranking is not None:
+                self.overnight_note += "; " + self.overnight_ranking.describe()
             # Said in words, not in statistics. An operator reading this at
             # seven in the morning needs to know what the program will do, and
             # a level that does not make an ordinary measurement look like a
@@ -3989,6 +4009,9 @@ class TradingSession:
             "vol_bps": pooled.vol_bps if pooled else 0.0,
             "candidates": len(candidates),
             "eligible": len(eligible),
+            "ranking": (self.overnight_ranking.describe()
+                        if self.overnight_ranking is not None
+                        else "selection by own record off"),
             "holdings": held,
             "entry_order": MARKET_ON_CLOSE,
             "exit_order": MARKET_ON_OPEN,

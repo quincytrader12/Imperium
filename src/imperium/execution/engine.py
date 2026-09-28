@@ -262,6 +262,9 @@ class SymbolEngine:
         #: The market-wide overnight estimate, set by the session. A symbol's
         #: own history cannot resolve this effect alone.
         self.pooled_drift: PooledDrift | None = None
+        #: Every symbol's own overnight record ranked against its peers, set
+        #: by the session; None carries without the ranking.
+        self.overnight_ranking: overnight_mod.Ranking | None = None
         self.session_phase: SessionPhase = SessionPhase.CLOSED
         #: The market-wide trend premium, estimated across the universe. Held
         #: here rather than measured per symbol for the same reason as the
@@ -1072,7 +1075,8 @@ class SymbolEngine:
             return d
 
         signal: OvernightSignal = overnight_mod.evaluate(
-            self.daily_bars, pooled=self.pooled_drift)
+            self.daily_bars, pooled=self.pooled_drift,
+            ranking=self.overnight_ranking, symbol=self.symbol)
         d.overnight_bps = signal.shrunk_bps or signal.mean_overnight_bps
         d.overnight_nights = signal.nights
         d.regime = "overnight_drift"

@@ -253,6 +253,82 @@ def pool(splits: dict[str, SessionSplit]) -> PooledDrift:
     )
 
 
+#: Nights of a symbol's own history its overnight record is ranked on: a year,
+#: the window Lou, Polk and Skouras sort on.
+RANK_NIGHTS = 252
+
+#: Own history before a symbol can be ranked at all: about six months. Less
+#: than this and the record is mostly the few gaps it happens to contain.
+MIN_RANK_NIGHTS = 120
+
+#: Ranked peers before the ranking is used. A percentile among four stocks
+#: is a coin toss dressed as a statistic.
+MIN_RANK_PEERS = 10
+
+#: The percentile a symbol's own record must reach to be carried overnight.
+MIN_RANK = 0.5
+
+
+@dataclass(frozen=True)
+class Ranking:
+    """Each symbol's own overnight record, ranked against its peers.
+
+    The pooled estimate says whether there is an overnight premium at all; this
+    says *where* it is. Lou, Polk and Skouras (JFE 2019) found that a firm's
+    overnight returns are persistent for years: stocks whose returns have come
+    overnight keep earning overnight, because the clienteles that trade at the
+    open and the close are persistent too. A single stock's mean cannot resolve
+    3-5bp -- that is what the pooling is for -- but its *rank* among its peers
+    over a year is a far steadier quantity than its level, and it is the rank
+    their result is about.
+
+    So the rank selects and the pooled estimate sizes: only the upper part of
+    the cross-section is carried overnight, which on an account this size also
+    means fewer nights paying a round trip for the weakest part of the edge.
+    """
+
+    percentiles: dict[str, float] = field(default_factory=dict)
+    means_bps: dict[str, float] = field(default_factory=dict)
+    min_rank: float = MIN_RANK
+
+    @property
+    def peers(self) -> int:
+        return len(self.percentiles)
+
+    @property
+    def active(self) -> bool:
+        return self.peers >= MIN_RANK_PEERS and self.min_rank > 0
+
+    def describe(self) -> str:
+        if not self.active:
+            return (f"{self.peers} of {MIN_RANK_PEERS} symbols with a ranked "
+                    f"overnight record; carrying without the ranking")
+        return (f"carrying only the top {1 - self.min_rank:.0%} of {self.peers} "
+                f"symbols by their own year of overnight returns")
+
+
+def rank(splits: dict[str, SessionSplit], *, min_rank: float = MIN_RANK) -> Ranking:
+    """Rank every symbol with enough history by its own mean overnight return
+    over the last :data:`RANK_NIGHTS` nights; 0 is the weakest, 1 the
+    strongest, ties sharing the average of their places."""
+    means = {s: float(np.mean(split.overnight[-RANK_NIGHTS:])) * 10_000
+             for s, split in splits.items()
+             if split.overnight.size >= MIN_RANK_NIGHTS}
+    if not means:
+        return Ranking(min_rank=min_rank)
+    names = sorted(means)
+    values = np.array([means[s] for s in names])
+    order = values.argsort(kind="stable")
+    places = np.empty(len(names), dtype=float)
+    places[order] = np.arange(len(names), dtype=float)
+    for value in np.unique(values):                    # ties share a place
+        tied = values == value
+        places[tied] = places[tied].mean()
+    span = max(1, len(names) - 1)
+    return Ranking(percentiles={s: float(places[i] / span) for i, s in enumerate(names)},
+                   means_bps=means, min_rank=min_rank)
+
+
 def _shrink(symbol_mean: float, symbol_se: float,
             prior_mean: float, prior_se: float) -> float:
     """Combine a noisy symbol estimate with the market prior by precision.
@@ -308,6 +384,8 @@ def evaluate(
     min_t_stat: float = 2.0,
     event_gap_sigma: float = 3.0,
     max_edge_bps: float = 60.0,
+    ranking: Ranking | None = None,
+    symbol: str = "",
 ) -> OvernightSignal:
     """Decide whether to hold this symbol overnight.
 
@@ -362,6 +440,26 @@ def evaluate(
             pooled_bps=pooled.mean_bps,
         )
 
+    standing = ""
+    if ranking is not None and ranking.active:
+        percentile = ranking.percentiles.get(symbol)
+        if percentile is None:
+            return OvernightSignal(
+                0.0, 0.0, mean_on, mean_id, t, split.nights, vol_on,
+                (f"{split.nights} nights of its own history, and ranking its "
+                 f"overnight record needs {MIN_RANK_NIGHTS}"),
+                pooled_bps=pooled.mean_bps)
+        if percentile < ranking.min_rank:
+            return OvernightSignal(
+                0.0, 0.0, mean_on, mean_id, t, split.nights, vol_on,
+                (f"its own year of nights ({ranking.means_bps[symbol]:+.1f}bp) "
+                 f"ranks {percentile:.0%} of {ranking.peers}, under the "
+                 f"{ranking.min_rank:.0%} line: its returns have not been "
+                 f"coming overnight, and that persists"),
+                pooled_bps=pooled.mean_bps)
+        standing = (f"; its own year of nights ranks {percentile:.0%} of "
+                    f"{ranking.peers}")
+
     symbol_se = vol_on / math.sqrt(max(1, split.nights))
     prior_se = (pooled.vol_bps / math.sqrt(max(1, pooled.observations))
                 if pooled.vol_bps > 0 else 0.0)
@@ -385,7 +483,7 @@ def evaluate(
         value, edge, mean_on, mean_id, t, split.nights, vol_on,
         (f"market overnight drift {pooled.mean_bps:+.2f}bp (t={pooled.t_stat:+.2f}, "
          f"{pooled.observations:,} symbol-nights); this symbol's own "
-         f"{mean_on:+.1f}bp shrinks the estimate to {shrunk:+.2f}bp"),
+         f"{mean_on:+.1f}bp shrinks the estimate to {shrunk:+.2f}bp{standing}"),
         eligible=True, pooled_bps=pooled.mean_bps, shrunk_bps=shrunk,
     )
 

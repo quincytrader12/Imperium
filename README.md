@@ -116,6 +116,15 @@ around that fact rather than around the headline:
 - **Shrinkage toward the market.** A symbol that measured +13.6bp on its own
   history is traded as ~+4.6bp, by inverse-variance weighting. Its own data
   carries almost no information at this effect size.
+- **Selected by its own record.** A stock's *level* of overnight return is
+  noise, but its *rank* among its peers over a year is persistent: Lou, Polk
+  and Skouras (JFE 2019) found that stocks whose returns come overnight keep
+  earning overnight for years. So only stocks whose last 252 nights rank in the
+  top half of those measured are carried; the pooled estimate still sets the
+  size. A stock with under 120 nights of its own is not ranked and not carried,
+  and with fewer than 10 ranked peers no filter applies. On a small account this
+  also means fewer nights paying a round trip for the weakest part of the edge.
+  `IMPERIUM_OVERNIGHT_MIN_RANK` sets the line (0.5; 0 turns it off).
 - **Auction orders, not market orders.** Entry is **market-on-close** (`cls`),
   exit is **market-on-open** (`opg`). The trade is defined by being paid the
   close-to-open move; a market order at 15:45 takes intraday risk it is not
